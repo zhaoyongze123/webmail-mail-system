@@ -39,7 +39,7 @@ python3 scripts/plan_status.py validate
 | 任务ID | 状态 | 负责人 | 分支 | PR/提交 | 测试命令 | 测试结果 | 完成时间 | 风险备注 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | T01 | 已完成 | Codex | feature/t01-project-plan-automation | ebb91d1 | python3 scripts/plan_status.py validate && python3 scripts/plan_status.py evidence T01 --tests "python3 scripts/plan_status.py validate" --result "dry-run校验通过" --dry-run && python3 scripts/plan_status.py done T01 --commit DRYRUN --tests "python3 scripts/plan_status.py validate" --dry-run && python3 - <<PY<br>from pathlib import Path<br>text = Path(".github/workflows/plan-check.yml").read_text()<br>required = ["pull_request:", "push:", "validate-plan:", "actions/setup-python@v5", "python3 scripts/plan_status.py validate"]<br>missing = [item for item in required if item not in text]<br>if missing:<br>    raise SystemExit("缺少字段: " + ", ".join(missing))<br>print("CI 工作流关键字段校验通过")<br>PY<br> git diff --check | 通过：计划校验、dry-run 更新、CI 字段校验和 diff 空白检查均通过 | 2026-05-06T16:30:10+08:00 | 建立项目骨架与计划进度自动化 |
-| T02 | 未开始 |  |  |  |  |  |  | 本地开发环境 |
+| T02 | 进行中 | Codex | feature/t01-project-plan-automation |  | docker compose config && cd frontend && npm ci && npm run build && docker compose up -d --build && curl -fsS http://localhost:8000/api/health && curl -fsS http://localhost:8000/api/ready && curl -fsS http://localhost:5173/api/health && curl -I --max-time 10 http://localhost:5173/ && docker compose ps && python3 scripts/plan_status.py validate && git diff --check | 通过：Compose配置、前端构建、四服务启动、后端健康检查、前端代理健康检查、计划校验和空白检查均通过 |  | 本地开发环境 |
 | T03 | 未开始 |  |  |  |  |  |  | 后端基础框架 |
 | T04 | 未开始 |  |  |  |  |  |  | 数据库模型与迁移 |
 | T05 | 未开始 |  |  |  |  |  |  | Redis 会话与限流底座 |
