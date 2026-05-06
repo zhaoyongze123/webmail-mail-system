@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     app_secret_key: str = Field(default="change-me-in-local-env", alias="APP_SECRET_KEY")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     database_url: str = Field(
-        default="postgresql://webmail:webmail_dev_password@localhost:5432/webmail",
+        default="postgresql+psycopg://webmail:webmail_dev_password@localhost:5432/webmail",
         alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")

@@ -35,7 +35,7 @@ services:
     env_file:
       - .env.example
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://webmail:webmail_dev_password@postgres:5432/webmail}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://webmail:webmail_dev_password@postgres:5432/webmail}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     ports:
       - "8000:8000"
