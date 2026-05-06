@@ -14,6 +14,9 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    session_ttl_seconds: int = Field(default=28800, alias="SESSION_TTL_SECONDS")
+    login_fail_ttl_seconds: int = Field(default=900, alias="LOGIN_FAIL_TTL_SECONDS")
+    login_fail_limit: int = Field(default=5, alias="LOGIN_FAIL_LIMIT")
     cors_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
