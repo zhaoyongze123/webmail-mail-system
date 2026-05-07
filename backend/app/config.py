@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(default=28800, alias="SESSION_TTL_SECONDS")
     login_fail_ttl_seconds: int = Field(default=900, alias="LOGIN_FAIL_TTL_SECONDS")
     login_fail_limit: int = Field(default=5, alias="LOGIN_FAIL_LIMIT")
+    session_cookie_name: str = Field(default="webmail_session", alias="SESSION_COOKIE_NAME")
+    session_cookie_secure: bool = Field(default=False, alias="SESSION_COOKIE_SECURE")
+    mail_imap_host: str = Field(default="14.103.117.188", alias="MAIL_IMAP_HOST")
+    mail_imap_port: int = Field(default=143, alias="MAIL_IMAP_PORT")
+    mail_imap_ssl: bool = Field(default=False, alias="MAIL_IMAP_SSL")
+    mail_imap_starttls: bool = Field(default=False, alias="MAIL_IMAP_STARTTLS")
+    mail_smtp_host: str = Field(default="14.103.117.188", alias="MAIL_SMTP_HOST")
+    mail_smtp_port: int = Field(default=25, alias="MAIL_SMTP_PORT")
+    mail_smtp_ssl: bool = Field(default=False, alias="MAIL_SMTP_SSL")
+    mail_smtp_starttls: bool = Field(default=False, alias="MAIL_SMTP_STARTTLS")
     cors_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
