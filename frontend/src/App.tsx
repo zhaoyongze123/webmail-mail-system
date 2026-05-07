@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import ComposePanel, { type ComposeValues } from './mail/ComposePanel';
+import MailWorkspace from './mail/MailWorkspace';
+import MessageReader, { type MessageDetail } from './mail/MessageReader';
 
 type SessionUser = {
   email: string;
@@ -366,32 +369,72 @@ function LoginPage({
   );
 }
 
-function MailView({ email }: { email: string }) {
+function messageKey(folder: string, uid: string) {
+  return `${folder}:${uid}`;
+}
+
+function replyValues(message: MessageDetail): ComposeValues {
+  const from = Array.isArray(message.from) ? message.from[0] : message.from;
+  const email = typeof from === 'string' ? from : from?.email;
+  return {
+    to: email ? [email] : [],
+    subject: message.subject?.startsWith('Re:') ? message.subject : `Re: ${message.subject || '无主题'}`,
+    text_body: `\n\n---- 原始邮件 ----\n${message.text_body || ''}`,
+  };
+}
+
+function forwardValues(message: MessageDetail): ComposeValues {
+  return {
+    subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject || '无主题'}`,
+    text_body: `\n\n---- 转发邮件 ----\n${message.text_body || ''}`,
+  };
+}
+
+function MailView({ onSessionExpired }: { email: string; onSessionExpired: () => void }) {
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+  const [selectedUid, setSelectedUid] = useState<string | null>(null);
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeInitialValues, setComposeInitialValues] = useState<ComposeValues | null>(null);
+
+  const selectedMessageKey = selectedFolder && selectedUid ? messageKey(selectedFolder, selectedUid) : null;
+
+  const openCompose = (values: ComposeValues | null = null) => {
+    setComposeInitialValues(values);
+    setComposeOpen(true);
+  };
+
   return (
-    <section className="content-panel">
-      <div className="panel-title-row">
-        <div>
-          <p className="eyebrow">邮件</p>
-          <h2>收件箱概览</h2>
-        </div>
-        <span className="panel-status">已连接</span>
-      </div>
-      <p className="muted">当前账号：{email}</p>
-      <div className="mail-grid">
-        <article className="mail-card">
-          <strong>收件箱</strong>
-          <span>等待后续三栏工作台接入邮件列表。</span>
-        </article>
-        <article className="mail-card">
-          <strong>已发送</strong>
-          <span>发送链路与草稿能力将在后续任务补齐。</span>
-        </article>
-        <article className="mail-card">
-          <strong>草稿</strong>
-          <span>这里保留会话状态和路由框架入口。</span>
-        </article>
-      </div>
-    </section>
+    <>
+      <section className="content-panel mail-panel">
+        <MailWorkspace
+          selectedMessageKey={selectedMessageKey}
+          onOpenMessage={(uid, folder) => {
+            setSelectedFolder(folder);
+            setSelectedUid(uid);
+          }}
+          onCompose={() => openCompose()}
+          renderReader={(context) => (
+            <MessageReader
+              folder={context?.folder ?? selectedFolder}
+              uid={context?.uid ?? selectedUid}
+              onSessionExpired={onSessionExpired}
+              onReply={(message) => openCompose(replyValues(message))}
+              onForward={(message) => openCompose(forwardValues(message))}
+            />
+          )}
+        />
+      </section>
+      <ComposePanel
+        open={composeOpen}
+        initialValues={composeInitialValues}
+        onClose={() => setComposeOpen(false)}
+        onSent={() => {
+          setComposeOpen(false);
+          setComposeInitialValues(null);
+        }}
+        onSessionExpired={onSessionExpired}
+      />
+    </>
   );
 }
 
@@ -494,7 +537,13 @@ export default function App() {
       {view === 'settings' ? (
         <SettingsView email={session.user.email} onLogout={() => actions.signOut().then(() => navigate('/login'))} />
       ) : (
-        <MailView email={session.user.email} />
+        <MailView
+          email={session.user.email}
+          onSessionExpired={() => {
+            actions.markExpired('登录已过期，请重新登录');
+            navigate('/login');
+          }}
+        />
       )}
     </main>
   );

@@ -23,7 +23,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -225,6 +226,10 @@ input {
   padding: 24px;
 }
 
+.mail-panel {
+  padding: 18px;
+}
+
 .panel-title-row {
   display: flex;
   align-items: flex-start;
@@ -268,6 +273,246 @@ input {
   font-weight: 600;
 }
 
+.message-reader {
+  min-height: 100%;
+  background: #ffffff;
+  color: #152233;
+}
+
+.message-reader-empty,
+.message-reader[aria-busy="true"] {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 360px;
+  padding: 24px;
+  text-align: center;
+}
+
+.message-reader h2,
+.message-reader h3 {
+  margin: 0;
+}
+
+.message-reader-header {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border-bottom: 1px solid #e4e9f2;
+}
+
+.message-reader-header dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.message-reader-header dl div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.message-reader-header dt {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.message-reader-header dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.message-reader-actions,
+.compose-panel-footer,
+.compose-panel-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.message-reader button,
+.message-reader a,
+.compose-panel button {
+  border: 1px solid #c7d2e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17304d;
+  cursor: pointer;
+  padding: 9px 12px;
+  text-decoration: none;
+}
+
+.message-reader button:hover,
+.message-reader a:hover,
+.compose-panel button:hover {
+  border-color: #8ea6cc;
+}
+
+.message-reader-body {
+  padding: 20px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.message-reader-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.message-reader-attachments {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px 22px;
+  border-top: 1px solid #e4e9f2;
+}
+
+.message-reader-attachments ul,
+.compose-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.message-reader-attachments li,
+.compose-panel li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e4e9f2;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+}
+
+.message-reader-attachments li div,
+.compose-panel li {
+  min-width: 0;
+}
+
+.message-reader-attachments strong,
+.message-reader-attachments span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.message-reader-attachments span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.compose-panel {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #c7d2e3;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 22px 60px rgba(23, 48, 77, 0.22);
+}
+
+.compose-panel-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.compose-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #e4e9f2;
+  padding-bottom: 12px;
+}
+
+.compose-panel-header h2 {
+  margin: 0;
+}
+
+.compose-panel label {
+  display: grid;
+  gap: 6px;
+  color: #30455f;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.compose-panel input,
+.compose-panel textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #c7d2e3;
+  border-radius: 8px;
+  color: #152233;
+  padding: 10px 12px;
+}
+
+.compose-panel textarea {
+  resize: vertical;
+}
+
+.compose-panel section[aria-label="地址栏"],
+.compose-panel section[aria-label="附件上传"] {
+  display: grid;
+  gap: 10px;
+}
+
+.compose-panel section[aria-label="联系人建议"] {
+  display: grid;
+}
+
+.compose-panel [aria-label="联系人建议"] {
+  display: grid;
+  gap: 6px;
+}
+
+.compose-panel [aria-label="联系人建议"] li {
+  padding: 0;
+}
+
+.compose-panel [aria-label="联系人建议"] button {
+  width: 100%;
+  border: 0;
+  text-align: left;
+}
+
+.compose-panel section[aria-label="编辑工具栏"] {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.compose-panel button[aria-pressed="true"] {
+  border-color: #2457d6;
+  background: #edf4ff;
+  color: #1949c1;
+}
+
+.compose-panel progress {
+  width: 120px;
+}
+
+.compose-panel-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e4e9f2;
+  padding-top: 12px;
+}
+
+.compose-panel-footer span {
+  margin-right: auto;
+  color: #52657d;
+  font-size: 13px;
+}
+
 .error-actions {
   display: flex;
   gap: 12px;
@@ -288,5 +533,16 @@ input {
 
   .mail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .compose-panel {
+    inset: auto 12px 12px 12px;
+    width: auto;
+    max-height: calc(100vh - 24px);
+  }
+
+  .message-reader-header dl div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
