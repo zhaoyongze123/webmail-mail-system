@@ -54,6 +54,20 @@ def _search_criteria_args(criteria: str | Iterable[str]) -> tuple[str, ...]:
     return tuple(str(item) for item in criteria)
 
 
+def _parse_status_response(raw: str) -> dict[str, int]:
+    if "(" in raw and ")" in raw:
+        raw = raw.split("(", 1)[1].rsplit(")", 1)[0]
+    parts = raw.replace("\r", " ").replace("\n", " ").split()
+    result: dict[str, int] = {}
+    for index in range(0, len(parts) - 1, 2):
+        key = parts[index].upper()
+        try:
+            result[key] = int(parts[index + 1])
+        except ValueError:
+            continue
+    return result
+
+
 class ImapAdapter:
     def __init__(self, settings: ImapSettings) -> None:
         self.settings = settings
@@ -182,6 +196,23 @@ class ImapAdapter:
         ) as exc:
             raise _format_error("IMAP 选择文件夹", exc) from exc
 
+    def status(self, folder: str, items: str = "(MESSAGES UNSEEN UIDVALIDITY)") -> dict[str, int]:
+        client = self._ensure_client()
+        try:
+            status, data = client.status(folder, items)
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 状态查询失败: {status}", operation="status")
+            raw = _decode_text(data[0] if data else "")
+            return _parse_status_response(raw)
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 状态查询", exc) from exc
+
     def search_uids(self, criteria: str | Iterable[str]) -> list[str]:
         client = self._ensure_client()
         try:
@@ -200,6 +231,26 @@ class ImapAdapter:
             imaplib.IMAP4.readonly,
         ) as exc:
             raise _format_error("IMAP 搜索", exc) from exc
+
+    def uid_search(self, criteria: str | Iterable[str]) -> list[str]:
+        client = self._ensure_client()
+        try:
+            status, data = client.uid("SEARCH", None, *_search_criteria_args(criteria))
+            if status != "OK":
+                raise MailAdapterError(f"IMAP UID 搜索失败: {status}", operation="uid_search")
+            if not data:
+                return []
+            return [part for part in _decode_text(data[0]).split() if part]
+        except AttributeError:
+            return self.search_uids(criteria)
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP UID 搜索", exc) from exc
 
     def fetch_message_bytes(self, uid: str | bytes) -> bytes:
         client = self._ensure_client()
@@ -223,6 +274,49 @@ class ImapAdapter:
             imaplib.IMAP4.readonly,
         ) as exc:
             raise _format_error("IMAP 获取邮件", exc) from exc
+
+    def uid_fetch_message_bytes(self, uid: str | bytes) -> bytes:
+        client = self._ensure_client()
+        try:
+            status, data = client.uid("FETCH", uid, "(RFC822)")
+            if status != "OK":
+                raise MailAdapterError(f"IMAP UID 获取邮件失败: {status}", operation="uid_fetch_message_bytes")
+            for item in data or []:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    payload = item[1]
+                    if isinstance(payload, bytes):
+                        return payload
+                    if isinstance(payload, str):
+                        return payload.encode("utf-8")
+            raise MailAdapterError("IMAP UID 邮件内容为空", operation="uid_fetch_message_bytes")
+        except AttributeError:
+            return self.fetch_message_bytes(uid)
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP UID 获取邮件", exc) from exc
+
+    def mark_seen(self, uid: str | bytes) -> None:
+        client = self._ensure_client()
+        try:
+            if hasattr(client, "uid"):
+                status, _ = client.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+            else:
+                status, _ = client.store(uid, "+FLAGS", "\\Seen")
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 标记已读失败: {status}", operation="mark_seen")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 标记已读", exc) from exc
 
     def append_message(self, folder: str, message: EmailMessage) -> None:
         client = self._ensure_client()

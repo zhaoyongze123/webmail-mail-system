@@ -7,7 +7,7 @@ from pydantic import BaseModel, EmailStr
 
 from app.cache import LoginFailureLimiter, SessionStore
 from app.config import Settings, get_settings
-from app.crypto import encrypt_text
+from app.crypto import decrypt_text, encrypt_text
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
 from app.redis_client import get_redis_client
@@ -23,6 +23,9 @@ class LoginRequest(BaseModel):
 class AuthSession:
     session_id: str
     email: str
+    password: str
+    imap: dict[str, object]
+    smtp: dict[str, object]
 
 
 def _client_ip(request: Request) -> str:
@@ -147,7 +150,13 @@ def get_current_session(request: Request) -> AuthSession:
         raise AppError("AUTH_SESSION_EXPIRED", "登录已过期，请重新登录", http_status=status.HTTP_401_UNAUTHORIZED)
 
     session_store.refresh(session_id)
-    return AuthSession(session_id=session_id, email=str(session_data["email"]))
+    return AuthSession(
+        session_id=session_id,
+        email=str(session_data["email"]),
+        password=decrypt_text(str(session_data["secret"])),
+        imap=dict(session_data.get("imap") or {}),
+        smtp=dict(session_data.get("smtp") or {}),
+    )
 
 
 def logout_user(request: Request) -> None:
