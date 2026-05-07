@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from fastapi import Request, Response, status
 from pydantic import BaseModel, EmailStr
 
-from app.cache import LoginFailureLimiter, SessionStore
+from app.cache import LoginFailureLimiter, SessionStore, UserPreferenceStore
 from app.config import Settings, get_settings
 from app.crypto import decrypt_text, encrypt_text
 from app.errors import AppError
@@ -26,6 +26,7 @@ class AuthSession:
     password: str
     imap: dict[str, object]
     smtp: dict[str, object]
+    preferences: dict[str, object]
 
 
 def _client_ip(request: Request) -> str:
@@ -156,6 +157,7 @@ def get_current_session(request: Request) -> AuthSession:
         password=decrypt_text(str(session_data["secret"])),
         imap=dict(session_data.get("imap") or {}),
         smtp=dict(session_data.get("smtp") or {}),
+        preferences=UserPreferenceStore(client=get_redis_client()).get(str(session_data["email"])),
     )
 
 

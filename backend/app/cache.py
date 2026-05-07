@@ -10,6 +10,9 @@ import redis
 from app.config import Settings, get_settings
 from app.redis_client import get_redis_client
 
+DEFAULT_PAGE_SIZE = 30
+DEFAULT_MARK_READ_ON_OPEN = True
+
 
 class SessionStore:
     def __init__(
@@ -79,6 +82,47 @@ class LoginFailureLimiter:
     def key(ip: str, email: str) -> str:
         normalized = email.strip().lower()
         return f"login_fail:{ip}:{normalized}"
+
+
+class UserPreferenceStore:
+    def __init__(
+        self,
+        client: redis.Redis | None = None,
+    ) -> None:
+        self.client = client or get_redis_client()
+
+    def get(self, email: str) -> dict[str, Any]:
+        data = self.client.hgetall(self.key(email))
+        preferences: dict[str, Any] = {
+            "page_size": DEFAULT_PAGE_SIZE,
+            "mark_read_on_open": DEFAULT_MARK_READ_ON_OPEN,
+        }
+        if data:
+            for field in preferences:
+                if field in data:
+                    preferences[field] = self._decode(data[field])
+        return preferences
+
+    def update(self, email: str, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.get(email)
+        for field, value in payload.items():
+            if value is not None:
+                current[field] = value
+        self.client.hset(self.key(email), mapping={field: self._encode(value) for field, value in current.items()})
+        return current
+
+    @staticmethod
+    def key(email: str) -> str:
+        normalized = email.strip().lower()
+        return f"user_preferences:{normalized}"
+
+    @staticmethod
+    def _encode(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _decode(value: str) -> Any:
+        return json.loads(value)
 
 
 class JsonCache:

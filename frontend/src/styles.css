@@ -1,8 +1,8 @@
 :root {
   color-scheme: light;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #f3f6fb;
-  color: #132238;
+  background: #eef2f7;
+  color: #152233;
 }
 
 * {
@@ -19,23 +19,48 @@ body,
 body {
   min-height: 100vh;
   background:
-    linear-gradient(180deg, #edf3ff 0%, #f7f9fc 100%);
+    linear-gradient(180deg, #f7f9fc 0%, #eef2f7 100%);
 }
 
-.shell {
+button,
+input {
+  font: inherit;
+}
+
+.auth-shell,
+.app-shell {
   min-height: 100vh;
+  padding: 32px;
+}
+
+.auth-shell {
   display: grid;
   place-items: center;
-  padding: 32px;
 }
 
-.panel {
-  width: min(560px, 100%);
+.auth-card {
+  width: min(460px, 100%);
   background: #ffffff;
-  border: 1px solid #d7e0ee;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: 0 18px 50px rgba(24, 39, 75, 0.08);
+  border: 1px solid #d8e1ee;
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: 0 18px 48px rgba(25, 39, 64, 0.08);
+}
+
+.auth-copy h1,
+.app-header h1,
+.content-panel h2 {
+  margin: 0;
+  line-height: 1.12;
+}
+
+.auth-copy h1,
+.app-header h1 {
+  font-size: 30px;
+}
+
+.content-panel h2 {
+  font-size: 22px;
 }
 
 .eyebrow {
@@ -44,63 +69,224 @@ body {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #4b6cb7;
-}
-
-h1 {
-  margin: 0;
-  font-size: 40px;
-  line-height: 1.1;
+  color: #335f9e;
 }
 
 .subtitle {
-  margin: 12px 0 24px;
-  font-size: 18px;
-  line-height: 1.5;
-  color: #4a5a72;
+  margin: 10px 0 0;
+  color: #52657d;
+  line-height: 1.6;
 }
 
-.health-entry {
+.auth-form {
+  margin-top: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field > span,
+.checkbox-row,
+.muted,
+.settings-list dt,
+.panel-status,
+.mail-card span {
+  color: #54667e;
+}
+
+.field > span,
+.settings-list dt {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid #c7d2e3;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #ffffff;
+  color: #152233;
+}
+
+.field input:focus {
+  outline: 2px solid #c9dbff;
+  border-color: #6d8fd6;
+}
+
+.field-error {
+  color: #be123c;
+  font-size: 13px;
+}
+
+.checkbox-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.notice {
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #eef6ff;
+  color: #184079;
+  line-height: 1.5;
+}
+
+.notice-error {
+  background: #fff1f2;
+  color: #9f1239;
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 11px 16px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.primary-button {
+  background: #2457d6;
+  color: #fff;
+}
+
+.primary-button:hover {
+  background: #1949c1;
+}
+
+.secondary-button {
+  background: #fff;
+  border-color: #c7d2e3;
+  color: #17304d;
+}
+
+.secondary-button:hover {
+  border-color: #94a8c7;
+}
+
+.ghost-button {
+  background: transparent;
+  border-color: #c7d2e3;
+  color: #17304d;
+}
+
+.submit-button {
+  width: 100%;
+}
+
+.primary-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 18px 20px;
+  background: #fff;
+  border: 1px solid #d8e1ee;
+  border-radius: 14px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.account-badge,
+.panel-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid #d8e1ee;
+  background: #f7f9fc;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.content-panel {
+  background: #fff;
+  border: 1px solid #d8e1ee;
+  border-radius: 14px;
+  padding: 24px;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.mail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  padding: 16px 18px;
-  background: #f7faff;
-  border: 1px solid #d8e4f5;
+  margin-top: 20px;
+}
+
+.mail-card {
+  min-height: 132px;
+  border: 1px solid #d8e1ee;
   border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  background: #fbfcfe;
 }
 
-.label {
+.settings-list {
+  display: grid;
+  gap: 16px;
+  margin: 20px 0 24px;
+}
+
+.settings-list div {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-list dd {
+  margin: 0;
+  color: #152233;
   font-weight: 600;
-  color: #24344d;
 }
 
-.health-entry a {
-  color: #0f62fe;
-  text-decoration: none;
-  font-weight: 600;
+.error-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 24px;
 }
 
-.health-entry a:hover {
-  text-decoration: underline;
-}
-
-@media (max-width: 480px) {
-  .shell {
-    padding: 20px;
+@media (max-width: 768px) {
+  .auth-shell,
+  .app-shell {
+    padding: 18px;
   }
 
-  .panel {
-    padding: 24px;
-    border-radius: 14px;
+  .app-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
-  h1 {
-    font-size: 32px;
-  }
-
-  .subtitle {
-    font-size: 16px;
+  .mail-grid {
+    grid-template-columns: 1fr;
   }
 }

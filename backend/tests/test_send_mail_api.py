@@ -502,6 +502,18 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
     assert appended_message["To"] == "receiver@example.com"
     assert any(part.get_filename() == "report.txt" for part in appended_message.walk())
 
+    recent_contacts_key = "contacts:recent:user@example.com"
+    assert FakeImapAdapter.append_calls
+    assert fake_redis.zcard(recent_contacts_key) == 3
+    assert fake_redis.zscore(recent_contacts_key, "receiver@example.com") is not None
+    assert fake_redis.zscore(recent_contacts_key, "cc@example.com") is not None
+    assert fake_redis.zscore(recent_contacts_key, "bcc@example.com") is not None
+    assert set(fake_redis.zrevrange(recent_contacts_key, 0, -1)) == {
+        "receiver@example.com",
+        "cc@example.com",
+        "bcc@example.com",
+    }
+
 
 def test_send_mail_with_draft_id_deletes_saved_draft_after_sent_archive(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)

@@ -8,9 +8,11 @@ from pydantic import BaseModel, Field
 from app.attachments import upload_temp_attachments
 from app.auth import LoginRequest, clear_session_cookie, get_current_session, login_user, logout_user, set_session_cookie
 from app.compose import SendMailRequest, send_mail
+from app.contacts import search_recent_contacts
 from app.config import get_settings
 from app.drafts import DraftPayload, delete_draft, get_draft, save_draft
 from app.errors import AppError
+from app.cache import UserPreferenceStore
 from app.mailbox import (
     MessageOperationRequest,
     get_message_attachment,
@@ -42,6 +44,11 @@ class BulkMessageRequest(BaseModel):
     folder: str = "INBOX"
     uids: list[str] = Field(default_factory=list)
     target_folder: str | None = None
+
+
+class SettingsUpdateRequest(BaseModel):
+    page_size: int | None = Field(default=None, ge=1, le=100)
+    mark_read_on_open: bool | None = None
 
 
 @app.exception_handler(AppError)
@@ -138,6 +145,50 @@ def me(request: Request) -> dict[str, object]:
 
 
 @app.get(
+    "/api/settings",
+    tags=["settings"],
+    response_model=ApiResponse,
+    summary="获取当前账号设置",
+    response_description="当前账号和设置偏好",
+)
+def get_settings_api(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    preferences = UserPreferenceStore().get(session.email)
+    return success_response(
+        request,
+        {
+            "account": {"email": session.email},
+            "preferences": preferences,
+        },
+    )
+
+
+@app.put(
+    "/api/settings",
+    tags=["settings"],
+    response_model=ApiResponse,
+    summary="更新当前账号设置",
+    response_description="更新后的账号和设置偏好",
+)
+def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    preferences = UserPreferenceStore().update(
+        session.email,
+        {
+            "page_size": payload.page_size,
+            "mark_read_on_open": payload.mark_read_on_open,
+        },
+    )
+    return success_response(
+        request,
+        {
+            "account": {"email": session.email},
+            "preferences": preferences,
+        },
+    )
+
+
+@app.get(
     "/api/folders",
     tags=["mailbox"],
     response_model=ApiResponse,
@@ -160,15 +211,16 @@ def messages(
     request: Request,
     folder: str,
     page: int = 1,
-    page_size: int = 30,
+    page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
     session = get_current_session(request)
+    effective_page_size = page_size or int(session.preferences.get("page_size", 30) or 30)
     page_data = list_messages(
         session,
         folder,
         page=max(page, 1),
-        page_size=min(max(page_size, 1), 100),
+        page_size=min(max(effective_page_size, 1), 100),
         refresh=refresh,
     )
     return success_response(
@@ -196,16 +248,17 @@ def search_folder_messages(
     folder: str,
     q: str = Query(..., min_length=1),
     page: int = 1,
-    page_size: int = 30,
+    page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
     session = get_current_session(request)
+    effective_page_size = page_size or int(session.preferences.get("page_size", 30) or 30)
     page_data = search_messages(
         session,
         folder,
         q,
         page=max(page, 1),
-        page_size=min(max(page_size, 1), 100),
+        page_size=min(max(effective_page_size, 1), 100),
         refresh=refresh,
     )
     return success_response(
@@ -234,7 +287,7 @@ def search_messages_api(
     folder: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
     page: int = 1,
-    page_size: int = 30,
+    page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
     return search_folder_messages(request, folder, q, page, page_size, refresh)
@@ -365,6 +418,28 @@ async def upload_attachments(request: Request, files: list[UploadFile] = File(..
 def send_message(request: Request, payload: SendMailRequest) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, send_mail(session, payload))
+
+
+@app.get(
+    "/api/contacts",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="获取最近联系人",
+    response_description="联系人补全候选列表",
+)
+def contacts(
+    request: Request,
+    query: str = Query(default="", max_length=255),
+    limit: int = Query(default=10, ge=1, le=10),
+) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(
+        request,
+        {
+            "query": query,
+            "contacts": search_recent_contacts(session, query=query, limit=limit),
+        },
+    )
 
 
 @app.post(

@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr, Field, model_validator
 from app import mail_adapters
 from app.attachments import load_temp_attachment
 from app.auth import AuthSession
+from app.contacts import record_recent_contacts
 from app.config import get_settings
 from app.errors import AppError
 from app.mail_adapters import ImapSettings, MailAdapterError, SmtpSettings
@@ -122,6 +123,9 @@ def send_mail(session: AuthSession, payload: SendMailRequest) -> dict[str, Any]:
         ) from exc
     finally:
         imap.logout()
+
+    recipients = [str(item) for item in [*payload.to, *payload.cc, *payload.bcc]]
+    record_recent_contacts(session, recipients)
 
     if payload.draft_id:
         from app.drafts import delete_draft

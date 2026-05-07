@@ -473,8 +473,9 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
         adapter.select_folder(folder)
         raw = _uid_fetch_message_bytes(adapter, uid)
         detail = _message_detail(uid, raw)
-        adapter.mark_seen(uid)
-        detail["read"] = True
+        if bool(session.preferences.get("mark_read_on_open", True)):
+            adapter.mark_seen(uid)
+            detail["read"] = True
         return detail
     except MailAdapterError as exc:
         raise AppError(
