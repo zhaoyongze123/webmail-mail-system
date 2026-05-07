@@ -76,6 +76,16 @@ type ComposeForm = {
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
 type SendState = 'idle' | 'sending' | 'sent' | 'error';
+type ColorMenu = 'text' | 'highlight' | null;
+type ActiveStyles = {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strikeThrough: boolean;
+  insertOrderedList: boolean;
+  insertUnorderedList: boolean;
+};
+type ToggleStyleCommand = 'bold' | 'italic' | 'underline' | 'strikeThrough';
 
 const AUTOSAVE_DELAY_MS = 5000;
 const CONTACT_MIN_QUERY_LENGTH = 1;
@@ -90,6 +100,42 @@ const FONT_SIZES = [
   { label: '24', value: '24px' },
   { label: '32', value: '32px' },
 ];
+const COLOR_SWATCHES = [
+  '#1abc9c',
+  '#2ecc71',
+  '#3498db',
+  '#9b59b6',
+  '#536779',
+  '#f1c40f',
+  '#16a085',
+  '#27ae60',
+  '#2980b9',
+  '#8e44ad',
+  '#2c3e50',
+  '#f39c12',
+  '#e67e22',
+  '#e74c3c',
+  '#ecf0f1',
+  '#95a5a6',
+  '#d9d9d9',
+  '#ffffff',
+  '#d35400',
+  '#c0392b',
+  '#bdc3c7',
+  '#7f8c8d',
+  '#999999',
+  '#000000',
+];
+const TABLE_PICKER_ROWS = 8;
+const TABLE_PICKER_COLUMNS = 10;
+const DEFAULT_ACTIVE_STYLES: ActiveStyles = {
+  bold: false,
+  italic: false,
+  underline: false,
+  strikeThrough: false,
+  insertOrderedList: false,
+  insertUnorderedList: false,
+};
 
 function createEmptyForm(values?: ComposeValues | null): ComposeForm {
   const textBody = values?.text_body ?? '';
@@ -128,6 +174,15 @@ function formatFileSize(size: number) {
     return `${(size / 1024).toFixed(1)} KB`;
   }
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function isSessionExpired(error: Error & { code?: string; status?: number }) {
@@ -171,6 +226,7 @@ async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
 }
 
 function buildPayload(form: ComposeForm, attachmentIds: string[], draftId?: string | null) {
+  const htmlBody = form.htmlBody.replace(/\u200b/g, '').replace(/<span data-style-reset="true"><\/span>/g, '');
   return {
     draft_id: draftId || null,
     to: parseAddresses(form.to),
@@ -178,7 +234,7 @@ function buildPayload(form: ComposeForm, attachmentIds: string[], draftId?: stri
     bcc: parseAddresses(form.bcc),
     subject: form.subject,
     text_body: form.textBody,
-    html_body: form.htmlBody.trim() ? form.htmlBody : null,
+    html_body: htmlBody.trim() ? htmlBody : null,
     attachment_ids: attachmentIds,
   };
 }
@@ -236,8 +292,13 @@ export default function ComposePanel({
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
+  const [openColorMenu, setOpenColorMenu] = useState<ColorMenu>(null);
+  const [tablePickerOpen, setTablePickerOpen] = useState(false);
+  const [tablePickerSize, setTablePickerSize] = useState({ rows: 1, columns: 1 });
+  const [activeStyles, setActiveStyles] = useState<ActiveStyles>(DEFAULT_ACTIVE_STYLES);
   const bodyEditorRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const savedSelectionRef = useRef<Range | null>(null);
   const hasUserEditedRef = useRef(false);
 
   const uploadedAttachmentIds = useMemo(
@@ -257,6 +318,9 @@ export default function ComposePanel({
     setErrorMessage(null);
     hasUserEditedRef.current = false;
     setLoadedDraftId(null);
+    setOpenColorMenu(null);
+    setTablePickerOpen(false);
+    setActiveStyles(DEFAULT_ACTIVE_STYLES);
   }, [open, draftId, initialValues]);
 
   useEffect(() => {
@@ -357,15 +421,120 @@ export default function ComposePanel({
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function editorContainsNode(node: Node | null) {
+    return Boolean(node && bodyEditorRef.current?.contains(node));
+  }
+
+  function saveEditorSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (editorContainsNode(range.commonAncestorContainer)) {
+      savedSelectionRef.current = range.cloneRange();
+    }
+  }
+
+  function restoreEditorSelection() {
+    const selection = window.getSelection();
+    const range = savedSelectionRef.current;
+    if (!selection || !range) {
+      focusBodyEditor();
+      return;
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+    focusBodyEditor();
+  }
+
+  function collapseSelectionToEditorEnd() {
+    const editor = bodyEditorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection) {
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    savedSelectionRef.current = range.cloneRange();
+  }
+
+  function createPlainTypingAnchor() {
+    const editor = bodyEditorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection) {
+      return;
+    }
+    const anchor = document.createElement('span');
+    anchor.setAttribute('data-style-reset', 'true');
+    anchor.appendChild(document.createTextNode('\u200b'));
+    editor.appendChild(anchor);
+    const range = document.createRange();
+    range.setStart(anchor.firstChild ?? anchor, 1);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    savedSelectionRef.current = range.cloneRange();
+  }
+
+  function hasSavedTextSelection() {
+    const range = savedSelectionRef.current;
+    return Boolean(range && !range.collapsed && editorContainsNode(range.commonAncestorContainer));
+  }
+
+  function refreshActiveStyles() {
+    if (typeof document.queryCommandState !== 'function') {
+      return;
+    }
+    setActiveStyles((current) => ({
+      ...current,
+      insertOrderedList: document.queryCommandState('insertOrderedList'),
+      insertUnorderedList: document.queryCommandState('insertUnorderedList'),
+    }));
+  }
+
+  function hasEditorContent() {
+    const editor = bodyEditorRef.current;
+    return Boolean(editor?.textContent?.trim());
+  }
+
+  function getSelectionElement() {
+    const range = savedSelectionRef.current;
+    if (!range || !editorContainsNode(range.commonAncestorContainer)) {
+      return null;
+    }
+    const node = range.startContainer;
+    return node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  }
+
+  function readInlineStylesFromSelection() {
+    const element = getSelectionElement();
+    if (!element || !hasEditorContent()) {
+      return;
+    }
+    setActiveStyles((current) => ({
+      ...current,
+      bold: Boolean(element.closest('strong,b')),
+      italic: Boolean(element.closest('em,i')),
+      underline: Boolean(element.closest('u,[style*="underline"]')),
+      strikeThrough: Boolean(element.closest('s,strike,[style*="line-through"]')),
+    }));
+    refreshActiveStyles();
+  }
+
   function syncBodyFromEditor() {
     const editor = bodyEditorRef.current;
     if (!editor) {
       return;
     }
+    saveEditorSelection();
     markEdited();
     setForm((current) => ({
       ...current,
-      textBody: editor.innerText ?? editor.textContent ?? '',
+      textBody: (editor.innerText ?? editor.textContent ?? '').replace(/\u200b/g, ''),
       htmlBody: editor.innerHTML,
     }));
   }
@@ -375,9 +544,26 @@ export default function ComposePanel({
   }
 
   function runEditorCommand(command: string, value?: string) {
-    focusBodyEditor();
+    restoreEditorSelection();
     if (typeof document.execCommand === 'function') {
       document.execCommand(command, false, value);
+    }
+    saveEditorSelection();
+    refreshActiveStyles();
+    syncBodyFromEditor();
+  }
+
+  function toggleInlineStyle(command: ToggleStyleCommand) {
+    const nextEnabled = !activeStyles[command];
+    const nextStyles = { ...activeStyles, [command]: nextEnabled };
+    setActiveStyles((current) => ({ ...current, [command]: nextEnabled }));
+    restoreEditorSelection();
+    if (typeof document.execCommand === 'function') {
+      document.execCommand(command, false);
+    }
+    saveEditorSelection();
+    if (!nextStyles.bold && !nextStyles.italic && !nextStyles.underline && !nextStyles.strikeThrough) {
+      createPlainTypingAnchor();
     }
     syncBodyFromEditor();
   }
@@ -386,8 +572,108 @@ export default function ComposePanel({
     runEditorCommand('insertHTML', html);
   }
 
+  function hasActiveInlineStyle() {
+    return activeStyles.bold || activeStyles.italic || activeStyles.underline || activeStyles.strikeThrough;
+  }
+
+  function buildActiveInlineHtml(text: string) {
+    let html = escapeHtml(text);
+    if (activeStyles.bold) {
+      html = `<strong>${html}</strong>`;
+    }
+    if (activeStyles.italic) {
+      html = `<em>${html}</em>`;
+    }
+    if (activeStyles.underline) {
+      html = `<span style="text-decoration: underline;">${html}</span>`;
+    }
+    if (activeStyles.strikeThrough) {
+      html = `<s>${html}</s>`;
+    }
+    return html;
+  }
+
+  function buildMissingInlineHtml(text: string, element: Element | null) {
+    let html = escapeHtml(text);
+    if (activeStyles.bold && !element?.closest('strong,b')) {
+      html = `<strong>${html}</strong>`;
+    }
+    if (activeStyles.italic && !element?.closest('em,i')) {
+      html = `<em>${html}</em>`;
+    }
+    if (activeStyles.underline && !element?.closest('u,[style*="underline"]')) {
+      html = `<span style="text-decoration: underline;">${html}</span>`;
+    }
+    if (activeStyles.strikeThrough && !element?.closest('s,strike,[style*="line-through"]')) {
+      html = `<s>${html}</s>`;
+    }
+    return html;
+  }
+
+  function createInlineFragment(html: string) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    return template.content;
+  }
+
+  function wrapCurrentTextNodeWithActiveStyles() {
+    const editor = bodyEditorRef.current;
+    if (!editor || !hasActiveInlineStyle()) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const node = range.startContainer;
+    const textNode =
+      node.nodeType === Node.TEXT_NODE
+        ? (node as Text)
+        : node.childNodes[Math.max(0, range.startOffset - 1)]?.nodeType === Node.TEXT_NODE
+          ? (node.childNodes[Math.max(0, range.startOffset - 1)] as Text)
+          : null;
+    if (!textNode || !textNode.textContent || !editorContainsNode(textNode)) {
+      return;
+    }
+    const parent = textNode.parentElement;
+    if (!parent) {
+      return;
+    }
+    const hasAllActiveStyles =
+      (!activeStyles.bold || Boolean(parent.closest('strong,b'))) &&
+      (!activeStyles.italic || Boolean(parent.closest('em,i'))) &&
+      (!activeStyles.underline || Boolean(parent.closest('u,[style*="underline"]'))) &&
+      (!activeStyles.strikeThrough || Boolean(parent.closest('s,strike,[style*="line-through"]')));
+    if (hasAllActiveStyles) {
+      return;
+    }
+    const replacement = createInlineFragment(buildMissingInlineHtml(textNode.textContent, parent));
+    textNode.replaceWith(replacement);
+    collapseSelectionToEditorEnd();
+  }
+
   function applyInlineStyle(property: string, value: string) {
     insertHtmlAtCursor(`<span style="${property}: ${value};">${window.getSelection()?.toString() || '文字'}</span>`);
+  }
+
+  function applyColor(command: 'foreColor' | 'hiliteColor', color: string) {
+    saveEditorSelection();
+    const hasTextSelection = hasSavedTextSelection();
+    runEditorCommand(command, color);
+    if (hasTextSelection) {
+      collapseSelectionToEditorEnd();
+    }
+    syncBodyFromEditor();
+    setOpenColorMenu(null);
+  }
+
+  function applyCustomColor(command: 'foreColor' | 'hiliteColor') {
+    const color = window.prompt('请输入颜色值，例如 #1f2937');
+    if (!color) {
+      return;
+    }
+    applyColor(command, color);
   }
 
   function handleLinkInsert() {
@@ -402,9 +688,7 @@ export default function ComposePanel({
     insertHtmlAtCursor('<blockquote>引用内容</blockquote>');
   }
 
-  function handleTableInsert() {
-    const rows = Number(window.prompt('请输入表格行数', '3'));
-    const columns = Number(window.prompt('请输入表格列数', '3'));
+  function insertTable(rows: number, columns: number) {
     if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1 || rows > 20 || columns > 10) {
       setErrorMessage('表格行数需为 1-20，列数需为 1-10');
       return;
@@ -412,6 +696,13 @@ export default function ComposePanel({
     const cells = Array.from({ length: columns }, () => '<td><br></td>').join('');
     const body = Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join('');
     insertHtmlAtCursor(`<table><tbody>${body}</tbody></table><p><br></p>`);
+    setTablePickerOpen(false);
+  }
+
+  function handleCustomTableInsert() {
+    const rows = Number(window.prompt('请输入表格行数', String(tablePickerSize.rows)));
+    const columns = Number(window.prompt('请输入表格列数', String(tablePickerSize.columns)));
+    insertTable(rows, columns);
   }
 
   function handleInlineImageFiles(files: File[]) {
@@ -655,52 +946,217 @@ export default function ComposePanel({
               ))}
             </select>
             <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-icon-btn" aria-label="加粗" title="加粗" onClick={() => runEditorCommand('bold')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn"
+              aria-label="加粗"
+              aria-pressed={activeStyles.bold}
+              title="加粗"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => toggleInlineStyle('bold')}
+            >
               B
             </button>
-            <button type="button" className="toolbar-icon-btn italic" aria-label="斜体" title="斜体" onClick={() => runEditorCommand('italic')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn italic"
+              aria-label="斜体"
+              aria-pressed={activeStyles.italic}
+              title="斜体"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => toggleInlineStyle('italic')}
+            >
               I
             </button>
-            <button type="button" className="toolbar-icon-btn underline" aria-label="下划线" title="下划线" onClick={() => runEditorCommand('underline')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn underline"
+              aria-label="下划线"
+              aria-pressed={activeStyles.underline}
+              title="下划线"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => toggleInlineStyle('underline')}
+            >
               U
             </button>
-            <button type="button" className="toolbar-icon-btn strike" aria-label="删除线" title="删除线" onClick={() => runEditorCommand('strikeThrough')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn strike"
+              aria-label="删除线"
+              aria-pressed={activeStyles.strikeThrough}
+              title="删除线"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => toggleInlineStyle('strikeThrough')}
+            >
               S
             </button>
-            <label className="toolbar-color-control" title="文字颜色">
-              A
-              <input type="color" aria-label="文字颜色" defaultValue="#1f2937" onChange={(event) => runEditorCommand('foreColor', event.target.value)} />
-            </label>
-            <label className="toolbar-color-control highlight" title="背景高亮颜色">
-              A
-              <input type="color" aria-label="背景高亮颜色" defaultValue="#fff3a3" onChange={(event) => runEditorCommand('hiliteColor', event.target.value)} />
-            </label>
+            <div className="toolbar-popover-root">
+              <button
+                type="button"
+                className="toolbar-color-button"
+                aria-label="文字颜色"
+                aria-expanded={openColorMenu === 'text'}
+                title="文字颜色"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  saveEditorSelection();
+                  setTablePickerOpen(false);
+                  setOpenColorMenu((current) => (current === 'text' ? null : 'text'));
+                }}
+              >
+                <span className="toolbar-color-letter">A</span>
+                <span className="toolbar-caret">▾</span>
+              </button>
+              {openColorMenu === 'text' ? (
+                <div className="toolbar-popover color-palette" role="menu" aria-label="文字颜色色板">
+                  <div className="color-grid">
+                    {COLOR_SWATCHES.map((color) => (
+                      <button
+                        key={`text-${color}`}
+                        type="button"
+                        className="color-swatch"
+                        style={{ backgroundColor: color }}
+                        aria-label={`文字颜色 ${color}`}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          applyColor('foreColor', color);
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <button type="button" className="palette-more-button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyCustomColor('foreColor')}>
+                    其它颜色...
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <div className="toolbar-popover-root">
+              <button
+                type="button"
+                className="toolbar-color-button highlight"
+                aria-label="背景高亮颜色"
+                aria-expanded={openColorMenu === 'highlight'}
+                title="背景高亮颜色"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  saveEditorSelection();
+                  setTablePickerOpen(false);
+                  setOpenColorMenu((current) => (current === 'highlight' ? null : 'highlight'));
+                }}
+              >
+                <span className="toolbar-color-letter">A</span>
+                <span className="toolbar-caret">▾</span>
+              </button>
+              {openColorMenu === 'highlight' ? (
+                <div className="toolbar-popover color-palette" role="menu" aria-label="背景高亮颜色色板">
+                  <div className="color-grid">
+                    {COLOR_SWATCHES.map((color) => (
+                      <button
+                        key={`highlight-${color}`}
+                        type="button"
+                        className="color-swatch"
+                        style={{ backgroundColor: color }}
+                        aria-label={`背景高亮颜色 ${color}`}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          applyColor('hiliteColor', color);
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <button type="button" className="palette-more-button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyCustomColor('hiliteColor')}>
+                    其它颜色...
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-icon-btn" aria-label="有序列表" title="有序列表" onClick={() => runEditorCommand('insertOrderedList')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn"
+              aria-label="有序列表"
+              aria-pressed={activeStyles.insertOrderedList}
+              title="有序列表"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => runEditorCommand('insertOrderedList')}
+            >
               1.
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="无序列表" title="无序列表" onClick={() => runEditorCommand('insertUnorderedList')}>
+            <button
+              type="button"
+              className="toolbar-icon-btn"
+              aria-label="无序列表"
+              aria-pressed={activeStyles.insertUnorderedList}
+              title="无序列表"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => runEditorCommand('insertUnorderedList')}
+            >
               •
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="减少缩进" title="减少缩进" onClick={() => runEditorCommand('outdent')}>
+            <button type="button" className="toolbar-icon-btn" aria-label="减少缩进" title="减少缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('outdent')}>
               ←
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="增加缩进" title="增加缩进" onClick={() => runEditorCommand('indent')}>
+            <button type="button" className="toolbar-icon-btn" aria-label="增加缩进" title="增加缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('indent')}>
               →
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="引用块" title="引用块" onClick={handleQuoteInsert}>
+            <button type="button" className="toolbar-icon-btn" aria-label="引用块" title="引用块" onMouseDown={(event) => event.preventDefault()} onClick={handleQuoteInsert}>
               “”
             </button>
             <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" title="添加链接" onClick={handleLinkInsert}>
+            <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" title="添加链接" onMouseDown={(event) => event.preventDefault()} onClick={handleLinkInsert}>
               link
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="取消链接" title="取消链接" onClick={() => runEditorCommand('unlink')}>
+            <button type="button" className="toolbar-icon-btn" aria-label="取消链接" title="取消链接" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('unlink')}>
               Tx
             </button>
-            <button type="button" className="toolbar-icon-btn" aria-label="插入表格" title="插入表格" onClick={handleTableInsert}>
-              表
-            </button>
+            <div className="toolbar-popover-root">
+              <button
+                type="button"
+                className="toolbar-icon-btn"
+                aria-label="插入表格"
+                aria-expanded={tablePickerOpen}
+                title="插入表格"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  saveEditorSelection();
+                  setOpenColorMenu(null);
+                  setTablePickerOpen((current) => !current);
+                }}
+              >
+                表
+              </button>
+              {tablePickerOpen ? (
+                <div className="toolbar-popover table-picker" role="menu" aria-label="表格选择器">
+                  <div className="table-picker-size">
+                    {tablePickerSize.rows} × {tablePickerSize.columns} 表格
+                  </div>
+                  <div className="table-picker-grid">
+                    {Array.from({ length: TABLE_PICKER_ROWS }).map((_, rowIndex) =>
+                      Array.from({ length: TABLE_PICKER_COLUMNS }).map((__, columnIndex) => {
+                        const rows = rowIndex + 1;
+                        const columns = columnIndex + 1;
+                        const selected = rows <= tablePickerSize.rows && columns <= tablePickerSize.columns;
+                        return (
+                          <button
+                            key={`${rows}-${columns}`}
+                            type="button"
+                            className="table-picker-cell"
+                            data-selected={selected ? 'true' : 'false'}
+                            aria-label={`${rows} × ${columns} 表格`}
+                            onMouseEnter={() => setTablePickerSize({ rows, columns })}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => insertTable(rows, columns)}
+                          />
+                        );
+                      }),
+                    )}
+                  </div>
+                  <button type="button" className="palette-more-button" onMouseDown={(event) => event.preventDefault()} onClick={handleCustomTableInsert}>
+                    其它...
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <button type="button" className="toolbar-icon-btn" aria-label="插入图片" title="插入图片" onClick={() => imageInputRef.current?.click()}>
               图
             </button>
@@ -716,8 +1172,23 @@ export default function ComposePanel({
             aria-multiline="true"
             data-placeholder="Write your email..."
             data-empty={form.textBody.trim() ? 'false' : 'true'}
-            onInput={syncBodyFromEditor}
+            onInput={() => {
+              wrapCurrentTextNodeWithActiveStyles();
+              syncBodyFromEditor();
+            }}
             onBlur={syncBodyFromEditor}
+            onFocus={() => {
+              saveEditorSelection();
+              readInlineStylesFromSelection();
+            }}
+            onMouseUp={() => {
+              saveEditorSelection();
+              readInlineStylesFromSelection();
+            }}
+            onKeyUp={() => {
+              saveEditorSelection();
+              readInlineStylesFromSelection();
+            }}
             onPaste={() => window.setTimeout(syncBodyFromEditor, 0)}
           />
         </section>

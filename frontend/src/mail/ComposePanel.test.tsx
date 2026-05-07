@@ -37,6 +37,8 @@ describe('ComposePanel 写信发信草稿', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    Reflect.deleteProperty(document, 'execCommand');
+    Reflect.deleteProperty(document, 'queryCommandState');
   });
 
   it('打开写信面板并展示基础字段', () => {
@@ -224,9 +226,11 @@ describe('ComposePanel 写信发信草稿', () => {
 
   it('富文本工具会写入可发送的 HTML 正文', async () => {
     const user = userEvent.setup();
+    const commandState: Record<string, boolean> = { bold: false };
     const execCommand = vi.fn((command: string, _showUi?: boolean, value?: string) => {
       const editor = screen.getByLabelText('正文') as HTMLDivElement;
       if (command === 'bold') {
+        commandState.bold = !commandState.bold;
         editor.innerHTML += '<b>重点内容</b>';
         editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
         return true;
@@ -236,7 +240,16 @@ describe('ComposePanel 写信发信草稿', () => {
         editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
         return true;
       }
+      if (command === 'foreColor' && value) {
+        editor.innerHTML = `<font color="${value}">${editor.innerHTML}</font>`;
+        editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        return true;
+      }
       return true;
+    });
+    Object.defineProperty(document, 'queryCommandState', {
+      configurable: true,
+      value: vi.fn((command: string) => commandState[command] ?? false),
     });
     Object.defineProperty(document, 'execCommand', {
       configurable: true,
@@ -247,25 +260,170 @@ describe('ComposePanel 写信发信草稿', () => {
       if (url === '/api/drafts') {
         const body = JSON.parse(String(init?.body));
         expect(body.text_body).toContain('重点内容');
-        expect(body.html_body).toContain('<b>重点内容</b>');
+        expect(body.html_body).toContain('#e74c3c');
         expect(body.html_body).toContain('<table>');
         return Promise.resolve(mockApiResponse(success({ draft_id: 'draft-rich', status: 'saved' })));
       }
       throw new Error(`unexpected request: ${url}`);
     });
-    vi.spyOn(window, 'prompt')
-      .mockReturnValueOnce('2')
-      .mockReturnValueOnce('2');
     renderCompose();
 
     const editor = screen.getByLabelText('正文');
     await user.click(editor);
     await user.click(screen.getByRole('button', { name: '加粗' }));
     await user.click(screen.getByRole('button', { name: '插入表格' }));
+    await user.click(screen.getByRole('button', { name: '2 × 2 表格' }));
+    await user.click(screen.getByRole('button', { name: '文字颜色' }));
+    await user.click(screen.getByRole('button', { name: '文字颜色 #e74c3c' }));
     await user.click(screen.getByRole('button', { name: '保存草稿' }));
 
     await waitFor(() => {
       expect(screen.getByText('草稿状态：已保存')).not.toBeNull();
     });
+    expect(screen.getByRole('button', { name: '加粗' }).getAttribute('aria-pressed')).toBe('true');
+    expect(execCommand).toHaveBeenCalledWith('foreColor', false, '#e74c3c');
+  });
+
+  it('未选中文字时选择颜色会切换后续输入颜色', async () => {
+    const user = userEvent.setup();
+    let activeColor = '';
+    const execCommand = vi.fn((command: string, _showUi?: boolean, value?: string) => {
+      const editor = screen.getByLabelText('正文') as HTMLDivElement;
+      if (command === 'foreColor' && value) {
+        activeColor = value;
+        return true;
+      }
+      return true;
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    renderCompose();
+
+    const editor = screen.getByLabelText('正文') as HTMLDivElement;
+    await user.click(editor);
+    await user.click(screen.getByRole('button', { name: '文字颜色' }));
+    await user.click(screen.getByRole('button', { name: '文字颜色 #e74c3c' }));
+    editor.innerHTML = `<font color="${activeColor}">未选中文字也变色</font>`;
+    fireEvent.input(editor);
+
+    expect(activeColor).toBe('#e74c3c');
+    expect(editor.innerHTML).toContain('<font color="#e74c3c">未选中文字也变色</font>');
+  });
+
+  it('加粗斜体下划线删除线可多选并可取消选中', async () => {
+    const user = userEvent.setup();
+    const commandState: Record<string, boolean> = {
+      bold: false,
+      italic: false,
+      underline: false,
+      strikeThrough: false,
+    };
+    const execCommand = vi.fn((command: string) => {
+      commandState[command] = !commandState[command];
+      return true;
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    Object.defineProperty(document, 'queryCommandState', {
+      configurable: true,
+      value: vi.fn((command: string) => commandState[command] ?? false),
+    });
+    renderCompose();
+
+    const boldButton = screen.getByRole('button', { name: '加粗' });
+    const italicButton = screen.getByRole('button', { name: '斜体' });
+    const underlineButton = screen.getByRole('button', { name: '下划线' });
+    const strikeButton = screen.getByRole('button', { name: '删除线' });
+
+    await user.click(screen.getByLabelText('正文'));
+    await user.click(boldButton);
+    await user.click(italicButton);
+    await user.click(underlineButton);
+    await user.click(strikeButton);
+
+    expect(boldButton.getAttribute('aria-pressed')).toBe('true');
+    expect(italicButton.getAttribute('aria-pressed')).toBe('true');
+    expect(underlineButton.getAttribute('aria-pressed')).toBe('true');
+    expect(strikeButton.getAttribute('aria-pressed')).toBe('true');
+
+    await user.click(italicButton);
+    await user.click(strikeButton);
+
+    expect(boldButton.getAttribute('aria-pressed')).toBe('true');
+    expect(italicButton.getAttribute('aria-pressed')).toBe('false');
+    expect(underlineButton.getAttribute('aria-pressed')).toBe('true');
+    expect(strikeButton.getAttribute('aria-pressed')).toBe('false');
+    expect(execCommand).toHaveBeenCalledWith('bold', false);
+    expect(execCommand).toHaveBeenCalledWith('italic', false);
+    expect(execCommand).toHaveBeenCalledWith('underline', false);
+    expect(execCommand).toHaveBeenCalledWith('strikeThrough', false);
+  });
+
+  it('取消全部文字样式后后续输入不继承旧样式', async () => {
+    const user = userEvent.setup();
+    const commandState: Record<string, boolean> = {
+      bold: false,
+      underline: false,
+      italic: false,
+      strikeThrough: false,
+    };
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn((command: string) => {
+        commandState[command] = !commandState[command];
+        return true;
+      }),
+    });
+    Object.defineProperty(document, 'queryCommandState', {
+      configurable: true,
+      value: vi.fn((command: string) => commandState[command] ?? false),
+    });
+    renderCompose();
+
+    await user.click(screen.getByLabelText('正文'));
+    await user.click(screen.getByRole('button', { name: '加粗' }));
+    await user.click(screen.getByRole('button', { name: '下划线' }));
+    expect(screen.getByRole('button', { name: '加粗' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: '下划线' }).getAttribute('aria-pressed')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: '加粗' }));
+    await user.click(screen.getByRole('button', { name: '下划线' }));
+
+    expect(screen.getByRole('button', { name: '加粗' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: '下划线' }).getAttribute('aria-pressed')).toBe('false');
+    expect((screen.getByLabelText('正文') as HTMLDivElement).innerHTML).toContain('data-style-reset="true"');
+  });
+
+  it('开启文字样式后只影响当前输入文本，不回改已有正文', async () => {
+    const user = userEvent.setup();
+    const current = { bold: true, italic: false, underline: false, strikeThrough: false };
+    Object.defineProperty(document, 'queryCommandState', {
+      configurable: true,
+      value: vi.fn((command: string) => current[command as keyof typeof current] ?? false),
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => true),
+    });
+    renderCompose();
+
+    const editor = screen.getByLabelText('正文') as HTMLDivElement;
+    await user.click(editor);
+    await user.click(screen.getByRole('button', { name: '加粗' }));
+    editor.innerHTML = '已有文本<span>新输入</span>';
+    const textNode = editor.querySelector('span')?.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, textNode.textContent?.length ?? 0);
+    range.collapse(true);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    fireEvent.input(editor);
+
+    expect(editor.innerHTML).toBe('已有文本<span><strong>新输入</strong></span>');
   });
 });
