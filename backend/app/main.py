@@ -1,11 +1,15 @@
-from fastapi import FastAPI, Request, Response, status
+from urllib.parse import quote
+
+from fastapi import FastAPI, File, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
+from app.attachments import upload_temp_attachments
 from app.auth import LoginRequest, clear_session_cookie, get_current_session, login_user, logout_user, set_session_cookie
+from app.compose import SendMailRequest, send_mail
 from app.config import get_settings
 from app.errors import AppError
-from app.mailbox import get_message_detail, list_folders, list_messages
+from app.mailbox import get_message_attachment, get_message_detail, list_folders, list_messages
 from app.middleware import request_id_middleware
 from app.responses import app_error_response, error_response, success_response
 from app.schemas import ApiResponse
@@ -36,7 +40,7 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
         code="VALIDATION_ERROR",
         message="请求参数错误",
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        details={"errors": exc.errors()},
+        details={"errors": str(exc)},
     )
 
 
@@ -174,3 +178,48 @@ def messages(
 def message_detail(request: Request, folder: str, uid: str) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, get_message_detail(session, folder, uid))
+
+
+@app.get(
+    "/api/folders/{folder}/messages/{uid}/attachments/{attachment_id}",
+    tags=["mailbox"],
+    summary="下载邮件附件",
+    response_description="附件二进制内容",
+)
+def download_attachment(request: Request, folder: str, uid: str, attachment_id: str) -> Response:
+    session = get_current_session(request)
+    attachment = get_message_attachment(session, folder, uid, attachment_id)
+    filename = str(attachment["filename"])
+    return Response(
+        content=attachment["content"],
+        media_type=str(attachment["content_type"]),
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "X-Attachment-Id": attachment_id,
+        },
+    )
+
+
+@app.post(
+    "/api/attachments",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="上传临时附件",
+    response_description="临时附件元数据",
+)
+async def upload_attachments(request: Request, files: list[UploadFile] = File(...)) -> dict[str, object]:
+    session = get_current_session(request)
+    attachments = await upload_temp_attachments(session, files)
+    return success_response(request, {"attachments": attachments})
+
+
+@app.post(
+    "/api/messages/send",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="发送邮件",
+    response_description="SMTP 发送和已发送归档结果",
+)
+def send_message(request: Request, payload: SendMailRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, send_mail(session, payload))

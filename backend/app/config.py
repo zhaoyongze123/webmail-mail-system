@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     mail_smtp_port: int = Field(default=25, alias="MAIL_SMTP_PORT")
     mail_smtp_ssl: bool = Field(default=False, alias="MAIL_SMTP_SSL")
     mail_smtp_starttls: bool = Field(default=False, alias="MAIL_SMTP_STARTTLS")
+    attachment_max_mb: int = Field(default=9, alias="ATTACHMENT_MAX_MB")
+    attachment_ttl_seconds: int = Field(default=3600, alias="ATTACHMENT_TTL_SECONDS")
     cors_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",

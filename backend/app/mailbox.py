@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
-from email.message import EmailMessage, Message
+from email.message import Message
 from email.policy import default
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
@@ -220,7 +220,17 @@ def _message_datetime(message: Message) -> datetime | None:
     return parsed
 
 
-def _body_parts(message: Message) -> tuple[str, str, list[dict[str, Any]]]:
+def _safe_filename(value: str) -> str:
+    name = value.replace("\\", "/").split("/")[-1].strip()
+    name = re.sub(r"[\r\n\x00]+", "", name)
+    return name or "attachment"
+
+
+def _attachment_id(index: int) -> str:
+    return f"att_{index}"
+
+
+def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str, str, list[dict[str, Any]]]:
     html_body = ""
     text_body = ""
     attachments: list[dict[str, Any]] = []
@@ -231,13 +241,15 @@ def _body_parts(message: Message) -> tuple[str, str, list[dict[str, Any]]]:
         filename = part.get_filename()
         payload = part.get_payload(decode=True) or b""
         if filename or content_disposition == "attachment":
-            attachments.append(
-                {
-                    "filename": _decode_header_value(filename or "未命名附件"),
-                    "content_type": content_type,
-                    "size_bytes": len(payload),
-                }
-            )
+            item = {
+                "attachment_id": _attachment_id(len(attachments)),
+                "filename": _safe_filename(_decode_header_value(filename or "未命名附件")),
+                "content_type": content_type,
+                "size_bytes": len(payload),
+            }
+            if include_content:
+                item["content"] = payload
+            attachments.append(item)
             continue
         if content_type not in {"text/html", "text/plain"}:
             continue
@@ -386,6 +398,34 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
         raise AppError(
             "MAILBOX_MESSAGE_DETAIL_FAILED",
             "获取邮件详情失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def get_message_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    adapter = _connect_imap(session)
+    try:
+        adapter.select_folder(folder)
+        raw = _uid_fetch_message_bytes(adapter, uid)
+        message = message_from_bytes(raw, policy=default)
+        _, _, attachments = _body_parts(message, include_content=True)
+        for attachment in attachments:
+            if attachment["attachment_id"] == attachment_id:
+                return attachment
+        raise AppError(
+            "ATTACHMENT_NOT_FOUND",
+            "附件不存在",
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+    except AppError:
+        raise
+    except MailAdapterError as exc:
+        raise AppError(
+            "ATTACHMENT_DOWNLOAD_FAILED",
+            "下载附件失败",
             http_status=status.HTTP_502_BAD_GATEWAY,
             details={"operation": exc.operation},
         ) from exc

@@ -11,3 +11,4 @@ fakeredis==2.33.0
 cryptography==46.0.3
 email-validator==2.3.0
 bleach==6.3.0
+python-multipart==0.0.20
