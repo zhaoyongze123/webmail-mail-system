@@ -470,7 +470,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
 
 
 def login(client: TestClient, email: str, password: str):
-    return client.post(
+    response = client.post(
         "/api/auth/login",
         json={
             "email": email,
@@ -478,6 +478,10 @@ def login(client: TestClient, email: str, password: str):
             "remember": False,
         },
     )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if response.status_code == 200 and csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+    return response
 
 
 def _make_draft_payload(

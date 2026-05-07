@@ -273,6 +273,17 @@ textarea {
   font-weight: 600;
 }
 
+.settings-form {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .message-reader {
   min-height: 100%;
   background: #ffffff;
@@ -518,6 +529,13 @@ textarea {
   gap: 12px;
   flex-wrap: wrap;
   margin-top: 24px;
+}
+
+.mail-workspace__toolbar-row button,
+.mail-workspace__search button,
+.mail-workspace__bulk-actions button,
+.settings-actions button {
+  min-width: 0;
 }
 
 @media (max-width: 768px) {

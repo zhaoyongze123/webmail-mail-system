@@ -23,8 +23,10 @@ from app.mailbox import (
     search_messages,
 )
 from app.middleware import request_id_middleware
+from app.observability import metrics_store, record_audit_event
 from app.responses import app_error_response, error_response, success_response
 from app.schemas import ApiResponse
+from app.security import add_security_headers, log_sanitized_event, validate_attachment_id, validate_csrf_request
 
 
 settings = get_settings()
@@ -38,6 +40,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    log_sanitized_event(
+        "request",
+        method=request.method,
+        path=request.url.path,
+        query=dict(request.query_params),
+        cookie_count=len(request.cookies),
+    )
+    try:
+        validate_csrf_request(request)
+    except AppError as exc:
+        return add_security_headers(app_error_response(request, exc))
+    response = await call_next(request)
+    return add_security_headers(response)
 
 
 class BulkMessageRequest(BaseModel):
@@ -58,6 +77,13 @@ async def handle_app_error(request: Request, exc: AppError):
 
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path == "/api/messages/send":
+        record_audit_event(
+            request,
+            "compose.send_mail",
+            success=False,
+            metadata={"validation_error": True, "path": request.url.path},
+        )
     return error_response(
         request,
         code="VALIDATION_ERROR",
@@ -106,6 +132,17 @@ def ready(request: Request) -> dict[str, object]:
     )
 
 
+@app.get("/api/metrics", tags=["health"], response_model=ApiResponse)
+def metrics(request: Request) -> dict[str, object]:
+    return success_response(
+        request,
+        {
+            "status": "ok",
+            "metrics": metrics_store.snapshot(),
+        },
+    )
+
+
 @app.post(
     "/api/auth/login",
     tags=["auth"],
@@ -114,8 +151,8 @@ def ready(request: Request) -> dict[str, object]:
     response_description="登录成功后的当前用户信息",
 )
 def login(request: Request, response: Response, payload: LoginRequest) -> dict[str, object]:
-    session_id, user_data = login_user(request, payload)
-    set_session_cookie(response, session_id)
+    session_id, user_data, csrf_token = login_user(request, payload)
+    set_session_cookie(response, session_id, csrf_token)
     return success_response(request, user_data)
 
 
@@ -383,6 +420,7 @@ def delete_messages(request: Request, payload: BulkMessageRequest) -> dict[str, 
 )
 def download_attachment(request: Request, folder: str, uid: str, attachment_id: str) -> Response:
     session = get_current_session(request)
+    validate_attachment_id(attachment_id)
     attachment = get_message_attachment(session, folder, uid, attachment_id)
     filename = str(attachment["filename"])
     return Response(
@@ -417,7 +455,28 @@ async def upload_attachments(request: Request, files: list[UploadFile] = File(..
 )
 def send_message(request: Request, payload: SendMailRequest) -> dict[str, object]:
     session = get_current_session(request)
-    return success_response(request, send_mail(session, payload))
+    audit_metadata = {
+        "recipient_count": len(payload.to) + len(payload.cc) + len(payload.bcc),
+        "attachment_count": len(payload.attachment_ids),
+        "has_draft": bool(payload.draft_id),
+    }
+    try:
+        result = send_mail(session, payload)
+    except AppError as exc:
+        record_audit_event(
+            request,
+            "compose.send_mail",
+            success=False,
+            metadata={**audit_metadata, "error_code": exc.code},
+        )
+        raise
+    record_audit_event(
+        request,
+        "compose.send_mail",
+        success=True,
+        metadata=audit_metadata,
+    )
+    return success_response(request, result)
 
 
 @app.get(

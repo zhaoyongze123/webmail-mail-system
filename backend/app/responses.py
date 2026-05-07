@@ -27,7 +27,7 @@ def error_response(
     status_code: int,
     details: dict[str, Any] | None = None,
 ) -> JSONResponse:
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status_code,
         content={
             "success": False,
@@ -40,6 +40,8 @@ def error_response(
             "request_id": get_request_id(request),
         },
     )
+    response.headers["X-Request-ID"] = get_request_id(request)
+    return response
 
 
 def app_error_response(request: Request, exc: AppError) -> JSONResponse:

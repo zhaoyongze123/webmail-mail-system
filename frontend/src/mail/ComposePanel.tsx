@@ -78,6 +78,8 @@ type RichMode = 'plain' | 'rich';
 
 const AUTOSAVE_DELAY_MS = 5000;
 const CONTACT_MIN_QUERY_LENGTH = 1;
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
+const CSRF_COOKIE_NAME = 'webmail_csrf';
 
 function createEmptyForm(values?: ComposeValues | null): ComposeForm {
   return {
@@ -120,8 +122,26 @@ function isSessionExpired(error: Error & { code?: string; status?: number }) {
   return error.status === 401 || error.code === 'AUTH_SESSION_EXPIRED';
 }
 
+function readCookie(name: string): string | null {
+  const prefix = `${encodeURIComponent(name)}=`;
+  for (const item of window.document.cookie.split(';')) {
+    const trimmed = item.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return null;
+}
+
 async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
-  const headers = init?.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...(init?.headers ?? {}) };
+  const headers = new Headers(init?.body instanceof FormData ? init?.headers : { 'Content-Type': 'application/json', ...(init?.headers ?? {}) });
+  const method = (init?.method || 'GET').toUpperCase();
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers.set('X-CSRF-Token', csrfToken);
+    }
+  }
   const response = await fetch(input, {
     credentials: 'include',
     headers,

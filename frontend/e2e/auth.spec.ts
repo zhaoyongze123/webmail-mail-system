@@ -49,6 +49,7 @@ async function mockAuth(page: Page, loginResponse: typeof invalidCredentials | t
 async function mockMailApi(page: Page) {
   let draftRequests = 0;
   let sendRequests = 0;
+  let settingsSaveCount = 0;
   let releaseSend: (() => void) | null = null;
 
   await page.route('**/api/folders', async (route) => {
@@ -88,6 +89,38 @@ async function mockMailApi(page: Page) {
               snippet: '请查看附件里的报价。',
             },
           ],
+        },
+        error: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/folders/INBOX/messages/search?**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q') ?? '';
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          folder: 'INBOX',
+          page: 1,
+          page_size: 30,
+          total: query ? 1 : 0,
+          messages: query
+            ? [
+                {
+                  uid: '101',
+                  subject: '客户报价确认',
+                  sender: { name: 'Alice', email: 'alice@example.com' },
+                  date: '2026-05-07T09:00:00+08:00',
+                  read: false,
+                  has_attachments: true,
+                  snippet: '请查看附件里的报价。',
+                },
+              ]
+            : [],
+          query,
         },
         error: null,
       }),
@@ -190,8 +223,77 @@ async function mockMailApi(page: Page) {
     });
   });
 
+  await page.route('**/api/folders/INBOX/messages/operations', async (route) => {
+    const payload = route.request().postDataJSON() as { action: string; uids: string[] };
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { action: payload.action, folder: 'INBOX', uids: payload.uids },
+        error: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/messages/move?**', async (route) => {
+    const payload = route.request().postDataJSON() as { folder: string; uids: string[]; target_folder: string };
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { action: 'move', folder: payload.folder, target_folder: payload.target_folder, uids: payload.uids },
+        error: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/messages/delete?**', async (route) => {
+    const payload = route.request().postDataJSON() as { folder: string; uids: string[] };
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { action: 'delete', folder: payload.folder, uids: payload.uids },
+        error: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/settings', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            account: { email: 'user@example.com' },
+            preferences: { page_size: 30, mark_read_on_open: true },
+          },
+          error: null,
+        }),
+      });
+      return;
+    }
+    if (route.request().method() === 'PUT') {
+      settingsSaveCount += 1;
+      const payload = route.request().postDataJSON() as { page_size: number; mark_read_on_open: boolean };
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            account: { email: 'user@example.com' },
+            preferences: payload,
+          },
+          error: null,
+        }),
+      });
+    }
+  });
+
   return {
     getDraftRequests: () => draftRequests,
+    getSettingsSaveCount: () => settingsSaveCount,
     getSendRequests: () => sendRequests,
     releaseSend: () => releaseSend?.(),
   };
@@ -246,6 +348,32 @@ test('工作台可切换文件夹并在桌面和移动尺寸渲染', async ({ pa
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: 'test-results/t20-mobile-workspace.png', fullPage: true });
   await expect(page.getByRole('navigation', { name: '文件夹' })).toBeVisible();
+});
+
+test('工作台支持搜索、批量操作和设置保存', async ({ page }) => {
+  await mockAuth(page, currentUser);
+  const mailApi = await mockMailApi(page);
+
+  await page.goto('/login');
+  await page.getByLabel('邮箱地址').fill('user@example.com');
+  await page.getByLabel('密码').fill('correct-password');
+  await page.getByRole('button', { name: '登录' }).click();
+  await page.waitForURL('**/mail');
+
+  await page.getByLabel('搜索当前文件夹').fill('客户');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await expect(page.getByText('搜索：客户')).toBeVisible();
+
+  await page.getByLabel('选择邮件 客户报价确认').check();
+  await page.getByRole('button', { name: '执行' }).click();
+  await expect(page.getByText('已更新 1 封邮件')).toBeVisible();
+
+  await page.getByRole('button', { name: '设置偏好' }).click();
+  await page.waitForURL('**/settings');
+  await page.getByLabel('每页邮件数').fill('20');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await expect(page.getByText('设置已保存')).toBeVisible();
+  await expect.poll(() => mailApi.getSettingsSaveCount()).toBe(1);
 });
 
 test('可打开邮件详情、净化危险 HTML 并下载附件', async ({ page }) => {

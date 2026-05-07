@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.errors import AppError
 from app import mail_adapters, redis_client
 from app.mail_adapters import ImapSettings, MailAdapterError, _parse_status_response
+from app.security import validate_attachment_id
 
 
 SYSTEM_FOLDERS = [
@@ -489,6 +490,7 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
 
 
 def get_message_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    validate_attachment_id(attachment_id)
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)

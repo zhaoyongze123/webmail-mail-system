@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import pydantic.networks as pydantic_networks
 
 from app.mail_adapters import MailAdapterError
+from app.observability import get_recent_audit_events, reset_observability_state
 
 
 class FakeSettings:
@@ -109,11 +110,12 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
     monkeypatch.setattr(auth_module, "ImapAdapter", FakeImapAdapter)
 
     main_module = importlib.import_module("app.main")
+    reset_observability_state()
     return TestClient(main_module.app, raise_server_exceptions=False)
 
 
 def login(client: TestClient, email: str, password: str, *, remember: bool = False):
-    return client.post(
+    response = client.post(
         "/api/auth/login",
         json={
             "email": email,
@@ -121,6 +123,10 @@ def login(client: TestClient, email: str, password: str, *, remember: bool = Fal
             "remember": remember,
         },
     )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if response.status_code == 200 and csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+    return response
 
 
 def test_login_success_sets_session_cookie_and_me_returns_email(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,9 +139,11 @@ def test_login_success_sets_session_cookie_and_me_returns_email(monkeypatch: pyt
     assert body["success"] is True
     assert body["error"] is None
     assert body["data"]["email"] == "user@example.com"
+    assert response.headers["X-Request-ID"].startswith("req_")
     set_cookie = response.headers.get("set-cookie", "")
     assert "webmail_session=" in set_cookie
     assert "HttpOnly" in set_cookie
+    assert any(event["event_type"] == "auth.login" and event["success"] is True for event in get_recent_audit_events())
 
     me_response = client.get("/api/auth/me")
     assert me_response.status_code == 200
@@ -156,6 +164,7 @@ def test_logout_invalidates_session(monkeypatch: pytest.MonkeyPatch) -> None:
     logout_body = logout_response.json()
     assert logout_body["success"] is True
     assert logout_body["error"] is None
+    assert any(event["event_type"] == "auth.logout" for event in get_recent_audit_events())
 
     me_response = client.get("/api/auth/me")
     assert me_response.status_code == 401
@@ -174,6 +183,7 @@ def test_login_wrong_password_returns_invalid_credentials(monkeypatch: pytest.Mo
     assert body["success"] is False
     assert body["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
     assert body["error"]["details"] == {}
+    assert any(event["event_type"] == "auth.login" and event["success"] is False for event in get_recent_audit_events())
 
 
 def test_login_repeated_failures_trigger_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,3 +200,17 @@ def test_login_repeated_failures_trigger_rate_limit(monkeypatch: pytest.MonkeyPa
     second_body = second_response.json()
     assert second_body["success"] is False
     assert second_body["error"]["code"] == "AUTH_RATE_LIMITED"
+    assert any(event["event_type"] == "auth.login.rate_limited" for event in get_recent_audit_events())
+
+
+def test_request_log_does_not_expose_password(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    client = build_client(monkeypatch)
+
+    with caplog.at_level("INFO"):
+        response = login(client, "user@example.com", "correct-password")
+
+    assert response.status_code == 200
+    log_blob = "\n".join(record.getMessage() for record in caplog.records)
+    assert "correct-password" not in log_blob
+    assert '"path":"/api/auth/login"' in log_blob
+    assert '"request_id":"' in log_blob

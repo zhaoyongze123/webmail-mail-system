@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { fetchSettings, saveSettings } from './mail/api';
 import ComposePanel, { type ComposeValues } from './mail/ComposePanel';
 import MailWorkspace from './mail/MailWorkspace';
 import MessageReader, { type MessageDetail } from './mail/MessageReader';
+import type { UserSettingsPreferences } from './mail/types';
 
 type SessionUser = {
   email: string;
@@ -50,7 +52,18 @@ type LoginFormErrors = {
   form?: string;
 };
 
+type SettingsFormState = {
+  page_size: string;
+  mark_read_on_open: boolean;
+};
+
+type SettingsFormErrors = {
+  page_size?: string;
+};
+
 const SESSION_KEY = 'webmail.session';
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
+const CSRF_COOKIE_NAME = 'webmail_csrf';
 
 function readSessionStorage(): SessionUser | null {
   try {
@@ -76,13 +89,32 @@ function persistSession(user: SessionUser | null) {
   window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
 }
 
+function readCookie(name: string): string | null {
+  const prefix = `${encodeURIComponent(name)}=`;
+  for (const item of window.document.cookie.split(';')) {
+    const trimmed = item.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return null;
+}
+
 async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || 'GET').toUpperCase();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(init?.headers ?? {}),
+  } as Record<string, string>;
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
   const response = await fetch(input, {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    headers,
     ...init,
   });
   const payload = (await response.json()) as ApiResponse<T>;
@@ -390,7 +422,13 @@ function forwardValues(message: MessageDetail): ComposeValues {
   };
 }
 
-function MailView({ onSessionExpired }: { email: string; onSessionExpired: () => void }) {
+function MailView({
+  onSessionExpired,
+  onOpenSettings,
+}: {
+  onSessionExpired: () => void;
+  onOpenSettings: () => void;
+}) {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
@@ -413,6 +451,7 @@ function MailView({ onSessionExpired }: { email: string; onSessionExpired: () =>
             setSelectedUid(uid);
           }}
           onCompose={() => openCompose()}
+          onOpenSettings={onOpenSettings}
           renderReader={(context) => (
             <MessageReader
               folder={context?.folder ?? selectedFolder}
@@ -438,13 +477,84 @@ function MailView({ onSessionExpired }: { email: string; onSessionExpired: () =>
   );
 }
 
-function SettingsView({ email, onLogout }: { email: string; onLogout: () => void }) {
+function SettingsView({ email, onBack, onLogout }: { email: string; onBack: () => void; onLogout: () => void }) {
+  const [form, setForm] = useState<SettingsFormState>({
+    page_size: '30',
+    mark_read_on_open: true,
+  });
+  const [errors, setErrors] = useState<SettingsFormErrors>({});
+  const [message, setMessage] = useState<string | null>(null);
+  const [status, setStatus] = useState<'loading' | 'idle' | 'saving' | 'error'>('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchSettings()
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setForm({
+          page_size: String(payload.preferences.page_size ?? 30),
+          mark_read_on_open: Boolean(payload.preferences.mark_read_on_open),
+        });
+        setStatus('idle');
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setMessage(error instanceof Error ? error.message : '设置加载失败');
+        setStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextErrors: SettingsFormErrors = {};
+    const pageSize = Number(form.page_size);
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      nextErrors.page_size = '每页邮件数必须在 1 到 100 之间';
+    }
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
+      return;
+    }
+    setStatus('saving');
+    setMessage(null);
+    try {
+      const payload = await saveSettings({
+        page_size: pageSize,
+        mark_read_on_open: form.mark_read_on_open,
+      } satisfies Partial<UserSettingsPreferences>);
+      setForm({
+        page_size: String(payload.preferences.page_size ?? pageSize),
+        mark_read_on_open: Boolean(payload.preferences.mark_read_on_open),
+      });
+      setMessage('设置已保存');
+      setStatus('idle');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '设置保存失败');
+      setStatus('error');
+    }
+  };
+
   return (
     <section className="content-panel">
       <div className="panel-title-row">
         <div>
           <p className="eyebrow">设置</p>
-          <h2>账号与会话</h2>
+          <h2>账号偏好</h2>
+        </div>
+        <div className="settings-actions">
+          <button type="button" className="secondary-button" onClick={onBack}>
+            返回邮件
+          </button>
+          <button type="button" className="ghost-button" onClick={onLogout}>
+            退出登录
+          </button>
         </div>
       </div>
       <dl className="settings-list">
@@ -452,14 +562,38 @@ function SettingsView({ email, onLogout }: { email: string; onLogout: () => void
           <dt>当前账号</dt>
           <dd>{email}</dd>
         </div>
-        <div>
-          <dt>会话状态</dt>
-          <dd>已登录</dd>
-        </div>
       </dl>
-      <button type="button" className="secondary-button" onClick={onLogout}>
-        退出登录
-      </button>
+      <form className="settings-form" onSubmit={submit}>
+        <label className="field">
+          <span>每页邮件数</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={form.page_size}
+            onChange={(event) => setForm((current) => ({ ...current, page_size: event.target.value }))}
+          />
+          {errors.page_size ? <small className="field-error">{errors.page_size}</small> : null}
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.mark_read_on_open}
+            onChange={(event) => setForm((current) => ({ ...current, mark_read_on_open: event.target.checked }))}
+          />
+          <span>打开邮件时自动标记为已读</span>
+        </label>
+        {message ? (
+          <div className={`notice ${status === 'error' ? 'notice-error' : ''}`} role="status">
+            {message}
+          </div>
+        ) : null}
+        <div className="settings-actions">
+          <button type="submit" className="primary-button" disabled={status === 'loading' || status === 'saving'}>
+            {status === 'saving' ? '保存中...' : '保存设置'}
+          </button>
+        </div>
+      </form>
     </section>
   );
 }
@@ -535,14 +669,18 @@ export default function App() {
     <main className="app-shell">
       <AppHeader email={session.user.email} onNavigate={navigate} onLogout={() => actions.signOut().then(() => navigate('/login'))} />
       {view === 'settings' ? (
-        <SettingsView email={session.user.email} onLogout={() => actions.signOut().then(() => navigate('/login'))} />
+        <SettingsView
+          email={session.user.email}
+          onBack={() => navigate('/mail')}
+          onLogout={() => actions.signOut().then(() => navigate('/login'))}
+        />
       ) : (
         <MailView
-          email={session.user.email}
           onSessionExpired={() => {
             actions.markExpired('登录已过期，请重新登录');
             navigate('/login');
           }}
+          onOpenSettings={() => navigate('/settings')}
         />
       )}
     </main>

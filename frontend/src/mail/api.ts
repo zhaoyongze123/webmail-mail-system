@@ -1,12 +1,43 @@
-import type { ApiResponse, FolderListPayload, MessageListPayload } from './types';
+import type {
+  ApiResponse,
+  FolderListPayload,
+  MessageListPayload,
+  MessageOperationAction,
+  MessageOperationPayload,
+  MessageOperationResult,
+  SettingsPayload,
+  UserSettingsPreferences,
+} from './types';
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
+const CSRF_COOKIE_NAME = 'webmail_csrf';
+
+function readCookie(name: string): string | null {
+  const prefix = `${encodeURIComponent(name)}=`;
+  for (const item of window.document.cookie.split(';')) {
+    const trimmed = item.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return null;
+}
 
 async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || 'GET').toUpperCase();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(init?.headers ?? {}),
+  } as Record<string, string>;
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
   const response = await fetch(input, {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    headers,
     ...init,
   });
   const payload = (await response.json()) as ApiResponse<T>;
@@ -36,5 +67,69 @@ export async function fetchFolderMessages(
   }
   return requestApi<MessageListPayload>(`/api/folders/${encodeURIComponent(folder)}/messages?${params.toString()}`, {
     method: 'GET',
+  });
+}
+
+export async function searchFolderMessages(
+  folder: string,
+  query: string,
+  options: { page?: number; pageSize?: number; refresh?: boolean } = {},
+): Promise<MessageListPayload> {
+  const params = new URLSearchParams({
+    q: query,
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 30),
+  });
+  if (options.refresh) {
+    params.set('refresh', 'true');
+  }
+  return requestApi<MessageListPayload>(`/api/folders/${encodeURIComponent(folder)}/messages/search?${params.toString()}`, {
+    method: 'GET',
+  });
+}
+
+export async function updateMessageOperation(
+  folder: string,
+  payload: MessageOperationPayload,
+): Promise<MessageOperationResult> {
+  return requestApi<MessageOperationResult>(`/api/folders/${encodeURIComponent(folder)}/messages/operations`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function moveMessages(
+  folder: string,
+  uids: string[],
+  targetFolder: string,
+): Promise<MessageOperationResult> {
+  return requestApi<MessageOperationResult>(`/api/messages/move?folder=${encodeURIComponent(folder)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      folder,
+      uids,
+      target_folder: targetFolder,
+    }),
+  });
+}
+
+export async function deleteMessages(folder: string, uids: string[]): Promise<MessageOperationResult> {
+  return requestApi<MessageOperationResult>(`/api/messages/delete?folder=${encodeURIComponent(folder)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      folder,
+      uids,
+    }),
+  });
+}
+
+export async function fetchSettings(): Promise<SettingsPayload> {
+  return requestApi<SettingsPayload>('/api/settings', { method: 'GET' });
+}
+
+export async function saveSettings(preferences: Partial<UserSettingsPreferences>): Promise<SettingsPayload> {
+  return requestApi<SettingsPayload>('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify(preferences),
   });
 }

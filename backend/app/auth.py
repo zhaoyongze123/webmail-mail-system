@@ -11,6 +11,8 @@ from app.crypto import decrypt_text, encrypt_text
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
 from app.redis_client import get_redis_client
+from app.security import issue_session_cookies, new_csrf_token, clear_session_cookies
+from app.observability import record_audit_event
 
 
 class LoginRequest(BaseModel):
@@ -68,7 +70,7 @@ def authenticate_mailbox(email: str, password: str, settings: Settings | None = 
             pass
 
 
-def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, object]]:
+def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, object], str]:
     settings = get_settings()
     redis_client = get_redis_client()
     limiter = LoginFailureLimiter(client=redis_client, settings=settings)
@@ -76,6 +78,12 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
     email = payload.email.lower()
 
     if limiter.is_limited(ip, email):
+        record_audit_event(
+            request,
+            "auth.login.rate_limited",
+            success=False,
+            metadata={"email": email, "ip": ip},
+        )
         raise AppError(
             "AUTH_RATE_LIMITED",
             "登录失败次数过多，请稍后再试",
@@ -85,8 +93,20 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
     try:
         authenticate_mailbox(email, payload.password, settings)
     except AppError:
+        record_audit_event(
+            request,
+            "auth.login",
+            success=False,
+            metadata={"email": email, "reason": "invalid_credentials"},
+        )
         failures = limiter.record_failure(ip, email)
         if failures >= settings.login_fail_limit:
+            record_audit_event(
+                request,
+                "auth.login.rate_limited",
+                success=False,
+                metadata={"email": email, "ip": ip},
+            )
             raise AppError(
                 "AUTH_RATE_LIMITED",
                 "登录失败次数过多，请稍后再试",
@@ -96,6 +116,7 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
 
     limiter.clear(ip, email)
     session_store = SessionStore(client=redis_client, settings=settings)
+    csrf_token = new_csrf_token()
     session_id = session_store.create(
         {
             "email": email,
@@ -112,31 +133,24 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
                 "starttls": settings.mail_smtp_starttls,
             },
             "secret": encrypt_text(payload.password),
+            "csrf_token": csrf_token,
         }
     )
-    return session_id, {"email": email}
-
-
-def set_session_cookie(response: Response, session_id: str) -> None:
-    settings = get_settings()
-    response.set_cookie(
-        settings.session_cookie_name,
-        session_id,
-        max_age=settings.session_ttl_seconds,
-        httponly=True,
-        secure=settings.session_cookie_secure,
-        samesite="lax",
+    record_audit_event(
+        request,
+        "auth.login",
+        success=True,
+        metadata={"email": email, "remember": payload.remember},
     )
+    return session_id, {"email": email}, csrf_token
+
+
+def set_session_cookie(response: Response, session_id: str, csrf_token: str) -> None:
+    issue_session_cookies(response, session_id, csrf_token)
 
 
 def clear_session_cookie(response: Response) -> None:
-    settings = get_settings()
-    response.delete_cookie(
-        settings.session_cookie_name,
-        httponly=True,
-        secure=settings.session_cookie_secure,
-        samesite="lax",
-    )
+    clear_session_cookies(response)
 
 
 def get_current_session(request: Request) -> AuthSession:
@@ -166,3 +180,9 @@ def logout_user(request: Request) -> None:
     session_id = request.cookies.get(settings.session_cookie_name)
     if session_id:
         SessionStore(client=get_redis_client(), settings=settings).delete(session_id)
+    record_audit_event(
+        request,
+        "auth.logout",
+        success=True,
+        metadata={"session_present": bool(session_id)},
+    )

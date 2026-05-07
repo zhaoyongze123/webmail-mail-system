@@ -12,6 +12,7 @@ from app.auth import AuthSession
 from app.config import get_settings
 from app.errors import AppError
 from app import redis_client
+from app.security import validate_attachment_id
 
 
 def _safe_filename(value: str) -> str:
@@ -25,6 +26,7 @@ def temp_attachment_key(email: str, attachment_id: str) -> str:
 
 
 def load_temp_attachment(session: AuthSession, attachment_id: str) -> dict[str, Any]:
+    validate_attachment_id(attachment_id)
     data = redis_client.get_redis_client().hgetall(temp_attachment_key(session.email, attachment_id))
     if not data:
         data = redis_client.get_redis_client().hgetall(f"compose_upload:{attachment_id}")

@@ -53,6 +53,35 @@ export type MessageListPayload = {
   total: number;
   messages: MailMessageSummary[];
   cached?: boolean;
+  query?: string;
+};
+
+export type MessageOperationAction = 'mark_read' | 'mark_unread' | 'delete' | 'move';
+
+export type MessageOperationPayload = {
+  action: MessageOperationAction;
+  uids: string[];
+  target_folder?: string | null;
+};
+
+export type MessageOperationResult = {
+  action: MessageOperationAction;
+  folder: string;
+  target_folder?: string | null;
+  uids: string[];
+};
+
+export type UserSettingsPreferences = {
+  page_size: number;
+  mark_read_on_open: boolean;
+  [key: string]: unknown;
+};
+
+export type SettingsPayload = {
+  account: {
+    email: string;
+  };
+  preferences: UserSettingsPreferences;
 };
 
 export type ReaderRenderContext = {
@@ -66,4 +95,5 @@ export type MailWorkspaceProps = {
   selectedMessageKey?: string | null;
   renderReader?: (context: ReaderRenderContext | null) => ReactNode;
   onCompose?: () => void;
+  onOpenSettings?: () => void;
 };

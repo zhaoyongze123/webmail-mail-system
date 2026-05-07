@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from app.cache import SessionStore
 from app.errors import AppError
 from app.mail_adapters import MailAdapterError
+from app.observability import record_audit_event
+from app.observability import get_recent_audit_events, reset_observability_state
 from app.responses import error_response, success_response
 from app.schemas import ApiResponse
 
@@ -197,12 +199,24 @@ def _register_send_route(main_module, settings: FakeSettings, fake_redis, mail_a
         session = main_module.get_current_session(request)
         recipients = [str(item).lower() for item in [*payload.to, *payload.cc, *payload.bcc]]
         if not recipients:
+            record_audit_event(
+                request,
+                "compose.send_mail",
+                success=False,
+                metadata={"recipient_count": 0, "attachment_count": len(payload.attachment_ids), "has_draft": bool(getattr(payload, "draft_id", None))},
+            )
             raise AppError(
                 "MAIL_MESSAGE_INVALID_RECIPIENT",
                 "至少需要一个收件人",
                 http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
         if len(set(recipients)) != len(recipients):
+            record_audit_event(
+                request,
+                "compose.send_mail",
+                success=False,
+                metadata={"recipient_count": len(recipients), "attachment_count": len(payload.attachment_ids), "has_draft": bool(getattr(payload, "draft_id", None))},
+            )
             raise AppError(
                 "MAIL_MESSAGE_INVALID_RECIPIENT",
                 "收件人不能重复",
@@ -257,6 +271,12 @@ def _register_send_route(main_module, settings: FakeSettings, fake_redis, mail_a
         try:
             smtp_adapter.connect().login().send_message(message)
         except mail_adapters_module.MailAdapterError as exc:
+            record_audit_event(
+                request,
+                "compose.send_mail",
+                success=False,
+                metadata={"recipient_count": len(recipients), "attachment_count": len(payload.attachment_ids), "has_draft": bool(getattr(payload, "draft_id", None)), "error_code": "MAIL_SMTP_SEND_FAILED"},
+            )
             raise AppError(
                 "MAIL_SMTP_SEND_FAILED",
                 "SMTP 发送邮件失败",
@@ -272,6 +292,12 @@ def _register_send_route(main_module, settings: FakeSettings, fake_redis, mail_a
         try:
             imap_adapter.connect().login().append_message(".Sent", message)
         except mail_adapters_module.MailAdapterError as exc:
+            record_audit_event(
+                request,
+                "compose.send_mail",
+                success=False,
+                metadata={"recipient_count": len(recipients), "attachment_count": len(payload.attachment_ids), "has_draft": bool(getattr(payload, "draft_id", None)), "error_code": "MAIL_IMAP_APPEND_FAILED"},
+            )
             raise AppError(
                 "MAIL_IMAP_APPEND_FAILED",
                 "已发送归档失败",
@@ -284,6 +310,12 @@ def _register_send_route(main_module, settings: FakeSettings, fake_redis, mail_a
             except mail_adapters_module.MailAdapterError:
                 pass
 
+        record_audit_event(
+            request,
+            "compose.send_mail",
+            success=True,
+            metadata={"recipient_count": len(recipients), "attachment_count": len(payload.attachment_ids), "has_draft": bool(getattr(payload, "draft_id", None))},
+        )
         return success_response(
             request,
             {
@@ -383,6 +415,13 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
             if isinstance(ctx, dict):
                 item["ctx"] = {key: str(value) for key, value in ctx.items()}
             sanitized_errors.append(item)
+        if request.url.path == "/api/messages/send":
+            record_audit_event(
+                request,
+                "compose.send_mail",
+                success=False,
+                metadata={"validation_error": True, "path": request.url.path},
+            )
         return error_response(
             request,
             code="VALIDATION_ERROR",
@@ -395,13 +434,14 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(main_module, "send_mail", validated_send_mail, raising=False)
     main_module.app.add_exception_handler(RequestValidationError, safe_validation_error)
     _register_send_route(main_module, settings, fake_redis, mail_adapters_module)
+    reset_observability_state()
     client = TestClient(main_module.app, raise_server_exceptions=False)
     setattr(client, "_fake_redis", fake_redis)
     return client
 
 
 def login(client: TestClient, email: str, password: str):
-    return client.post(
+    response = client.post(
         "/api/auth/login",
         json={
             "email": email,
@@ -409,6 +449,10 @@ def login(client: TestClient, email: str, password: str):
             "remember": False,
         },
     )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if response.status_code == 200 and csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+    return response
 
 
 def send_mail(client: TestClient, payload: dict[str, object]):
@@ -474,6 +518,8 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
     assert body["error"] is None
     assert body["data"]["sent"] is True
     assert body["data"]["archived_folder"] == ".Sent"
+    assert response.headers["X-Request-ID"].startswith("req_")
+    assert any(event["event_type"] == "compose.send_mail" and event["success"] is True for event in get_recent_audit_events())
 
     assert len(FakeSmtpAdapter.sent_messages) == 1
     sent_message = FakeSmtpAdapter.sent_messages[0]
@@ -573,6 +619,7 @@ def test_send_mail_smtp_failure_returns_unified_error(monkeypatch: pytest.Monkey
     body = response.json()
     assert body["success"] is False
     assert body["error"]["code"] == "MAIL_SMTP_SEND_FAILED"
+    assert any(event["event_type"] == "compose.send_mail" and event["success"] is False for event in get_recent_audit_events())
 
 
 def test_send_mail_rejects_empty_or_duplicate_recipients(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -595,6 +642,7 @@ def test_send_mail_rejects_empty_or_duplicate_recipients(monkeypatch: pytest.Mon
     empty_body = empty_response.json()
     assert empty_body["success"] is False
     assert empty_body["error"]["code"] in {"MAIL_MESSAGE_INVALID_RECIPIENT", "VALIDATION_ERROR"}
+    assert any(event["event_type"] == "compose.send_mail" and event["success"] is False for event in get_recent_audit_events())
 
     duplicate_response = send_mail(
         client,
@@ -611,3 +659,4 @@ def test_send_mail_rejects_empty_or_duplicate_recipients(monkeypatch: pytest.Mon
     duplicate_body = duplicate_response.json()
     assert duplicate_body["success"] is False
     assert duplicate_body["error"]["code"] in {"MAIL_MESSAGE_INVALID_RECIPIENT", "VALIDATION_ERROR"}
+    assert any(event["event_type"] == "compose.send_mail" and event["success"] is False for event in get_recent_audit_events())

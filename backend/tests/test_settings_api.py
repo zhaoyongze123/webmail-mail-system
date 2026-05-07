@@ -162,7 +162,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def login(client: TestClient, email: str, password: str, *, remember: bool = False):
-    return client.post(
+    response = client.post(
         "/api/auth/login",
         json={
             "email": email,
@@ -170,6 +170,10 @@ def login(client: TestClient, email: str, password: str, *, remember: bool = Fal
             "remember": remember,
         },
     )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if response.status_code == 200 and csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+    return response
 
 
 def test_settings_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:

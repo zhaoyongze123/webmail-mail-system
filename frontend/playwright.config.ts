@@ -1,9 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
+
+const frontendDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
   testDir: './e2e',
   webServer: {
-    command: 'cd /Users/mac/项目/webmail-邮件系统/frontend && npm run dev -- --host 127.0.0.1 --port 43000',
+    command: 'npm run dev -- --host 127.0.0.1 --port 43000',
+    cwd: frontendDir,
     port: 43000,
     reuseExistingServer: false,
     timeout: 120_000,
