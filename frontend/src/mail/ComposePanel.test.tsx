@@ -49,6 +49,10 @@ describe('ComposePanel 写信发信草稿', () => {
     expect(screen.getByLabelText('主题')).not.toBeNull();
     expect(screen.getByLabelText('正文')).not.toBeNull();
     expect(screen.getByRole('button', { name: '发送' })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'AI' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '优化文字' })).toBeNull();
+    expect(screen.getByLabelText('字体')).not.toBeNull();
+    expect(screen.getByLabelText('字号')).not.toBeNull();
   });
 
   it('按收件人输入查询联系人并可补全', async () => {
@@ -117,6 +121,7 @@ describe('ComposePanel 写信发信草稿', () => {
           bcc: [],
           subject: '会议纪要',
           text_body: '正文内容',
+          html_body: '正文内容',
           attachment_ids: [],
         });
         return Promise.resolve(mockApiResponse(success({ draft_id: 'draft-1', status: 'saved', saved_at: '2026-05-07T10:00:00+00:00' })));
@@ -215,5 +220,52 @@ describe('ComposePanel 写信发信草稿', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('草稿状态：已保存')).not.toBeNull();
+  });
+
+  it('富文本工具会写入可发送的 HTML 正文', async () => {
+    const user = userEvent.setup();
+    const execCommand = vi.fn((command: string, _showUi?: boolean, value?: string) => {
+      const editor = screen.getByLabelText('正文') as HTMLDivElement;
+      if (command === 'bold') {
+        editor.innerHTML += '<b>重点内容</b>';
+        editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        return true;
+      }
+      if (command === 'insertHTML' && value) {
+        editor.innerHTML += value;
+        editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        return true;
+      }
+      return true;
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    mockFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/drafts') {
+        const body = JSON.parse(String(init?.body));
+        expect(body.text_body).toContain('重点内容');
+        expect(body.html_body).toContain('<b>重点内容</b>');
+        expect(body.html_body).toContain('<table>');
+        return Promise.resolve(mockApiResponse(success({ draft_id: 'draft-rich', status: 'saved' })));
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('2')
+      .mockReturnValueOnce('2');
+    renderCompose();
+
+    const editor = screen.getByLabelText('正文');
+    await user.click(editor);
+    await user.click(screen.getByRole('button', { name: '加粗' }));
+    await user.click(screen.getByRole('button', { name: '插入表格' }));
+    await user.click(screen.getByRole('button', { name: '保存草稿' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('草稿状态：已保存')).not.toBeNull();
+    });
   });
 });

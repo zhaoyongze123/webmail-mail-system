@@ -71,24 +71,35 @@ type ComposeForm = {
   bcc: string;
   subject: string;
   textBody: string;
+  htmlBody: string;
 };
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
 type SendState = 'idle' | 'sending' | 'sent' | 'error';
-type RichMode = 'plain' | 'rich';
 
 const AUTOSAVE_DELAY_MS = 5000;
 const CONTACT_MIN_QUERY_LENGTH = 1;
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 const CSRF_COOKIE_NAME = 'webmail_csrf';
+const FONT_FAMILIES = ['宋体', '微软雅黑', 'Arial', 'Helvetica', 'Times New Roman', 'Courier New'];
+const FONT_SIZES = [
+  { label: '12', value: '12px' },
+  { label: '14', value: '14px' },
+  { label: '16', value: '16px' },
+  { label: '18', value: '18px' },
+  { label: '24', value: '24px' },
+  { label: '32', value: '32px' },
+];
 
 function createEmptyForm(values?: ComposeValues | null): ComposeForm {
+  const textBody = values?.text_body ?? '';
   return {
     to: (values?.to ?? []).join(', '),
     cc: (values?.cc ?? []).join(', '),
     bcc: (values?.bcc ?? []).join(', '),
     subject: values?.subject ?? '',
-    textBody: values?.text_body ?? '',
+    textBody,
+    htmlBody: values?.html_body ?? textBody,
   };
 }
 
@@ -167,7 +178,7 @@ function buildPayload(form: ComposeForm, attachmentIds: string[], draftId?: stri
     bcc: parseAddresses(form.bcc),
     subject: form.subject,
     text_body: form.textBody,
-    html_body: null,
+    html_body: form.htmlBody.trim() ? form.htmlBody : null,
     attachment_ids: attachmentIds,
   };
 }
@@ -221,11 +232,12 @@ export default function ComposePanel({
   const [attachments, setAttachments] = useState<AttachmentState[]>(() => normalizeAttachments(initialValues));
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [sendState, setSendState] = useState<SendState>('idle');
-  const [richMode, setRichMode] = useState<RichMode>('plain');
   const [activeAddressField, setActiveAddressField] = useState<keyof Pick<ComposeForm, 'to' | 'cc' | 'bcc'> | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
+  const bodyEditorRef = useRef<HTMLDivElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const hasUserEditedRef = useRef(false);
 
   const uploadedAttachmentIds = useMemo(
@@ -246,6 +258,12 @@ export default function ComposePanel({
     hasUserEditedRef.current = false;
     setLoadedDraftId(null);
   }, [open, draftId, initialValues]);
+
+  useEffect(() => {
+    if (bodyEditorRef.current && bodyEditorRef.current.innerHTML !== form.htmlBody) {
+      bodyEditorRef.current.innerHTML = form.htmlBody;
+    }
+  }, [form.htmlBody, open]);
 
   useEffect(() => {
     if (!open || !draftId || loadedDraftId === draftId) {
@@ -328,11 +346,93 @@ export default function ComposePanel({
     return null;
   }
 
-  function updateField(field: keyof ComposeForm, value: string) {
+  function markEdited() {
     hasUserEditedRef.current = true;
     setSaveState('dirty');
     setErrorMessage(null);
+  }
+
+  function updateField(field: keyof ComposeForm, value: string) {
+    markEdited();
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function syncBodyFromEditor() {
+    const editor = bodyEditorRef.current;
+    if (!editor) {
+      return;
+    }
+    markEdited();
+    setForm((current) => ({
+      ...current,
+      textBody: editor.innerText ?? editor.textContent ?? '',
+      htmlBody: editor.innerHTML,
+    }));
+  }
+
+  function focusBodyEditor() {
+    bodyEditorRef.current?.focus();
+  }
+
+  function runEditorCommand(command: string, value?: string) {
+    focusBodyEditor();
+    if (typeof document.execCommand === 'function') {
+      document.execCommand(command, false, value);
+    }
+    syncBodyFromEditor();
+  }
+
+  function insertHtmlAtCursor(html: string) {
+    runEditorCommand('insertHTML', html);
+  }
+
+  function applyInlineStyle(property: string, value: string) {
+    insertHtmlAtCursor(`<span style="${property}: ${value};">${window.getSelection()?.toString() || '文字'}</span>`);
+  }
+
+  function handleLinkInsert() {
+    const url = window.prompt('请输入链接地址');
+    if (!url) {
+      return;
+    }
+    runEditorCommand('createLink', url);
+  }
+
+  function handleQuoteInsert() {
+    insertHtmlAtCursor('<blockquote>引用内容</blockquote>');
+  }
+
+  function handleTableInsert() {
+    const rows = Number(window.prompt('请输入表格行数', '3'));
+    const columns = Number(window.prompt('请输入表格列数', '3'));
+    if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1 || rows > 20 || columns > 10) {
+      setErrorMessage('表格行数需为 1-20，列数需为 1-10');
+      return;
+    }
+    const cells = Array.from({ length: columns }, () => '<td><br></td>').join('');
+    const body = Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join('');
+    insertHtmlAtCursor(`<table><tbody>${body}</tbody></table><p><br></p>`);
+  }
+
+  function handleInlineImageFiles(files: File[]) {
+    files.forEach((file) => {
+      if (!file.type.startsWith('image/')) {
+        setErrorMessage('只能插入图片文件');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const src = String(reader.result ?? '');
+        insertHtmlAtCursor(`<img src="${src}" alt="${file.name}" />`);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function handleInlineImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    handleInlineImageFiles(files);
   }
 
   async function handleSaveDraft(mode: 'manual' | 'auto') {
@@ -371,8 +471,7 @@ export default function ComposePanel({
       status: 'uploading',
       error: null,
     }));
-    hasUserEditedRef.current = true;
-    setSaveState('dirty');
+    markEdited();
     setAttachments((current) => [...current, ...localItems]);
     try {
       const result = await uploadAttachments(files);
@@ -535,55 +634,92 @@ export default function ComposePanel({
 
         <section className="compose-body-container" aria-label="正文编辑区">
           <div className="compose-toolbar-floating" role="toolbar" aria-label="编辑工具栏">
-            <button type="button" className="toolbar-btn toolbar-ai-btn" title="优化文字">
-              优化文字
-            </button>
-            <button type="button" className="toolbar-btn" title="Ask AI">
-              AI
-            </button>
+            <select className="toolbar-select" aria-label="字体" defaultValue="" onChange={(event) => applyInlineStyle('font-family', event.target.value)}>
+              <option value="" disabled>
+                字体
+              </option>
+              {FONT_FAMILIES.map((font) => (
+                <option key={font} value={font}>
+                  {font}
+                </option>
+              ))}
+            </select>
+            <select className="toolbar-select toolbar-size-select" aria-label="字号" defaultValue="" onChange={(event) => applyInlineStyle('font-size', event.target.value)}>
+              <option value="" disabled>
+                字号
+              </option>
+              {FONT_SIZES.map((size) => (
+                <option key={size.value} value={size.value}>
+                  {size.label}
+                </option>
+              ))}
+            </select>
             <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-btn" aria-pressed={richMode === 'rich'} onClick={() => setRichMode('rich')}>
-              富文本
-            </button>
-            <button type="button" className="toolbar-btn" aria-pressed={richMode === 'plain'} onClick={() => setRichMode('plain')}>
-              纯文本
-            </button>
-            <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+            <button type="button" className="toolbar-icon-btn" aria-label="加粗" title="加粗" onClick={() => runEditorCommand('bold')}>
               B
             </button>
-            <button type="button" className="toolbar-icon-btn italic" disabled title="富文本工具将在后续编辑器接入后启用">
+            <button type="button" className="toolbar-icon-btn italic" aria-label="斜体" title="斜体" onClick={() => runEditorCommand('italic')}>
               I
             </button>
-            <button type="button" className="toolbar-icon-btn underline" disabled title="富文本工具将在后续编辑器接入后启用">
+            <button type="button" className="toolbar-icon-btn underline" aria-label="下划线" title="下划线" onClick={() => runEditorCommand('underline')}>
               U
             </button>
-            <button type="button" className="toolbar-icon-btn strike" disabled title="富文本工具将在后续编辑器接入后启用">
+            <button type="button" className="toolbar-icon-btn strike" aria-label="删除线" title="删除线" onClick={() => runEditorCommand('strikeThrough')}>
               S
             </button>
-            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
-              link
+            <label className="toolbar-color-control" title="文字颜色">
+              A
+              <input type="color" aria-label="文字颜色" defaultValue="#1f2937" onChange={(event) => runEditorCommand('foreColor', event.target.value)} />
+            </label>
+            <label className="toolbar-color-control highlight" title="背景高亮颜色">
+              A
+              <input type="color" aria-label="背景高亮颜色" defaultValue="#fff3a3" onChange={(event) => runEditorCommand('hiliteColor', event.target.value)} />
+            </label>
+            <span className="toolbar-divider" aria-hidden="true" />
+            <button type="button" className="toolbar-icon-btn" aria-label="有序列表" title="有序列表" onClick={() => runEditorCommand('insertOrderedList')}>
+              1.
+            </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="无序列表" title="无序列表" onClick={() => runEditorCommand('insertUnorderedList')}>
+              •
+            </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="减少缩进" title="减少缩进" onClick={() => runEditorCommand('outdent')}>
+              ←
+            </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="增加缩进" title="增加缩进" onClick={() => runEditorCommand('indent')}>
+              →
+            </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="引用块" title="引用块" onClick={handleQuoteInsert}>
+              “”
             </button>
             <span className="toolbar-divider" aria-hidden="true" />
-            <button type="button" className="toolbar-icon-btn text-style-btn" disabled title="富文本工具将在后续编辑器接入后启用">
-              A
+            <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" title="添加链接" onClick={handleLinkInsert}>
+              link
             </button>
-            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+            <button type="button" className="toolbar-icon-btn" aria-label="取消链接" title="取消链接" onClick={() => runEditorCommand('unlink')}>
               Tx
             </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="插入表格" title="插入表格" onClick={handleTableInsert}>
+              表
+            </button>
+            <button type="button" className="toolbar-icon-btn" aria-label="插入图片" title="插入图片" onClick={() => imageInputRef.current?.click()}>
+              图
+            </button>
+            <input ref={imageInputRef} className="hidden-file-input" type="file" accept="image/*" onChange={handleInlineImageUpload} aria-label="插入图片" />
           </div>
 
-          <label className="compose-body-label">
-            <span className="visually-hidden">正文</span>
-            <textarea
-              className="body-input"
-              value={form.textBody}
-              onChange={(event) => updateField('textBody', event.target.value)}
-              rows={10}
-              placeholder="Write your email..."
-              aria-label="正文"
-            />
-          </label>
+          <div
+            ref={bodyEditorRef}
+            className="body-input rich-body-input"
+            contentEditable
+            role="textbox"
+            aria-label="正文"
+            aria-multiline="true"
+            data-placeholder="Write your email..."
+            data-empty={form.textBody.trim() ? 'false' : 'true'}
+            onInput={syncBodyFromEditor}
+            onBlur={syncBodyFromEditor}
+            onPaste={() => window.setTimeout(syncBodyFromEditor, 0)}
+          />
         </section>
 
         <section className="compose-attachments" aria-label="附件上传">
@@ -634,9 +770,6 @@ export default function ComposePanel({
             </span>
           </div>
           <div className="footer-right" aria-label="更多操作">
-            <button type="button" className="icon-btn" title="AI 写作">
-              AI
-            </button>
             <button type="button" className="icon-btn" title="添加附件" onClick={() => undefined}>
               @
             </button>

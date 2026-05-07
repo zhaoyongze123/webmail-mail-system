@@ -631,6 +631,20 @@
   border-radius: 6px;
   white-space: nowrap;
 }
+.toolbar-select {
+  height: 30px;
+  min-width: 86px;
+  border: 1px solid #ececec;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #2f2f2f;
+  font-size: 13px;
+  outline: none;
+  padding: 0 8px;
+}
+.toolbar-size-select {
+  min-width: 64px;
+}
 .toolbar-btn {
   min-height: 30px;
   padding: 4px 10px;
@@ -647,7 +661,38 @@
   font-size: 19px;
   font-weight: 600;
 }
-.toolbar-btn:hover, .toolbar-icon-btn:hover {
+.toolbar-link-btn {
+  min-width: 44px;
+}
+.toolbar-color-control {
+  position: relative;
+  min-width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: #2f2f2f;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: #1f2937;
+  text-underline-offset: 4px;
+}
+.toolbar-color-control.highlight {
+  background: #fff7c2;
+  text-decoration: none;
+}
+.toolbar-color-control input,
+.hidden-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.toolbar-btn:hover, .toolbar-icon-btn:hover, .toolbar-select:hover, .toolbar-color-control:hover {
   background: #f4f4f4;
   color: #151515;
 }
@@ -681,12 +726,6 @@
   flex-shrink: 0;
 }
 
-.compose-body-label {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-
 .body-input {
   flex: 1;
   width: 100%;
@@ -701,8 +740,45 @@
   overflow-y: auto;
   padding: 2px 0 18px;
 }
-.body-input::placeholder {
+.rich-body-input {
+  min-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.rich-body-input:focus {
+  outline: none;
+}
+.rich-body-input[data-empty="true"]::before {
+  content: attr(data-placeholder);
   color: #9b9b9b;
+  pointer-events: none;
+}
+.rich-body-input blockquote {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 4px solid #d8dee9;
+  color: #4b5563;
+  background: #f8fafc;
+}
+.rich-body-input table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.rich-body-input td,
+.rich-body-input th {
+  min-width: 72px;
+  padding: 8px;
+  border: 1px solid #d8dee9;
+  vertical-align: top;
+}
+.rich-body-input img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 10px 0;
+  border-radius: 6px;
 }
 
 .compose-attachments {
