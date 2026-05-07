@@ -99,6 +99,8 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: 检查 Git diff 空白
         run: git diff --check HEAD~1 HEAD
