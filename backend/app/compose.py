@@ -14,6 +14,7 @@ from app.contacts import record_recent_contacts
 from app.config import get_settings
 from app.errors import AppError
 from app.mail_adapters import ImapSettings, MailAdapterError, SmtpSettings
+from app.mailbox import _folder_name_from_list_line, _system_folder_map
 
 
 class SendMailRequest(BaseModel):
@@ -113,7 +114,10 @@ def send_mail(session: AuthSession, payload: SendMailRequest) -> dict[str, Any]:
         smtp.quit()
 
     try:
-        imap.connect().login().append_message(".Sent", message)
+        imap.connect().login()
+        folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in imap.list_folders()])
+        sent_folder = folder_map.get(".Sent", ".Sent")
+        imap.append_message(sent_folder, message)
     except MailAdapterError as exc:
         raise AppError(
             "MAIL_IMAP_APPEND_FAILED",
@@ -131,4 +135,4 @@ def send_mail(session: AuthSession, payload: SendMailRequest) -> dict[str, Any]:
         from app.drafts import delete_draft
 
         delete_draft(session, payload.draft_id)
-    return {"message_id": message["Message-ID"], "sent": True, "archived_folder": ".Sent"}
+    return {"message_id": message["Message-ID"], "sent": True, "archived_folder": sent_folder}

@@ -84,6 +84,15 @@ class FakeImapAdapter:
         self.logged_out = True
         return self
 
+    def list_folders(self):
+        return [
+            '(\\HasNoChildren) "/" "INBOX"',
+            '(\\HasNoChildren) "/" "Sent"',
+            '(\\HasNoChildren) "/" "Drafts"',
+            '(\\HasNoChildren) "/" "Trash"',
+            '(\\HasNoChildren) "/" "Archive"',
+        ]
+
     def append_message(self, folder: str, message: EmailMessage):
         raw_bytes = message.as_bytes(policy=policy.default)
         FakeImapAdapter.append_calls.append((folder, raw_bytes))
@@ -517,7 +526,7 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
     assert body["success"] is True
     assert body["error"] is None
     assert body["data"]["sent"] is True
-    assert body["data"]["archived_folder"] == ".Sent"
+    assert body["data"]["archived_folder"] == "Sent"
     assert response.headers["X-Request-ID"].startswith("req_")
     assert any(event["event_type"] == "compose.send_mail" and event["success"] is True for event in get_recent_audit_events())
 
@@ -542,7 +551,7 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
 
     assert len(FakeImapAdapter.append_calls) == 1
     folder, appended_bytes = FakeImapAdapter.append_calls[0]
-    assert folder == ".Sent"
+    assert folder == "Sent"
     appended_message = _parse_message(appended_bytes)
     assert appended_message["Subject"] == "测试发信"
     assert appended_message["To"] == "receiver@example.com"
@@ -596,7 +605,7 @@ def test_send_mail_with_draft_id_deletes_saved_draft_after_sent_archive(monkeypa
     assert body["data"]["sent"] is True
     assert fake_redis.exists(f"draft:user@example.com:{draft_id}") == 0
     assert draft_id not in fake_redis.smembers("drafts:user@example.com")
-    assert FakeImapAdapter.delete_calls == [("user@example.com", ".Drafts", draft_id)]
+    assert FakeImapAdapter.delete_calls == [("user@example.com", "Drafts", draft_id)]
 
 
 def test_send_mail_smtp_failure_returns_unified_error(monkeypatch: pytest.MonkeyPatch) -> None:

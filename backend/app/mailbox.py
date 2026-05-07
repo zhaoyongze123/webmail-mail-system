@@ -165,6 +165,19 @@ def _status_dict(status_result: Any) -> dict[str, int]:
     return {}
 
 
+def _system_folder_map(existing: list[str]) -> dict[str, str]:
+    return {
+        canonical: _resolve_system_folder(existing, canonical, aliases)
+        for canonical, _folder_type, _display_name, aliases in SYSTEM_FOLDERS
+    }
+
+
+def _resolved_target_folder(target_folder: str | None, folder_map: dict[str, str]) -> str | None:
+    if target_folder is None:
+        return None
+    return folder_map.get(target_folder, target_folder)
+
+
 def _uid_search(adapter: Any, criteria: str) -> list[str]:
     if hasattr(adapter, "uid_search"):
         return [str(uid) for uid in adapter.uid_search(criteria)]
@@ -435,7 +448,7 @@ def search_messages(
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
-        uids = _uid_search(adapter, normalized_query)
+        uids = _uid_search(adapter, "ALL")
         rows = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
         lowered = normalized_query.lower()
         messages = [
@@ -521,6 +534,9 @@ def get_message_attachment(session: AuthSession, folder: str, uid: str, attachme
 def operate_messages(session: AuthSession, folder: str, payload: MessageOperationRequest) -> dict[str, Any]:
     adapter = _connect_imap(session)
     try:
+        folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in adapter.list_folders()])
+        trash_folder = folder_map.get(".Trash", ".Trash")
+        target_folder = _resolved_target_folder(payload.target_folder, folder_map)
         adapter.select_folder(folder)
         for uid in payload.uids:
             if payload.action == "mark_read":
@@ -528,10 +544,10 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
             elif payload.action == "mark_unread":
                 adapter.store_flags(uid, "-FLAGS", "(\\Seen)")
             elif payload.action == "delete":
-                adapter.copy_message(uid, ".Trash")
+                adapter.copy_message(uid, trash_folder)
                 adapter.store_flags(uid, "+FLAGS", "(\\Deleted)")
             elif payload.action == "move":
-                adapter.copy_message(uid, str(payload.target_folder))
+                adapter.copy_message(uid, str(target_folder))
                 adapter.store_flags(uid, "+FLAGS", "(\\Deleted)")
             elif payload.action in {"flag", "star"}:
                 adapter.store_flags(uid, "+FLAGS", "(\\Flagged)")
@@ -539,7 +555,7 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
                 adapter.store_flags(uid, "-FLAGS", "(\\Flagged)")
         if payload.action in {"delete", "move"}:
             adapter.expunge()
-        return {"action": payload.action, "folder": folder, "target_folder": payload.target_folder, "uids": payload.uids}
+        return {"action": payload.action, "folder": folder, "target_folder": target_folder, "uids": payload.uids}
     except MailAdapterError as exc:
         raise AppError(
             "MAILBOX_OPERATION_FAILED",

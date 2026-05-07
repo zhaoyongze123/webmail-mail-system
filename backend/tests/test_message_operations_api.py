@@ -117,6 +117,16 @@ class FakeImapAdapter:
         FakeImapAdapter.selected_folders.append(folder)
         return "OK", [b"1"]
 
+    def list_folders(self):
+        return [
+            '(\\HasNoChildren) "/" "INBOX"',
+            '(\\HasNoChildren) "/" "Sent"',
+            '(\\HasNoChildren) "/" "Drafts"',
+            '(\\HasNoChildren) "/" "Junk"',
+            '(\\HasNoChildren) "/" "Trash"',
+            '(\\HasNoChildren) "/" "Archive"',
+        ]
+
     def store(self, uid: str | bytes, command: str, flags: str):
         uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
         FakeImapAdapter.store_calls.append((uid_str, command, flags, self.selected_folder))
@@ -438,11 +448,11 @@ def test_message_operations_move_moves_all_uids_to_target_folder(monkeypatch: py
     _assert_success(response)
 
     assert len(FakeImapAdapter.move_calls) + len(FakeImapAdapter.copy_calls) >= 2
-    assert all(call[1] == ".Archive" for call in FakeImapAdapter.move_calls + FakeImapAdapter.copy_calls)
+    assert all(call[1] == "Archive" for call in FakeImapAdapter.move_calls + FakeImapAdapter.copy_calls)
     assert ("INBOX", "301") not in FakeImapAdapter.mailboxes
     assert ("INBOX", "302") not in FakeImapAdapter.mailboxes
-    assert (".Archive", "301") in FakeImapAdapter.mailboxes
-    assert (".Archive", "302") in FakeImapAdapter.mailboxes
+    assert ("Archive", "301") in FakeImapAdapter.mailboxes
+    assert ("Archive", "302") in FakeImapAdapter.mailboxes
 
 
 def test_message_operations_delete_uses_trash_or_deleted_flow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,13 +466,13 @@ def test_message_operations_delete_uses_trash_or_deleted_flow(monkeypatch: pytes
     response = _request_operation(client, "INBOX", action="delete", uids=["401", "402"])
     _assert_success(response)
 
-    trash_uids = {uid for (folder, uid) in FakeImapAdapter.mailboxes if folder == ".Trash"}
+    trash_uids = {uid for (folder, uid) in FakeImapAdapter.mailboxes if folder == "Trash"}
     deleted_flags = [
         message.flags
         for (folder, _uid), message in FakeImapAdapter.mailboxes.items()
         if folder == "INBOX"
     ]
-    moved_to_trash = trash_uids >= {"401", "402"} or any(call[1] == ".Trash" for call in FakeImapAdapter.move_calls)
+    moved_to_trash = trash_uids >= {"401", "402"} or any(call[1] == "Trash" for call in FakeImapAdapter.move_calls + FakeImapAdapter.copy_calls)
     deleted_marked = all("\\Deleted" in flags for flags in deleted_flags) and bool(FakeImapAdapter.expunge_calls)
     assert moved_to_trash or deleted_marked
 
@@ -505,8 +515,8 @@ def test_message_operations_legacy_move_and_delete_paths(monkeypatch: pytest.Mon
     )
     _assert_success(delete_response)
 
-    assert (".Archive", "461") in FakeImapAdapter.mailboxes
-    assert any(call[1] == ".Trash" for call in FakeImapAdapter.copy_calls + FakeImapAdapter.move_calls)
+    assert ("Archive", "461") in FakeImapAdapter.mailboxes
+    assert any(call[1] == "Trash" for call in FakeImapAdapter.copy_calls + FakeImapAdapter.move_calls)
 
 
 def test_message_operations_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -107,6 +107,15 @@ class FakeDraftImapAdapter:
         self.logged_out = True
         return self
 
+    def list_folders(self):
+        return [
+            '(\\HasNoChildren) "/" "INBOX"',
+            '(\\HasNoChildren) "/" "Sent"',
+            '(\\HasNoChildren) "/" "Drafts"',
+            '(\\HasNoChildren) "/" "Trash"',
+            '(\\HasNoChildren) "/" "Archive"',
+        ]
+
     def append_message(self, folder: str, message: EmailMessage):
         raw_bytes = message.as_bytes(policy=policy.default)
         draft_id = getattr(message, "_draft_id", None) or message.get("X-Draft-ID")
@@ -577,7 +586,7 @@ def test_save_draft_appends_to_drafts_and_returns_metadata(monkeypatch: pytest.M
     assert len(FakeDraftImapAdapter.append_calls) == 1
     username, folder, draft_id, raw_bytes = FakeDraftImapAdapter.append_calls[0]
     assert username == "user@example.com"
-    assert folder == ".Drafts"
+    assert folder == "Drafts"
     assert draft_id == data["draft_id"]
 
     message = _parse_message(raw_bytes)
@@ -635,9 +644,9 @@ def test_save_existing_draft_updates_content_and_reuses_draft_id(monkeypatch: py
     assert _parse_iso_datetime(second_data["saved_at"]) >= _parse_iso_datetime(first_data["saved_at"])
 
     assert len(FakeDraftImapAdapter.append_calls) == 2
-    assert FakeDraftImapAdapter.delete_calls == [("user@example.com", ".Drafts", first_data["draft_id"])]
+    assert FakeDraftImapAdapter.delete_calls == [("user@example.com", "Drafts", first_data["draft_id"])]
     _, folder, draft_id, raw_bytes = FakeDraftImapAdapter.append_calls[-1]
-    assert folder == ".Drafts"
+    assert folder == "Drafts"
     assert draft_id == first_data["draft_id"]
     message = _parse_message(raw_bytes)
     assert message["Subject"] == "第二次主题"

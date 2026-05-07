@@ -15,6 +15,7 @@ from app.auth import AuthSession
 from app.compose import _imap_settings
 from app.errors import AppError
 from app.mail_adapters import MailAdapterError
+from app.mailbox import _folder_name_from_list_line, _system_folder_map
 
 
 class DraftPayload(BaseModel):
@@ -34,6 +35,11 @@ def _draft_key(email: str, draft_id: str) -> str:
 
 def _draft_index_key(email: str) -> str:
     return f"drafts:{email}"
+
+
+def _resolved_drafts_folder(adapter: object) -> str:
+    folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in adapter.list_folders()])
+    return folder_map.get(".Drafts", ".Drafts")
 
 
 def _draft_message(session: AuthSession, payload: DraftPayload) -> EmailMessage:
@@ -98,9 +104,10 @@ def save_draft(session: AuthSession, payload: DraftPayload) -> dict[str, Any]:
     adapter = mail_adapters.ImapAdapter(_imap_settings(session))
     try:
         adapter.connect().login()
+        drafts_folder = _resolved_drafts_folder(adapter)
         if is_update:
-            adapter.delete_message(".Drafts", payload.draft_id)
-        adapter.append_message(".Drafts", _draft_message(session, payload))
+            adapter.delete_message(drafts_folder, payload.draft_id)
+        adapter.append_message(drafts_folder, _draft_message(session, payload))
     except MailAdapterError as exc:
         raise AppError(
             "DRAFT_SAVE_FAILED",
@@ -130,7 +137,7 @@ def delete_draft(session: AuthSession, draft_id: str) -> dict[str, Any]:
     adapter = mail_adapters.ImapAdapter(_imap_settings(session))
     try:
         adapter.connect().login()
-        adapter.delete_message(".Drafts", draft_id)
+        adapter.delete_message(_resolved_drafts_folder(adapter), draft_id)
     except MailAdapterError as exc:
         raise AppError(
             "DRAFT_DELETE_FAILED",
