@@ -23,6 +23,7 @@ class SendMailRequest(BaseModel):
     html_body: str | None = None
     text_body: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
+    draft_id: str | None = None
 
     @model_validator(mode="after")
     def validate_recipients(self) -> "SendMailRequest":
@@ -121,4 +122,9 @@ def send_mail(session: AuthSession, payload: SendMailRequest) -> dict[str, Any]:
         ) from exc
     finally:
         imap.logout()
+
+    if payload.draft_id:
+        from app.drafts import delete_draft
+
+        delete_draft(session, payload.draft_id)
     return {"message_id": message["Message-ID"], "sent": True, "archived_folder": ".Sent"}

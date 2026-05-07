@@ -24,6 +24,8 @@ class ImapSettings:
     starttls: bool = False
     timeout: float | None = None
     ssl_context: ssl.SSLContext | None = None
+    mailbox_state: Any | None = None
+    _mailbox_state: Any | None = None
 
 
 @dataclass(slots=True)
@@ -317,6 +319,66 @@ class ImapAdapter:
             imaplib.IMAP4.readonly,
         ) as exc:
             raise _format_error("IMAP 标记已读", exc) from exc
+
+    def store_flags(self, uid: str | bytes, command: str, flags: str) -> None:
+        client = self._ensure_client()
+        try:
+            if hasattr(client, "uid"):
+                status, _ = client.uid("STORE", uid, command, flags)
+            else:
+                status, _ = client.store(uid, command, flags)
+            if status != "OK":
+                raise MailAdapterError(f"IMAP Flag 操作失败: {status}", operation="store_flags")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP Flag 操作", exc) from exc
+
+    def copy_message(self, uid: str | bytes, target_folder: str) -> None:
+        client = self._ensure_client()
+        try:
+            if hasattr(client, "uid"):
+                status, _ = client.uid("COPY", uid, target_folder)
+            else:
+                status, _ = client.copy(uid, target_folder)
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 复制邮件失败: {status}", operation="copy_message")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 复制邮件", exc) from exc
+
+    def expunge(self) -> None:
+        client = self._ensure_client()
+        try:
+            client.expunge()
+        except AttributeError:
+            return
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 清理删除邮件", exc) from exc
+
+    def delete_message(self, folder: str, draft_id: str) -> int:
+        self.select_folder(folder)
+        uids = self.uid_search(["HEADER", "X-Draft-ID", draft_id])
+        for uid in uids:
+            self.store_flags(uid, "+FLAGS", "(\\Deleted)")
+        if uids:
+            self.expunge()
+        return len(uids)
 
     def append_message(self, folder: str, message: EmailMessage) -> None:
         client = self._ensure_client()

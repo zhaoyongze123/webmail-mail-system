@@ -1,15 +1,25 @@
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Request, Response, UploadFile, status
+from fastapi import FastAPI, File, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field
 
 from app.attachments import upload_temp_attachments
 from app.auth import LoginRequest, clear_session_cookie, get_current_session, login_user, logout_user, set_session_cookie
 from app.compose import SendMailRequest, send_mail
 from app.config import get_settings
+from app.drafts import DraftPayload, delete_draft, get_draft, save_draft
 from app.errors import AppError
-from app.mailbox import get_message_attachment, get_message_detail, list_folders, list_messages
+from app.mailbox import (
+    MessageOperationRequest,
+    get_message_attachment,
+    get_message_detail,
+    list_folders,
+    list_messages,
+    operate_messages,
+    search_messages,
+)
 from app.middleware import request_id_middleware
 from app.responses import app_error_response, error_response, success_response
 from app.schemas import ApiResponse
@@ -26,6 +36,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class BulkMessageRequest(BaseModel):
+    folder: str = "INBOX"
+    uids: list[str] = Field(default_factory=list)
+    target_folder: str | None = None
 
 
 @app.exception_handler(AppError)
@@ -169,6 +185,62 @@ def messages(
 
 
 @app.get(
+    "/api/folders/{folder}/messages/search",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="搜索当前文件夹邮件",
+    response_description="当前文件夹关键词搜索结果",
+)
+def search_folder_messages(
+    request: Request,
+    folder: str,
+    q: str = Query(..., min_length=1),
+    page: int = 1,
+    page_size: int = 30,
+    refresh: bool = False,
+) -> dict[str, object]:
+    session = get_current_session(request)
+    page_data = search_messages(
+        session,
+        folder,
+        q,
+        page=max(page, 1),
+        page_size=min(max(page_size, 1), 100),
+        refresh=refresh,
+    )
+    return success_response(
+        request,
+        {
+            "folder": page_data.folder,
+            "query": q,
+            "page": page_data.page,
+            "page_size": page_data.page_size,
+            "total": page_data.total,
+            "messages": page_data.messages,
+            "cached": page_data.cached,
+        },
+    )
+
+
+@app.get(
+    "/api/search",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="搜索当前文件夹邮件",
+    response_description="当前文件夹关键词搜索结果",
+)
+def search_messages_api(
+    request: Request,
+    folder: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1),
+    page: int = 1,
+    page_size: int = 30,
+    refresh: bool = False,
+) -> dict[str, object]:
+    return search_folder_messages(request, folder, q, page, page_size, refresh)
+
+
+@app.get(
     "/api/folders/{folder}/messages/{uid}",
     tags=["mailbox"],
     response_model=ApiResponse,
@@ -178,6 +250,76 @@ def messages(
 def message_detail(request: Request, folder: str, uid: str) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, get_message_detail(session, folder, uid))
+
+
+@app.post(
+    "/api/folders/{folder}/messages/operations",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="批量操作邮件",
+    response_description="邮件批量操作结果",
+)
+def message_operations(request: Request, folder: str, payload: MessageOperationRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, operate_messages(session, folder, payload))
+
+
+@app.post(
+    "/api/messages/{folder}/{uid}/read",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="标记邮件已读",
+    response_description="标记已读结果",
+)
+def mark_message_read(request: Request, folder: str, uid: str) -> dict[str, object]:
+    session = get_current_session(request)
+    payload = MessageOperationRequest(action="mark_read", uids=[uid])
+    return success_response(request, operate_messages(session, folder, payload))
+
+
+@app.post(
+    "/api/messages/{folder}/{uid}/unread",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="标记邮件未读",
+    response_description="标记未读结果",
+)
+def mark_message_unread(request: Request, folder: str, uid: str) -> dict[str, object]:
+    session = get_current_session(request)
+    payload = MessageOperationRequest(action="mark_unread", uids=[uid])
+    return success_response(request, operate_messages(session, folder, payload))
+
+
+@app.post(
+    "/api/messages/move",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="批量移动邮件",
+    response_description="批量移动结果",
+)
+def move_messages(request: Request, payload: BulkMessageRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    folder = request.query_params.get("folder") or payload.folder
+    move_payload = MessageOperationRequest(
+        action="move",
+        uids=payload.uids,
+        target_folder=payload.target_folder,
+    )
+    return success_response(request, operate_messages(session, str(folder), move_payload))
+
+
+@app.post(
+    "/api/messages/delete",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="批量删除邮件",
+    response_description="批量删除结果",
+)
+def delete_messages(request: Request, payload: BulkMessageRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    folder = request.query_params.get("folder") or payload.folder
+    delete_payload = MessageOperationRequest(action="delete", uids=payload.uids)
+    return success_response(request, operate_messages(session, str(folder), delete_payload))
 
 
 @app.get(
@@ -223,3 +365,39 @@ async def upload_attachments(request: Request, files: list[UploadFile] = File(..
 def send_message(request: Request, payload: SendMailRequest) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, send_mail(session, payload))
+
+
+@app.post(
+    "/api/drafts",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="保存草稿",
+    response_description="草稿保存结果",
+)
+def save_mail_draft(request: Request, payload: DraftPayload) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, save_draft(session, payload))
+
+
+@app.get(
+    "/api/drafts/{draft_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="获取草稿",
+    response_description="草稿内容",
+)
+def fetch_mail_draft(request: Request, draft_id: str) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, get_draft(session, draft_id))
+
+
+@app.delete(
+    "/api/drafts/{draft_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="删除草稿",
+    response_description="草稿删除结果",
+)
+def remove_mail_draft(request: Request, draft_id: str) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, delete_draft(session, draft_id))

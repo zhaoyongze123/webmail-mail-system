@@ -13,6 +13,7 @@ from typing import Any
 
 import bleach
 from fastapi import status
+from pydantic import BaseModel, Field, model_validator
 
 from app.auth import AuthSession
 from app.cache import JsonCache
@@ -74,6 +75,23 @@ class MailboxPage:
     cached: bool
 
 
+class MessageOperationRequest(BaseModel):
+    action: str
+    uids: list[str] = Field(default_factory=list)
+    target_folder: str | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "MessageOperationRequest":
+        if not self.uids:
+            raise ValueError("至少需要选择一封邮件")
+        allowed = {"mark_read", "mark_unread", "delete", "move", "flag", "star", "unflag", "unstar"}
+        if self.action not in allowed:
+            raise ValueError("不支持的邮件操作")
+        if self.action == "move" and not self.target_folder:
+            raise ValueError("移动邮件必须指定目标文件夹")
+        return self
+
+
 def _imap_settings(session: AuthSession) -> ImapSettings:
     imap_config = session.imap
     return ImapSettings(
@@ -84,6 +102,8 @@ def _imap_settings(session: AuthSession) -> ImapSettings:
         use_ssl=bool(imap_config.get("ssl", get_settings().mail_imap_ssl)),
         starttls=bool(imap_config.get("starttls", get_settings().mail_imap_starttls)),
         timeout=15,
+        mailbox_state=getattr(get_settings(), "_mailbox_state", None),
+        _mailbox_state=getattr(get_settings(), "_mailbox_state", None),
     )
 
 
@@ -306,11 +326,13 @@ def _message_summary(uid: str, raw: bytes) -> dict[str, Any]:
     html_body, text_body, attachments = _body_parts(message)
     sent_at = _message_datetime(message)
     sender = _addresses(message.get("From"))
+    recipients = _addresses(message.get("To"))
     return {
         "uid": str(uid),
         "message_id": message.get("Message-ID"),
         "subject": _decode_header_value(message.get("Subject")) or "(无主题)",
         "sender": sender[0] if sender else {"name": "", "email": ""},
+        "to": recipients,
         "date": sent_at.isoformat() if sent_at else None,
         "read": _read_flag(message),
         "has_attachments": bool(attachments),
@@ -340,6 +362,10 @@ def _message_detail(uid: str, raw: bytes) -> dict[str, Any]:
 
 def _message_cache_key(email: str, folder: str, page: int, page_size: int) -> str:
     return f"mail:list:{email}:{folder}:{page}:{page_size}"
+
+
+def _search_cache_key(email: str, folder: str, query: str, page: int, page_size: int) -> str:
+    return f"mail:search:{email}:{folder}:{query}:{page}:{page_size}"
 
 
 def list_messages(
@@ -378,6 +404,62 @@ def list_messages(
         raise AppError(
             "MAILBOX_MESSAGE_LIST_FAILED",
             "获取邮件列表失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def search_messages(
+    session: AuthSession,
+    folder: str,
+    query: str,
+    *,
+    page: int = 1,
+    page_size: int = 30,
+    refresh: bool = False,
+) -> MailboxPage:
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise AppError("SEARCH_QUERY_REQUIRED", "搜索关键词不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
+
+    cache = JsonCache(redis_client.get_redis_client())
+    key = _search_cache_key(session.email, folder, normalized_query, page, page_size)
+    if not refresh:
+        cached = cache.get(key)
+        if cached:
+            return MailboxPage(cached=True, **cached)
+
+    adapter = _connect_imap(session)
+    try:
+        adapter.select_folder(folder)
+        uids = _uid_search(adapter, normalized_query)
+        rows = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
+        lowered = normalized_query.lower()
+        messages = [
+            row
+            for row in rows
+            if lowered in str(row.get("subject", "")).lower()
+            or lowered in str(row.get("snippet", "")).lower()
+            or lowered in str(row.get("sender", {})).lower()
+            or lowered in str(row.get("to", [])).lower()
+        ]
+        messages.sort(key=lambda item: item["date"] or "", reverse=True)
+        offset = max(page - 1, 0) * page_size
+        payload = {
+            "folder": folder,
+            "page": page,
+            "page_size": page_size,
+            "total": len(messages),
+            "messages": messages[offset : offset + page_size],
+        }
+        cache.set(key, payload, ttl_seconds=60)
+        return MailboxPage(cached=False, **payload)
+    except MailAdapterError as exc:
+        raise AppError(
+            "MAILBOX_SEARCH_FAILED",
+            "搜索邮件失败",
             http_status=status.HTTP_502_BAD_GATEWAY,
             details={"operation": exc.operation},
         ) from exc
@@ -426,6 +508,39 @@ def get_message_attachment(session: AuthSession, folder: str, uid: str, attachme
         raise AppError(
             "ATTACHMENT_DOWNLOAD_FAILED",
             "下载附件失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def operate_messages(session: AuthSession, folder: str, payload: MessageOperationRequest) -> dict[str, Any]:
+    adapter = _connect_imap(session)
+    try:
+        adapter.select_folder(folder)
+        for uid in payload.uids:
+            if payload.action == "mark_read":
+                adapter.store_flags(uid, "+FLAGS", "(\\Seen)")
+            elif payload.action == "mark_unread":
+                adapter.store_flags(uid, "-FLAGS", "(\\Seen)")
+            elif payload.action == "delete":
+                adapter.copy_message(uid, ".Trash")
+                adapter.store_flags(uid, "+FLAGS", "(\\Deleted)")
+            elif payload.action == "move":
+                adapter.copy_message(uid, str(payload.target_folder))
+                adapter.store_flags(uid, "+FLAGS", "(\\Deleted)")
+            elif payload.action in {"flag", "star"}:
+                adapter.store_flags(uid, "+FLAGS", "(\\Flagged)")
+            elif payload.action in {"unflag", "unstar"}:
+                adapter.store_flags(uid, "-FLAGS", "(\\Flagged)")
+        if payload.action in {"delete", "move"}:
+            adapter.expunge()
+        return {"action": payload.action, "folder": folder, "target_folder": payload.target_folder, "uids": payload.uids}
+    except MailAdapterError as exc:
+        raise AppError(
+            "MAILBOX_OPERATION_FAILED",
+            "邮件操作失败",
             http_status=status.HTTP_502_BAD_GATEWAY,
             details={"operation": exc.operation},
         ) from exc

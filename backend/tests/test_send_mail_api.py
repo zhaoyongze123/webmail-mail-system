@@ -51,6 +51,7 @@ class FakeImapAdapter:
     instances: list["FakeImapAdapter"] = []
     login_calls: list[tuple[str, str]] = []
     append_calls: list[tuple[str, bytes]] = []
+    delete_calls: list[tuple[str, str, str]] = []
 
     def __init__(self, settings) -> None:
         self.settings = settings
@@ -64,6 +65,7 @@ class FakeImapAdapter:
         cls.instances = []
         cls.login_calls = []
         cls.append_calls = []
+        cls.delete_calls = []
 
     def connect(self):
         self.connected = True
@@ -83,6 +85,10 @@ class FakeImapAdapter:
     def append_message(self, folder: str, message: EmailMessage):
         raw_bytes = message.as_bytes(policy=policy.default)
         FakeImapAdapter.append_calls.append((folder, raw_bytes))
+        return self
+
+    def delete_message(self, folder: str, draft_id: str):
+        FakeImapAdapter.delete_calls.append((self.settings.username, folder, draft_id))
         return self
 
 
@@ -495,6 +501,44 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
     assert appended_message["Subject"] == "测试发信"
     assert appended_message["To"] == "receiver@example.com"
     assert any(part.get_filename() == "report.txt" for part in appended_message.walk())
+
+
+def test_send_mail_with_draft_id_deletes_saved_draft_after_sent_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    fake_redis = getattr(client, "_fake_redis")
+    draft_id = "draft_send_cleanup"
+    fake_redis.hset(
+        f"draft:user@example.com:{draft_id}",
+        mapping={
+            "payload": "{}",
+            "draft_id": draft_id,
+            "owner_email": "user@example.com",
+            "status": "saved",
+        },
+    )
+    fake_redis.sadd("drafts:user@example.com", draft_id)
+
+    response = send_mail(
+        client,
+        {
+            "to": ["receiver@example.com"],
+            "subject": "发送草稿",
+            "text_body": "内容",
+            "attachment_ids": [],
+            "draft_id": draft_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["sent"] is True
+    assert fake_redis.exists(f"draft:user@example.com:{draft_id}") == 0
+    assert draft_id not in fake_redis.smembers("drafts:user@example.com")
+    assert FakeImapAdapter.delete_calls == [("user@example.com", ".Drafts", draft_id)]
 
 
 def test_send_mail_smtp_failure_returns_unified_error(monkeypatch: pytest.MonkeyPatch) -> None:
