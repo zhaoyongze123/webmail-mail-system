@@ -130,16 +130,25 @@ class JsonCache:
         self.client = client or get_redis_client()
 
     def set(self, key: str, value: Any, ttl_seconds: int) -> None:
-        self.client.set(key, json.dumps(value, ensure_ascii=False), ex=ttl_seconds)
+        try:
+            self.client.set(key, json.dumps(value, ensure_ascii=False), ex=ttl_seconds)
+        except redis.RedisError:
+            return None
 
     def get(self, key: str) -> Any | None:
-        value = self.client.get(key)
+        try:
+            value = self.client.get(key)
+        except redis.RedisError:
+            return None
         if value is None:
             return None
         return json.loads(value)
 
     def delete(self, key: str) -> bool:
-        return bool(self.client.delete(key))
+        try:
+            return bool(self.client.delete(key))
+        except redis.RedisError:
+            return False
 
 
 class RedisLock:

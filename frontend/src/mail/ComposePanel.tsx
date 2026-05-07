@@ -47,6 +47,7 @@ export type ComposePanelProps = {
   open: boolean;
   draftId?: string | null;
   initialValues?: ComposeValues | null;
+  from?: string;
   onClose: () => void;
   onSent?: (result: SendResult) => void;
   onSessionExpired?: () => void;
@@ -210,6 +211,7 @@ export default function ComposePanel({
   open,
   draftId,
   initialValues,
+  from = 'user@localhost',
   onClose,
   onSent,
   onSessionExpired,
@@ -451,50 +453,64 @@ export default function ComposePanel({
     <aside className="compose-panel" aria-label="写信面板" aria-modal="true">
       <form className="compose-panel-form" onSubmit={handleSubmit}>
         <header className="compose-panel-header">
-          <div>
-            <p className="eyebrow">新邮件</p>
-            <h2>写信</h2>
-          </div>
-          <button type="button" onClick={onClose} aria-label="关闭写信">
-            关闭
+          <h2 className="visually-hidden">写信</h2>
+          <button type="button" className="compose-window-button" aria-label="最小化写信">
+            -
+          </button>
+          <button type="button" className="compose-window-button" onClick={onClose} aria-label="关闭写信">
+            x
           </button>
         </header>
 
-        {errorMessage ? <div role="alert">{errorMessage}</div> : null}
+        {errorMessage ? (
+          <div className="compose-alert" role="alert">
+            {errorMessage}
+          </div>
+        ) : null}
 
-        <section aria-label="地址栏">
-          <label>
-            收件人
+        <section className="compose-address-container" aria-label="地址栏">
+          <div className="compose-field-row">
+            <span className="field-label">From</span>
+            <span className="field-value text-black">{from}</span>
+          </div>
+          <label className="compose-field-row">
+            <span className="field-label">To</span>
             <input
+              className="address-input"
               value={form.to}
               onChange={(event) => updateField('to', event.target.value)}
               onFocus={() => setActiveAddressField('to')}
-              placeholder="receiver@example.com"
+              placeholder="Add recipient"
               autoComplete="off"
+              aria-label="收件人"
             />
           </label>
-          <label>
-            抄送
+          <label className="compose-field-row">
+            <span className="field-label">Cc</span>
             <input
+              className="address-input"
               value={form.cc}
               onChange={(event) => updateField('cc', event.target.value)}
               onFocus={() => setActiveAddressField('cc')}
-              placeholder="cc@example.com"
+              placeholder="Add recipient"
               autoComplete="off"
+              aria-label="抄送"
             />
           </label>
-          <label>
-            密送
+          <label className="compose-field-row">
+            <span className="field-label">Bcc</span>
             <input
+              className="address-input"
               value={form.bcc}
               onChange={(event) => updateField('bcc', event.target.value)}
               onFocus={() => setActiveAddressField('bcc')}
-              placeholder="bcc@example.com"
+              placeholder="Add recipient"
               autoComplete="off"
+              aria-label="密送"
             />
           </label>
           {contacts.length > 0 ? (
-            <ul aria-label="联系人建议">
+            <ul className="compose-contact-suggestions" aria-label="联系人建议">
               {contacts.map((contact) => (
                 <li key={contact.email}>
                   <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => chooseContact(contact.email)}>
@@ -506,35 +522,74 @@ export default function ComposePanel({
           ) : null}
         </section>
 
-        <label>
-          主题
-          <input value={form.subject} onChange={(event) => updateField('subject', event.target.value)} />
+        <label className="compose-subject-container">
+          <span className="visually-hidden">主题</span>
+          <input
+            className="subject-input"
+            value={form.subject}
+            onChange={(event) => updateField('subject', event.target.value)}
+            placeholder="Subject"
+            aria-label="主题"
+          />
         </label>
 
-        <section aria-label="编辑工具栏">
-          <button type="button" aria-pressed={richMode === 'rich'} onClick={() => setRichMode('rich')}>
-            富文本
-          </button>
-          <button type="button" aria-pressed={richMode === 'plain'} onClick={() => setRichMode('plain')}>
-            纯文本
-          </button>
-          <button type="button" disabled title="富文本工具将在后续编辑器接入后启用">
-            B
-          </button>
-          <button type="button" disabled title="富文本工具将在后续编辑器接入后启用">
-            I
-          </button>
+        <section className="compose-body-container" aria-label="正文编辑区">
+          <div className="compose-toolbar-floating" role="toolbar" aria-label="编辑工具栏">
+            <button type="button" className="toolbar-btn toolbar-ai-btn" title="优化文字">
+              优化文字
+            </button>
+            <button type="button" className="toolbar-btn" title="Ask AI">
+              AI
+            </button>
+            <span className="toolbar-divider" aria-hidden="true" />
+            <button type="button" className="toolbar-btn" aria-pressed={richMode === 'rich'} onClick={() => setRichMode('rich')}>
+              富文本
+            </button>
+            <button type="button" className="toolbar-btn" aria-pressed={richMode === 'plain'} onClick={() => setRichMode('plain')}>
+              纯文本
+            </button>
+            <span className="toolbar-divider" aria-hidden="true" />
+            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+              B
+            </button>
+            <button type="button" className="toolbar-icon-btn italic" disabled title="富文本工具将在后续编辑器接入后启用">
+              I
+            </button>
+            <button type="button" className="toolbar-icon-btn underline" disabled title="富文本工具将在后续编辑器接入后启用">
+              U
+            </button>
+            <button type="button" className="toolbar-icon-btn strike" disabled title="富文本工具将在后续编辑器接入后启用">
+              S
+            </button>
+            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+              link
+            </button>
+            <span className="toolbar-divider" aria-hidden="true" />
+            <button type="button" className="toolbar-icon-btn text-style-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+              A
+            </button>
+            <button type="button" className="toolbar-icon-btn" disabled title="富文本工具将在后续编辑器接入后启用">
+              Tx
+            </button>
+          </div>
+
+          <label className="compose-body-label">
+            <span className="visually-hidden">正文</span>
+            <textarea
+              className="body-input"
+              value={form.textBody}
+              onChange={(event) => updateField('textBody', event.target.value)}
+              rows={10}
+              placeholder="Write your email..."
+              aria-label="正文"
+            />
+          </label>
         </section>
 
-        <label>
-          正文
-          <textarea value={form.textBody} onChange={(event) => updateField('textBody', event.target.value)} rows={10} />
-        </label>
-
-        <section aria-label="附件上传">
-          <label>
-            添加附件
-            <input type="file" multiple onChange={handleUpload} />
+        <section className="compose-attachments" aria-label="附件上传">
+          <label className="compose-upload-control">
+            <span>添加附件</span>
+            <input type="file" multiple onChange={handleUpload} aria-label="添加附件" />
           </label>
           {attachments.length > 0 ? (
             <ul aria-label="附件列表">
@@ -557,13 +612,44 @@ export default function ComposePanel({
         </section>
 
         <footer className="compose-panel-footer">
-          <span aria-live="polite">草稿状态：{saveLabel}</span>
-          <button type="button" onClick={() => void handleSaveDraft('manual')} disabled={saveState === 'saving' || sendState === 'sending'}>
-            保存草稿
-          </button>
-          <button type="submit" disabled={sendState === 'sending'}>
-            {sendState === 'sending' ? '发送中' : '发送'}
-          </button>
+          <div className="footer-left">
+            <div className="send-btn-group">
+              <button className="send-main-btn" type="submit" disabled={sendState === 'sending'}>
+                {sendState === 'sending' ? '发送中' : '发送'}
+              </button>
+              <button className="send-dropdown-btn" type="button" aria-label="发送选项">
+                v
+              </button>
+            </div>
+            <button
+              className="draft-btn"
+              type="button"
+              onClick={() => void handleSaveDraft('manual')}
+              disabled={saveState === 'saving' || sendState === 'sending'}
+            >
+              保存草稿
+            </button>
+            <span className="draft-status" aria-live="polite">
+              草稿状态：{saveLabel}
+            </span>
+          </div>
+          <div className="footer-right" aria-label="更多操作">
+            <button type="button" className="icon-btn" title="AI 写作">
+              AI
+            </button>
+            <button type="button" className="icon-btn" title="添加附件" onClick={() => undefined}>
+              @
+            </button>
+            <button type="button" className="icon-btn" title="插入变量">
+              {`{}`}
+            </button>
+            <button type="button" className="icon-btn" title="日历">
+              #
+            </button>
+            <button type="button" className="icon-btn danger" title="丢弃草稿" onClick={onClose}>
+              del
+            </button>
+          </div>
         </footer>
       </form>
     </aside>

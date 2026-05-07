@@ -1,688 +1,387 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { fetchSettings, saveSettings } from './mail/api';
-import ComposePanel, { type ComposeValues } from './mail/ComposePanel';
-import MailWorkspace from './mail/MailWorkspace';
-import MessageReader, { type MessageDetail } from './mail/MessageReader';
-import type { UserSettingsPreferences } from './mail/types';
-
-type SessionUser = {
-  email: string;
-};
-
-type ApiError = {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-};
-
-type ApiResponse<T> = {
-  success: boolean;
-  data: T | null;
-  error: ApiError | null;
-};
-
-type View = 'login' | 'mail' | 'settings' | 'error';
-
-type SessionState =
-  | {
-      status: 'loading';
-      user: null;
-      error: string | null;
-    }
-  | {
-      status: 'anonymous';
-      user: null;
-      error: string | null;
-    }
-  | {
-      status: 'authenticated';
-      user: SessionUser;
-      error: string | null;
-    };
-
-type LoginFormState = {
-  email: string;
-  password: string;
-  remember: boolean;
-};
-
-type LoginFormErrors = {
-  email?: string;
-  password?: string;
-  form?: string;
-};
-
-type SettingsFormState = {
-  page_size: string;
-  mark_read_on_open: boolean;
-};
-
-type SettingsFormErrors = {
-  page_size?: string;
-};
-
-const SESSION_KEY = 'webmail.session';
-const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
-const CSRF_COOKIE_NAME = 'webmail_csrf';
-
-function readSessionStorage(): SessionUser | null {
-  try {
-    const raw = window.sessionStorage.getItem(SESSION_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw) as Partial<SessionUser>;
-    if (typeof parsed.email === 'string' && parsed.email) {
-      return { email: parsed.email };
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function persistSession(user: SessionUser | null) {
-  if (!user) {
-    window.sessionStorage.removeItem(SESSION_KEY);
-    return;
-  }
-  window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
-}
-
-function readCookie(name: string): string | null {
-  const prefix = `${encodeURIComponent(name)}=`;
-  for (const item of window.document.cookie.split(';')) {
-    const trimmed = item.trim();
-    if (trimmed.startsWith(prefix)) {
-      return decodeURIComponent(trimmed.slice(prefix.length));
-    }
-  }
-  return null;
-}
-
-async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
-  const method = (init?.method || 'GET').toUpperCase();
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(init?.headers ?? {}),
-  } as Record<string, string>;
-  if (!SAFE_METHODS.has(method)) {
-    const csrfToken = readCookie(CSRF_COOKIE_NAME);
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken;
-    }
-  }
-  const response = await fetch(input, {
-    credentials: 'include',
-    headers,
-    ...init,
-  });
-  const payload = (await response.json()) as ApiResponse<T>;
-  if (!response.ok || !payload.success) {
-    const message = payload.error?.message || '请求失败，请稍后重试';
-    const error = new Error(message) as Error & { code?: string };
-    error.code = payload.error?.code;
-    throw error;
-  }
-  return payload.data as T;
-}
-
-async function getCurrentUser(): Promise<SessionUser> {
-  return requestApi<SessionUser>('/api/auth/me', { method: 'GET' });
-}
-
-async function loginApi(payload: LoginFormState): Promise<SessionUser> {
-  return requestApi<SessionUser>('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-}
-
-async function logoutApi(): Promise<void> {
-  await requestApi<{ logged_out: boolean }>('/api/auth/logout', { method: 'POST' });
-}
-
-function useSession() {
-  const [session, setSession] = useState<SessionState>(() => ({
-    status: 'loading',
-    user: null,
-    error: null,
-  }));
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function syncSession() {
-      try {
-        const user = await getCurrentUser();
-        if (cancelled) {
-          return;
-        }
-        persistSession(user);
-        setSession({ status: 'authenticated', user, error: null });
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-        const message = error instanceof Error ? error.message : '会话失效，请重新登录';
-        persistSession(null);
-        setSession({ status: 'anonymous', user: null, error: message });
-      }
-    }
-
-    syncSession();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const actions = useMemo(
-    () => ({
-      async signIn(form: LoginFormState) {
-        const user = await loginApi(form);
-        persistSession(user);
-        setSession({ status: 'authenticated', user, error: null });
-        return user;
-      },
-      async signOut() {
-        try {
-          await logoutApi();
-        } finally {
-          persistSession(null);
-          setSession({ status: 'anonymous', user: null, error: '已退出登录，请重新登录' });
-        }
-      },
-      markExpired(message: string) {
-        persistSession(null);
-        setSession({ status: 'anonymous', user: null, error: message });
-      },
-    }),
-    [],
-  );
-
-  return { session, actions };
-}
-
-function parseView(pathname: string): View {
-  if (pathname.startsWith('/settings')) {
-    return 'settings';
-  }
-  if (pathname.startsWith('/error')) {
-    return 'error';
-  }
-  if (pathname.startsWith('/mail')) {
-    return 'mail';
-  }
-  return 'login';
-}
-
-function useLocationState() {
-  const [path, setPath] = useState(() => window.location.pathname || '/login');
-
-  useEffect(() => {
-    const onPopState = () => {
-      setPath(window.location.pathname || '/login');
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => {
-      window.removeEventListener('popstate', onPopState);
-    };
-  }, []);
-
-  const navigate = (nextPath: string) => {
-    if (nextPath === window.location.pathname) {
-      setPath(nextPath);
-      return;
-    }
-    window.history.pushState({}, '', nextPath);
-    setPath(nextPath);
-  };
-
-  return { path, navigate };
-}
-
-function AppHeader({
-  email,
-  onNavigate,
-  onLogout,
-}: {
-  email: string;
-  onNavigate: (path: string) => void;
-  onLogout: () => void;
-}) {
-  return (
-    <header className="app-header">
-      <div>
-        <p className="eyebrow">Webmail MVP</p>
-        <h1>邮件工作台</h1>
-      </div>
-      <div className="header-actions">
-        <button type="button" className="ghost-button" onClick={() => onNavigate('/mail')}>
-          邮件
-        </button>
-        <button type="button" className="ghost-button" onClick={() => onNavigate('/settings')}>
-          设置
-        </button>
-        <div className="account-badge" aria-label="当前账号">
-          {email}
-        </div>
-        <button type="button" className="primary-button" onClick={onLogout}>
-          退出登录
-        </button>
-      </div>
-    </header>
-  );
-}
-
-function LoginPage({
-  initialError,
-  onLogin,
-}: {
-  initialError: string | null;
-  onLogin: (form: LoginFormState) => Promise<void>;
-}) {
-  const [form, setForm] = useState<LoginFormState>({
-    email: '',
-    password: '',
-    remember: false,
-  });
-  const [errors, setErrors] = useState<LoginFormErrors>({});
-  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle');
-  const [message, setMessage] = useState<string | null>(initialError);
-
-  useEffect(() => {
-    if (initialError) {
-      setMessage(initialError);
-    }
-  }, [initialError]);
-
-  const validate = () => {
-    const nextErrors: LoginFormErrors = {};
-    if (!form.email.trim()) {
-      nextErrors.email = '请输入邮箱地址';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
-      nextErrors.email = '邮箱格式不正确';
-    }
-    if (!form.password) {
-      nextErrors.password = '请输入密码';
-    }
-    setErrors(nextErrors);
-    return Object.keys(nextErrors).length === 0;
-  };
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setMessage(null);
-    if (!validate()) {
-      return;
-    }
-    setStatus('submitting');
-    try {
-      await onLogin({
-        email: form.email.trim().toLowerCase(),
-        password: form.password,
-        remember: form.remember,
-      });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : '登录失败';
-      setStatus('error');
-      setMessage(text);
-    } finally {
-      setStatus((current) => (current === 'submitting' ? 'idle' : current));
-    }
-  };
-
-  return (
-    <main className="auth-shell">
-      <section className="auth-card">
-        <div className="auth-copy">
-          <p className="eyebrow">Webmail MVP</p>
-          <h1>登录邮箱</h1>
-          <p className="subtitle">使用现有邮箱账号进入邮件工作台。</p>
-        </div>
-        <form className="auth-form" onSubmit={submit} noValidate>
-          <label className="field">
-            <span>邮箱地址</span>
-            <input
-              name="email"
-              type="email"
-              autoComplete="username"
-              value={form.email}
-              onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
-              aria-invalid={Boolean(errors.email)}
-              aria-describedby={errors.email ? 'email-error' : undefined}
-              placeholder="user@example.com"
-            />
-            {errors.email ? (
-              <small id="email-error" className="field-error">
-                {errors.email}
-              </small>
-            ) : null}
-          </label>
-          <label className="field">
-            <span>密码</span>
-            <input
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              value={form.password}
-              onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
-              aria-invalid={Boolean(errors.password)}
-              aria-describedby={errors.password ? 'password-error' : undefined}
-              placeholder="请输入密码"
-            />
-            {errors.password ? (
-              <small id="password-error" className="field-error">
-                {errors.password}
-              </small>
-            ) : null}
-          </label>
-          <label className="checkbox-row">
-            <input
-              name="remember"
-              type="checkbox"
-              checked={form.remember}
-              onChange={(event) => setForm((current) => ({ ...current, remember: event.target.checked }))}
-            />
-            <span>记住登录</span>
-          </label>
-          {message ? (
-            <div className={`notice ${status === 'error' ? 'notice-error' : ''}`} role="alert">
-              {message}
-            </div>
-          ) : null}
-          <button type="submit" className="primary-button submit-button" disabled={status === 'submitting'}>
-            {status === 'submitting' ? '登录中...' : '登录'}
-          </button>
-        </form>
-      </section>
-    </main>
-  );
-}
-
-function messageKey(folder: string, uid: string) {
-  return `${folder}:${uid}`;
-}
-
-function replyValues(message: MessageDetail): ComposeValues {
-  const from = Array.isArray(message.from) ? message.from[0] : message.from;
-  const email = typeof from === 'string' ? from : from?.email;
-  return {
-    to: email ? [email] : [],
-    subject: message.subject?.startsWith('Re:') ? message.subject : `Re: ${message.subject || '无主题'}`,
-    text_body: `\n\n---- 原始邮件 ----\n${message.text_body || ''}`,
-  };
-}
-
-function forwardValues(message: MessageDetail): ComposeValues {
-  return {
-    subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject || '无主题'}`,
-    text_body: `\n\n---- 转发邮件 ----\n${message.text_body || ''}`,
-  };
-}
-
-function MailView({
-  onSessionExpired,
-  onOpenSettings,
-}: {
-  onSessionExpired: () => void;
-  onOpenSettings: () => void;
-}) {
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [selectedUid, setSelectedUid] = useState<string | null>(null);
-  const [composeOpen, setComposeOpen] = useState(false);
-  const [composeInitialValues, setComposeInitialValues] = useState<ComposeValues | null>(null);
-
-  const selectedMessageKey = selectedFolder && selectedUid ? messageKey(selectedFolder, selectedUid) : null;
-
-  const openCompose = (values: ComposeValues | null = null) => {
-    setComposeInitialValues(values);
-    setComposeOpen(true);
-  };
-
-  return (
-    <>
-      <section className="content-panel mail-panel">
-        <MailWorkspace
-          selectedMessageKey={selectedMessageKey}
-          onOpenMessage={(uid, folder) => {
-            setSelectedFolder(folder);
-            setSelectedUid(uid);
-          }}
-          onCompose={() => openCompose()}
-          onOpenSettings={onOpenSettings}
-          renderReader={(context) => (
-            <MessageReader
-              folder={context?.folder ?? selectedFolder}
-              uid={context?.uid ?? selectedUid}
-              onSessionExpired={onSessionExpired}
-              onReply={(message) => openCompose(replyValues(message))}
-              onForward={(message) => openCompose(forwardValues(message))}
-            />
-          )}
-        />
-      </section>
-      <ComposePanel
-        open={composeOpen}
-        initialValues={composeInitialValues}
-        onClose={() => setComposeOpen(false)}
-        onSent={() => {
-          setComposeOpen(false);
-          setComposeInitialValues(null);
-        }}
-        onSessionExpired={onSessionExpired}
-      />
-    </>
-  );
-}
-
-function SettingsView({ email, onBack, onLogout }: { email: string; onBack: () => void; onLogout: () => void }) {
-  const [form, setForm] = useState<SettingsFormState>({
-    page_size: '30',
-    mark_read_on_open: true,
-  });
-  const [errors, setErrors] = useState<SettingsFormErrors>({});
-  const [message, setMessage] = useState<string | null>(null);
-  const [status, setStatus] = useState<'loading' | 'idle' | 'saving' | 'error'>('loading');
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchSettings()
-      .then((payload) => {
-        if (cancelled) {
-          return;
-        }
-        setForm({
-          page_size: String(payload.preferences.page_size ?? 30),
-          mark_read_on_open: Boolean(payload.preferences.mark_read_on_open),
-        });
-        setStatus('idle');
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        setMessage(error instanceof Error ? error.message : '设置加载失败');
-        setStatus('error');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const nextErrors: SettingsFormErrors = {};
-    const pageSize = Number(form.page_size);
-    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
-      nextErrors.page_size = '每页邮件数必须在 1 到 100 之间';
-    }
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) {
-      return;
-    }
-    setStatus('saving');
-    setMessage(null);
-    try {
-      const payload = await saveSettings({
-        page_size: pageSize,
-        mark_read_on_open: form.mark_read_on_open,
-      } satisfies Partial<UserSettingsPreferences>);
-      setForm({
-        page_size: String(payload.preferences.page_size ?? pageSize),
-        mark_read_on_open: Boolean(payload.preferences.mark_read_on_open),
-      });
-      setMessage('设置已保存');
-      setStatus('idle');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '设置保存失败');
-      setStatus('error');
-    }
-  };
-
-  return (
-    <section className="content-panel">
-      <div className="panel-title-row">
-        <div>
-          <p className="eyebrow">设置</p>
-          <h2>账号偏好</h2>
-        </div>
-        <div className="settings-actions">
-          <button type="button" className="secondary-button" onClick={onBack}>
-            返回邮件
-          </button>
-          <button type="button" className="ghost-button" onClick={onLogout}>
-            退出登录
-          </button>
-        </div>
-      </div>
-      <dl className="settings-list">
-        <div>
-          <dt>当前账号</dt>
-          <dd>{email}</dd>
-        </div>
-      </dl>
-      <form className="settings-form" onSubmit={submit}>
-        <label className="field">
-          <span>每页邮件数</span>
-          <input
-            type="number"
-            min={1}
-            max={100}
-            value={form.page_size}
-            onChange={(event) => setForm((current) => ({ ...current, page_size: event.target.value }))}
-          />
-          {errors.page_size ? <small className="field-error">{errors.page_size}</small> : null}
-        </label>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={form.mark_read_on_open}
-            onChange={(event) => setForm((current) => ({ ...current, mark_read_on_open: event.target.checked }))}
-          />
-          <span>打开邮件时自动标记为已读</span>
-        </label>
-        {message ? (
-          <div className={`notice ${status === 'error' ? 'notice-error' : ''}`} role="status">
-            {message}
-          </div>
-        ) : null}
-        <div className="settings-actions">
-          <button type="submit" className="primary-button" disabled={status === 'loading' || status === 'saving'}>
-            {status === 'saving' ? '保存中...' : '保存设置'}
-          </button>
-        </div>
-      </form>
-    </section>
-  );
-}
-
-function ErrorView({ message, onNavigate }: { message: string; onNavigate: (path: string) => void }) {
-  return (
-    <main className="auth-shell">
-      <section className="auth-card">
-        <div className="auth-copy">
-          <p className="eyebrow">Webmail MVP</p>
-          <h1>服务异常</h1>
-          <p className="subtitle">{message}</p>
-        </div>
-        <div className="error-actions">
-          <button type="button" className="primary-button" onClick={() => onNavigate('/login')}>
-            返回登录
-          </button>
-          <button type="button" className="secondary-button" onClick={() => onNavigate('/mail')}>
-            重试进入邮箱
-          </button>
-        </div>
-      </section>
-    </main>
-  );
-}
+import React, { useState, useEffect, FormEvent } from 'react';
+import './styles.css';
+import {
+  fetchFolders,
+  fetchFolderMessages,
+  searchFolderMessages,
+  updateMessageOperation,
+  moveMessages,
+  deleteMessages,
+  fetchSettings,
+  saveSettings
+} from './mail/api';
+import ComposePanel from './mail/ComposePanel';
+import type { MailFolder, MailMessageSummary, MessageOperationAction, UserSettingsPreferences } from './mail/types';
 
 export default function App() {
-  const { path, navigate } = useLocationState();
-  const { session, actions } = useSession();
-  const view = parseView(path);
+  const [folders, setFolders] = useState<MailFolder[]>([]);
+  const [currentFolder, setCurrentFolder] = useState<string>('INBOX');
+  const [messages, setMessages] = useState<MailMessageSummary[]>([]);
+  const [query, setQuery] = useState('');
+  const [activeQuery, setActiveQuery] = useState('');
+  const [selectedMessage, setSelectedMessage] = useState<MailMessageSummary | null>(null);
+  const [messageBody, setMessageBody] = useState<string>('');
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+
+  // Settings State
+  const [showSettings, setShowSettings] = useState(false);
+  const [preferences, setPreferences] = useState<UserSettingsPreferences>({ page_size: 30, mark_read_on_open: true });
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [accountEmail, setAccountEmail] = useState('user@localhost');
+
+  // Compose State
+  const [isComposing, setIsComposing] = useState(false);
+
+  // Load Folders & Settings
+  useEffect(() => {
+    fetchFolders().then((res) => {
+      setFolders(res.folders || []);
+      if (res.folders?.length) {
+        const inbox = res.folders.find(f => f.name.toUpperCase() === 'INBOX');
+        setCurrentFolder(inbox?.name || res.folders[0].name);
+      }
+    }).catch(console.error);
+
+    fetchSettings().then((res) => {
+      if (res.account?.email) setAccountEmail(res.account.email);
+      if (res.preferences) setPreferences(res.preferences);
+    }).catch(console.error);
+  }, []);
+
+  // Load Messages when folder, query or preferences changes
+  const loadMessages = () => {
+    if (!currentFolder) return;
+    setIsLoadingMessages(true);
+    const loadOpts = { refresh: true, query: activeQuery, pageSize: preferences.page_size };
+
+    const request = activeQuery.trim()
+      ? searchFolderMessages(currentFolder, activeQuery.trim(), loadOpts)
+      : fetchFolderMessages(currentFolder, loadOpts);
+
+    request.then(res => {
+      setMessages(res.messages || []);
+      setSelectedMessage(null); // Reset selection on refresh
+    }).catch(console.error).finally(() => setIsLoadingMessages(false));
+  };
 
   useEffect(() => {
-    if (session.status === 'anonymous' && view !== 'login') {
-      navigate('/login');
-    }
-  }, [navigate, session.status, view]);
+    loadMessages();
+  }, [currentFolder, activeQuery, preferences.page_size]);
 
+  // Load specific message details when selected
   useEffect(() => {
-    if (session.status === 'authenticated' && view === 'login') {
-      navigate('/mail');
+    if (!selectedMessage) {
+      setMessageBody('');
+      return;
     }
-  }, [navigate, session.status, view]);
 
-  if (session.status === 'loading') {
-    return (
-      <main className="auth-shell">
-        <section className="auth-card">
-          <p className="eyebrow">Webmail MVP</p>
-          <h1>正在检查会话</h1>
-          <p className="subtitle">请稍候，正在同步登录状态。</p>
-        </section>
-      </main>
-    );
-  }
+    let cancelled = false;
+    fetch(`/api/folders/${encodeURIComponent(currentFolder)}/messages/${encodeURIComponent(selectedMessage.uid)}`)
+      .then(res => res.json())
+      .then(res => {
+        if (cancelled) return;
+        if (res.success && res.data) {
+          setMessageBody(res.data.text_body || res.data.html_body || '此邮件暂无正文内容。');
+          // Optionally mark as read automatically per settings
+          if (preferences.mark_read_on_open && !selectedMessage.read) {
+             updateMessageOperation(currentFolder, { action: 'mark_read', uids: [selectedMessage.uid] }).then(() => {
+                setMessages(msgs => msgs.map(m => m.uid === selectedMessage.uid ? { ...m, read: true } : m));
+             });
+          }
+        } else {
+          setMessageBody('加载邮件正文失败。');
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setMessageBody('加载出错: ' + e.message);
+      });
 
-  if (view === 'error') {
-    return <ErrorView message={session.error || '服务暂时不可用'} onNavigate={navigate} />;
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMessage, currentFolder]);
 
-  if (session.status === 'anonymous') {
-    return (
-      <LoginPage
-        initialError={session.error}
-        onLogin={async (form) => {
-          await actions.signIn(form);
-          navigate('/mail');
-        }}
-      />
-    );
-  }
+  const doSearch = (e: FormEvent) => {
+    e.preventDefault();
+    setActiveQuery(query);
+  };
+
+  const handleClearSearch = () => {
+    setQuery('');
+    setActiveQuery('');
+  };
+
+  const handleMsgAction = async (action: MessageOperationAction | 'hard_delete') => {
+    if (!selectedMessage) return;
+    try {
+      if (action === 'hard_delete') {
+         await deleteMessages(currentFolder, [selectedMessage.uid]);
+      } else {
+         await updateMessageOperation(currentFolder, { action, uids: [selectedMessage.uid] });
+      }
+      loadMessages();
+      if (action === 'delete' || action === 'hard_delete') setSelectedMessage(null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleMove = async (targetFolder: string) => {
+    if (!selectedMessage || !targetFolder) return;
+    try {
+      await moveMessages(currentFolder, [selectedMessage.uid], targetFolder);
+      loadMessages();
+      setSelectedMessage(null);
+    } catch(e) {
+      console.error(e);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    setIsSavingSettings(true);
+    try {
+      const res = await saveSettings({ ...preferences });
+      if (res.preferences) setPreferences(res.preferences);
+      setShowSettings(false);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const formatDate = (dateStr: string | null) => {
+    if (!dateStr) return '';
+    try {
+      return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(dateStr));
+    } catch {
+      return dateStr;
+    }
+  };
 
   return (
-    <main className="app-shell">
-      <AppHeader email={session.user.email} onNavigate={navigate} onLogout={() => actions.signOut().then(() => navigate('/login'))} />
-      {view === 'settings' ? (
-        <SettingsView
-          email={session.user.email}
-          onBack={() => navigate('/mail')}
-          onLogout={() => actions.signOut().then(() => navigate('/login'))}
-        />
-      ) : (
-        <MailView
-          onSessionExpired={() => {
-            actions.markExpired('登录已过期，请重新登录');
-            navigate('/login');
-          }}
-          onOpenSettings={() => navigate('/settings')}
-        />
+    <div className="app-container">
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="account-info">
+            <div className="account-avatar">{accountEmail.charAt(0).toUpperCase()}</div>
+            <div className="account-text">
+              <span className="account-name">User</span>
+              <span className="account-email">{accountEmail}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="compose-btn-container">
+          <button className="compose-btn" onClick={() => setIsComposing(true)}>
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+              <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"></path>
+            </svg>
+            写邮件
+          </button>
+        </div>
+
+        <form className="search-box" onSubmit={doSearch}>
+          <div className="search-input-wrapper">
+            <svg className="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input
+              type="search"
+              className="search-input"
+              placeholder="搜索邮件..."
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+            />
+            {query && (
+               <button
+                 type="button"
+                 onClick={handleClearSearch}
+                 style={{ position: 'absolute', right: 8, border: 'none', background: 'transparent', cursor: 'pointer', color: '#999' }}
+               >
+                 ×
+               </button>
+            )}
+          </div>
+        </form>
+
+        <div className="nav-section">
+          <div className="nav-group">
+            <div className="nav-title">文件夹</div>
+            <ul>
+              {folders.map(folder => (
+                <li
+                  key={folder.name}
+                  className={`nav-item ${currentFolder === folder.name ? 'active' : ''}`}
+                  onClick={() => {
+                    setCurrentFolder(folder.name);
+                    setActiveQuery('');
+                    setQuery('');
+                  }}
+                >
+                  <div className="nav-item-left">
+                    <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span>{folder.display_name || folder.name}</span>
+                  </div>
+                  {folder.unread_count > 0 && <span className="badge">{folder.unread_count}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="sidebar-footer">
+          <div className="footer-item" onClick={() => setShowSettings(true)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            系统设置
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="main-content">
+        <header className="topbar">
+          <div className="topbar-left">
+            <div className="topbar-title">
+              {folders.find(f => f.name === currentFolder)?.display_name || currentFolder}
+              {activeQuery && <span style={{fontSize: '14px', color: '#666', fontWeight: 400, marginLeft: '12px'}}>搜索: {activeQuery}</span>}
+            </div>
+          </div>
+          <div className="topbar-right">
+             <button className="action-btn" onClick={loadMessages}>刷新列表</button>
+          </div>
+        </header>
+
+        <div className="content-row">
+          {/* Message List */}
+          <div className="message-list-container">
+            {isLoadingMessages ? (
+               <div style={{ padding: '24px', color: '#666' }}>正在加载邮件...</div>
+            ) : messages.length === 0 ? (
+               <div style={{ padding: '24px', color: '#666' }}>当前文件夹暂无邮件。</div>
+            ) : (
+               messages.map(msg => (
+                <div
+                  key={msg.uid}
+                  className="message-row"
+                  style={{ background: selectedMessage?.uid === msg.uid ? '#eaf1fb' : '' }}
+                  onClick={() => setSelectedMessage(msg)}
+                >
+                  {!msg.read ? <div className="unread-dot"></div> : <div className="read-dot-placeholder"></div>}
+                  <div className="sender-name">{msg.sender?.name || msg.sender?.email || 'Unknown'}</div>
+                  <div className="message-subject">{msg.subject || '(无主题)'}</div>
+                  <div className="message-preview">{msg.snippet}</div>
+                  <div className="message-time">{formatDate(msg.date)}</div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Reading Pane */}
+          {selectedMessage && (
+            <div className="reading-pane">
+              <div className="reading-header">
+                <div className="reading-header-top">
+                  <select
+                    title="移动到"
+                    className="minmax-btn"
+                    value=""
+                    onChange={e => handleMove(e.target.value)}
+                    style={{ marginRight: '8px' }}
+                  >
+                    <option value="" disabled>移动到...</option>
+                    {folders.filter(f => f.name !== currentFolder).map(f => (
+                      <option key={f.name} value={f.name}>{f.display_name}</option>
+                    ))}
+                  </select>
+                  <button className="minmax-btn" onClick={() => handleMsgAction(selectedMessage.read ? 'mark_unread' : 'mark_read')} title="标记已读/未读">
+                    {selectedMessage.read ? '标为未读' : '标为已读'}
+                  </button>
+                  <button className="minmax-btn" onClick={() => handleMsgAction('delete')} title="移到回收站 (操作)" style={{ marginLeft: '8px' }}>
+                    <span style={{fontSize: '14px', marginRight: '4px'}}>🗑</span> 删除
+                  </button>
+                  <button className="minmax-btn" onClick={() => handleMsgAction('hard_delete')} title="彻底删除" style={{ marginLeft: '8px' }}>
+                    <span style={{fontSize: '14px', marginRight: '4px'}}>⚠</span> 彻底删除
+                  </button>
+                  <button className="minmax-btn" onClick={() => setSelectedMessage(null)} title="关闭" style={{ border: 'none', marginLeft: 'auto' }}>
+                    <span style={{fontSize: '20px'}}>×</span>
+                  </button>
+                </div>
+                <div className="reading-field">
+                  <div className="field-label">发件人</div>
+                  <div className="field-value">{selectedMessage.sender?.name} <span>&lt;{selectedMessage.sender?.email}&gt;</span></div>
+                </div>
+                {selectedMessage.to?.length ? (
+                  <div className="reading-field">
+                     <div className="field-label">收件人</div>
+                     <div className="field-value">{selectedMessage.to.map(t => t.email).join(', ')}</div>
+                  </div>
+                ) : null}
+                <div className="reading-field" style={{marginTop: '12px', paddingBottom: '12px'}}>
+                  <div className="field-label" style={{color: '#222', fontSize: '18px', fontWeight: 600, width: '100%'}}>
+                    {selectedMessage.subject || '(无主题)'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="reading-body">
+                {messageBody || '正在加载正文...'}
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="settings-modal-overlay">
+          <div className="settings-modal">
+             <h2>系统设置</h2>
+             <div className="settings-field">
+                <label>每页显示邮件数</label>
+                <select
+                  value={preferences.page_size}
+                  onChange={e => setPreferences({...preferences, page_size: Number(e.target.value)})}
+                >
+                  <option value={10}>10</option>
+                  <option value={30}>30</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+             </div>
+             <div className="settings-field" style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  id="markReadOnOpen"
+                  checked={preferences.mark_read_on_open}
+                  onChange={e => setPreferences({...preferences, mark_read_on_open: e.target.checked})}
+                />
+                <label htmlFor="markReadOnOpen">自动标记为已读 (打开时)</label>
+             </div>
+             <div className="settings-actions">
+                <button onClick={() => setShowSettings(false)}>取消</button>
+                <button className="primary" onClick={handleSaveSettings} disabled={isSavingSettings}>
+                  {isSavingSettings ? '保存中...' : '保存'}
+                </button>
+             </div>
+          </div>
+        </div>
       )}
-    </main>
+
+      {/* Compose Component (Native fixed positioning) */}
+      <ComposePanel
+        open={isComposing}
+        from={accountEmail}
+        onClose={() => setIsComposing(false)}
+        onSent={() => { loadMessages(); setIsComposing(false); }}
+      />
+    </div>
   );
 }
