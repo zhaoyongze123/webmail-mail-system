@@ -153,6 +153,34 @@ def test_login_success_sets_session_cookie_and_me_returns_email(monkeypatch: pyt
     assert me_body["data"]["email"] == "user@example.com"
 
 
+def test_register_success_sets_session_cookie_and_me_returns_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "email": "new-user@example.com",
+            "password": "correct-password",
+            "display_name": "新用户",
+            "remember": True,
+        },
+    )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["email"] == "new-user@example.com"
+    assert "webmail_session=" in response.headers.get("set-cookie", "")
+    assert any(event["event_type"] == "auth.register" and event["success"] is True for event in get_recent_audit_events())
+
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["data"]["email"] == "new-user@example.com"
+
+
 def test_logout_invalidates_session(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)
 

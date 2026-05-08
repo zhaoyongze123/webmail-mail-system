@@ -119,7 +119,7 @@ def _load_session_csrf_token(request: Request) -> str | None:
 def validate_csrf_request(request: Request) -> None:
     if request.method in SAFE_METHODS:
         return
-    if request.url.path == "/api/auth/login":
+    if request.url.path in {"/api/auth/login", "/api/auth/register"}:
         return
     expected_token = _load_session_csrf_token(request)
     if not expected_token:

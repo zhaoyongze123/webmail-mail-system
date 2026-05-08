@@ -10,6 +10,7 @@ from app.config import Settings, get_settings
 from app.crypto import decrypt_text, encrypt_text
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
+from app.mail_state import ensure_mail_account
 from app.redis_client import get_redis_client
 from app.security import issue_session_cookies, new_csrf_token, clear_session_cookies
 from app.observability import record_audit_event
@@ -19,6 +20,10 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     remember: bool = False
+
+
+class RegisterRequest(LoginRequest):
+    display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,31 @@ def authenticate_mailbox(email: str, password: str, settings: Settings | None = 
             pass
 
 
+def _create_session(email: str, password: str, settings: Settings) -> tuple[str, dict[str, object], str]:
+    session_store = SessionStore(client=get_redis_client(), settings=settings)
+    csrf_token = new_csrf_token()
+    session_id = session_store.create(
+        {
+            "email": email,
+            "imap": {
+                "host": settings.mail_imap_host,
+                "port": settings.mail_imap_port,
+                "ssl": settings.mail_imap_ssl,
+                "starttls": settings.mail_imap_starttls,
+            },
+            "smtp": {
+                "host": settings.mail_smtp_host,
+                "port": settings.mail_smtp_port,
+                "ssl": settings.mail_smtp_ssl,
+                "starttls": settings.mail_smtp_starttls,
+            },
+            "secret": encrypt_text(password),
+            "csrf_token": csrf_token,
+        }
+    )
+    return session_id, {"email": email}, csrf_token
+
+
 def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, object], str]:
     settings = get_settings()
     redis_client = get_redis_client()
@@ -115,34 +145,39 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
         raise
 
     limiter.clear(ip, email)
-    session_store = SessionStore(client=redis_client, settings=settings)
-    csrf_token = new_csrf_token()
-    session_id = session_store.create(
-        {
-            "email": email,
-            "imap": {
-                "host": settings.mail_imap_host,
-                "port": settings.mail_imap_port,
-                "ssl": settings.mail_imap_ssl,
-                "starttls": settings.mail_imap_starttls,
-            },
-            "smtp": {
-                "host": settings.mail_smtp_host,
-                "port": settings.mail_smtp_port,
-                "ssl": settings.mail_smtp_ssl,
-                "starttls": settings.mail_smtp_starttls,
-            },
-            "secret": encrypt_text(payload.password),
-            "csrf_token": csrf_token,
-        }
-    )
+    session_id, user_data, csrf_token = _create_session(email, payload.password, settings)
+    ensure_mail_account(email)
     record_audit_event(
         request,
         "auth.login",
         success=True,
         metadata={"email": email, "remember": payload.remember},
     )
-    return session_id, {"email": email}, csrf_token
+    return session_id, user_data, csrf_token
+
+
+def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict[str, object], str]:
+    settings = get_settings()
+    email = payload.email.lower()
+    try:
+        authenticate_mailbox(email, payload.password, settings)
+    except AppError:
+        record_audit_event(
+            request,
+            "auth.register",
+            success=False,
+            metadata={"email": email, "reason": "invalid_credentials"},
+        )
+        raise
+    ensure_mail_account(email, display_name=payload.display_name)
+    session_id, user_data, csrf_token = _create_session(email, payload.password, settings)
+    record_audit_event(
+        request,
+        "auth.register",
+        success=True,
+        metadata={"email": email, "has_display_name": bool(payload.display_name)},
+    )
+    return session_id, user_data, csrf_token
 
 
 def set_session_cookie(response: Response, session_id: str, csrf_token: str) -> None:

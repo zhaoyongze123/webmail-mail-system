@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.errors import AppError
 from app import mail_adapters, redis_client
 from app.mail_adapters import ImapSettings, MailAdapterError, _parse_status_response
+from app.mail_state import ensure_mail_account, persist_message_read_state, sync_folders, sync_message_summaries
 from app.security import validate_attachment_id
 
 
@@ -36,11 +37,13 @@ SYSTEM_FOLDERS = [
 ALLOWED_HTML_TAGS = [
     "a",
     "abbr",
+    "b",
     "blockquote",
     "br",
     "code",
     "div",
     "em",
+    "font",
     "h1",
     "h2",
     "h3",
@@ -48,10 +51,13 @@ ALLOWED_HTML_TAGS = [
     "h5",
     "h6",
     "hr",
+    "i",
+    "img",
     "li",
     "ol",
     "p",
     "pre",
+    "s",
     "span",
     "strong",
     "table",
@@ -60,10 +66,93 @@ ALLOWED_HTML_TAGS = [
     "th",
     "thead",
     "tr",
+    "u",
     "ul",
 ]
-ALLOWED_HTML_ATTRS = {"a": ["href", "title", "target", "rel"], "*": ["class"]}
-ALLOWED_HTML_PROTOCOLS = ["http", "https", "mailto"]
+ALLOWED_HTML_PROTOCOLS = ["http", "https", "mailto", "data"]
+ALLOWED_CSS_PROPERTIES = [
+    "background",
+    "background-color",
+    "border",
+    "border-bottom",
+    "border-collapse",
+    "border-left",
+    "border-right",
+    "border-top",
+    "color",
+    "font",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "height",
+    "line-height",
+    "margin",
+    "margin-bottom",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "padding",
+    "padding-bottom",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "table-layout",
+    "text-align",
+    "text-decoration",
+    "vertical-align",
+    "width",
+]
+
+
+class _SimpleCSSSanitizer:
+    def __init__(self, allowed_css_properties: list[str]) -> None:
+        self.allowed_css_properties = set(allowed_css_properties)
+
+    def sanitize_css(self, style: str) -> str:
+        safe_rules: list[str] = []
+        for raw_rule in style.split(";"):
+            property_name, separator, raw_value = raw_rule.partition(":")
+            if not separator:
+                continue
+            property_name = property_name.strip().lower()
+            value = raw_value.strip()
+            lowered_value = value.lower()
+            if property_name not in self.allowed_css_properties:
+                continue
+            if any(token in lowered_value for token in ("expression", "javascript:", "vbscript:", "behavior:", "@import")):
+                continue
+            if "url(" in lowered_value and "data:image/" not in lowered_value:
+                continue
+            if value:
+                safe_rules.append(f"{property_name}:{value}")
+        return ";".join(safe_rules)
+
+
+def _allowed_html_attr(tag: str, name: str, value: str) -> bool:
+    if name in {"class", "style"}:
+        return True
+    if tag == "a":
+        if name in {"title", "target", "rel"}:
+            return True
+        if name == "href":
+            return value.lower().startswith(("http://", "https://", "mailto:"))
+        return False
+    if tag == "font":
+        return name in {"color", "face", "size"}
+    if tag == "img":
+        if name in {"alt", "title", "width", "height"}:
+            return True
+        if name == "src":
+            return value.lower().startswith(("http://", "https://", "data:image/"))
+        return False
+    if tag in {"td", "th"}:
+        return name in {"colspan", "rowspan"}
+    return False
 
 
 @dataclass(frozen=True)
@@ -193,6 +282,7 @@ def _uid_fetch_message_bytes(adapter: Any, uid: str) -> bytes:
 def list_folders(session: AuthSession) -> list[dict[str, Any]]:
     adapter = _connect_imap(session)
     try:
+        ensure_mail_account(session.email)
         raw_folders = adapter.list_folders()
         existing = [_folder_name_from_list_line(line) for line in raw_folders]
         folders: list[dict[str, Any]] = []
@@ -211,6 +301,7 @@ def list_folders(session: AuthSession) -> list[dict[str, Any]]:
                     "uid_validity": status_data.get("UIDVALIDITY"),
                 }
             )
+        sync_folders(session.email, folders)
         return folders
     except MailAdapterError as exc:
         raise AppError(
@@ -300,13 +391,30 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
 
 
 def _clean_html(value: str) -> str:
-    cleaned = bleach.clean(
-        value,
-        tags=ALLOWED_HTML_TAGS,
-        attributes=ALLOWED_HTML_ATTRS,
-        protocols=ALLOWED_HTML_PROTOCOLS,
-        strip=True,
-    )
+    value = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", "", value)
+    clean_options: dict[str, Any] = {
+        "tags": ALLOWED_HTML_TAGS,
+        "attributes": _allowed_html_attr,
+        "protocols": ALLOWED_HTML_PROTOCOLS,
+        "strip": True,
+    }
+    try:
+        from bleach.css_sanitizer import CSSSanitizer
+
+        clean_options["css_sanitizer"] = CSSSanitizer(allowed_css_properties=ALLOWED_CSS_PROPERTIES)
+    except (ImportError, AttributeError, ModuleNotFoundError):
+        clean_options["css_sanitizer"] = _SimpleCSSSanitizer(ALLOWED_CSS_PROPERTIES)
+    try:
+        cleaned = bleach.clean(
+            value,
+            **clean_options,
+        )
+    except TypeError:
+        clean_options.pop("css_sanitizer", None)
+        cleaned = bleach.clean(
+            value,
+            **clean_options,
+        )
     return bleach.linkify(cleaned, callbacks=[_link_attrs])
 
 
@@ -403,6 +511,7 @@ def list_messages(
         uids = _uid_search(adapter, "ALL")
         messages = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
         messages.sort(key=lambda item: item["date"] or "", reverse=True)
+        sync_message_summaries(session.email, folder, messages, total_count=len(messages))
         offset = max(page - 1, 0) * page_size
         page_messages = messages[offset : offset + page_size]
         payload = {
@@ -450,6 +559,7 @@ def search_messages(
         adapter.select_folder(folder)
         uids = _uid_search(adapter, "ALL")
         rows = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
+        sync_message_summaries(session.email, folder, rows, total_count=len(rows))
         lowered = normalized_query.lower()
         messages = [
             row
@@ -489,6 +599,7 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
         detail = _message_detail(uid, raw)
         if bool(session.preferences.get("mark_read_on_open", True)):
             adapter.mark_seen(uid)
+            persist_message_read_state(session.email, folder, [uid], is_read=True)
             detail["read"] = True
         return detail
     except MailAdapterError as exc:
@@ -553,6 +664,10 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
                 adapter.store_flags(uid, "+FLAGS", "(\\Flagged)")
             elif payload.action in {"unflag", "unstar"}:
                 adapter.store_flags(uid, "-FLAGS", "(\\Flagged)")
+        if payload.action == "mark_read":
+            persist_message_read_state(session.email, folder, payload.uids, is_read=True)
+        elif payload.action == "mark_unread":
+            persist_message_read_state(session.email, folder, payload.uids, is_read=False)
         if payload.action in {"delete", "move"}:
             adapter.expunge()
         return {"action": payload.action, "folder": folder, "target_folder": target_folder, "uids": payload.uids}

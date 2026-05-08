@@ -63,9 +63,29 @@ python3 scripts/plan_status.py validate
 | T23 | 已完成 | Codex | feature/t01-project-plan-automation | 8819cb3 | npm test --prefix frontend && npm run build --prefix frontend && npm run test:e2e --prefix frontend && docker compose run --rm -v "/Users/mac/项目/webmail-邮件系统/backend:/app" backend python -m pytest tests -q && python3 scripts/plan_status.py validate && docker compose config && git diff --check | 通过：前端23个Vitest用例通过；构建通过；Playwright 6个用例通过，覆盖搜索、批量操作和设置保存；后端82个用例通过 | 2026-05-07T11:30:18+08:00 | 前端搜索、批量操作、设置 |
 | T24 | 已完成 | Codex | feature/t01-project-plan-automation | 8819cb3 | docker compose run --rm -v "/Users/mac/项目/webmail-邮件系统/backend:/app" backend python -m pytest tests -q && npm test --prefix frontend && npm run build --prefix frontend && npm run test:e2e --prefix frontend | 通过：后端82个用例通过；安全响应头、Cookie、CSRF、附件非法ID、日志脱敏测试覆盖；前端23个单测、构建和6个E2E通过 | 2026-05-07T11:30:18+08:00 | 安全加固 |
 | T25 | 已完成 | Codex | feature/t01-project-plan-automation | 8819cb3 | docker compose run --rm -v "/Users/mac/项目/webmail-邮件系统/backend:/app" backend python -m pytest tests -q && curl http://localhost:8000/api/health && curl http://localhost:5173/api/health && python3 scripts/plan_status.py validate | 通过：后端82个用例通过；request_id、结构化请求日志、审计事件和/api/metrics测试覆盖；健康检查通过 | 2026-05-07T11:30:18+08:00 | 可观测性 |
-| T26 | 未开始 |  |  |  |  |  |  | 公网 HTTPS 部署 |
-| T27 | 未开始 |  |  |  |  |  |  | 端到端验收与性能冒烟 |
-| T28 | 未开始 |  |  |  |  |  |  | 文档、PR 与发布交付 |
+| T26 | 未开始 |  |  |  |  |  |  | HTML 邮件安全渲染升级 |
+| T27 | 未开始 |  |  |  |  |  |  | 草稿自动保存协议对齐 |
+| T28 | 未开始 |  |  |  |  |  |  | 纯文本编辑模式 |
+| T29 | 未开始 |  |  |  |  |  |  | 收件人 Tag 输入框 |
+| T30 | 未开始 |  |  |  |  |  |  | 内嵌图片增强 |
+| T31 | 未开始 |  |  |  |  |  |  | 附件拖拽与分块上传 |
+| T32 | 未开始 |  |  |  |  |  |  | 默认签名自动插入 |
+| T33 | 未开始 |  |  |  |  |  |  | 签名管理 CRUD |
+| T34 | 未开始 |  |  |  |  |  |  | 富文本签名编辑器 |
+| T35 | 未开始 |  |  |  |  |  |  | 联系人持久化模型 |
+| T36 | 未开始 |  |  |  |  |  |  | 联系人列表分页搜索 |
+| T37 | 未开始 |  |  |  |  |  |  | 联系人 CRUD 与字段 |
+| T38 | 未开始 |  |  |  |  |  |  | 联系人分组与标签 |
+| T39 | 未开始 |  |  |  |  |  |  | 自动收录联系人 |
+| T40 | 未开始 |  |  |  |  |  |  | 联系人黑名单 |
+| T41 | 未开始 |  |  |  |  |  |  | 联系人白名单 |
+| T42 | 未开始 |  |  |  |  |  |  | 修改密码入口 |
+| T43 | 未开始 |  |  |  |  |  |  | 语言与时区设置 |
+| T44 | 未开始 |  |  |  |  |  |  | 回复引用方式设置 |
+| T45 | 未开始 |  |  |  |  |  |  | 文件夹创建重命名删除 |
+| T46 | 未开始 |  |  |  |  |  |  | 未读数角标一致性 |
+| T47 | 未开始 |  |  |  |  |  |  | 全文检索 |
+| T48 | 未开始 |  |  |  |  |  |  | 条件筛选搜索 |
 <!-- PLAN_STATUS_END -->
 
 ## 4. 闭环任务与验收
@@ -97,9 +117,29 @@ python3 scripts/plan_status.py validate
 | T23 | 前端搜索、批量操作、设置 | 搜索、清空、批量选择、标记、删除、移动、设置偏好可用 | Playwright 搜索无结果/有结果；批量操作后列表刷新；设置保存 |
 | T24 | 安全加固 | Cookie、CSRF、CSP、HTML 净化、日志脱敏、附件路径安全全部落地 | 安全测试：XSS、CSRF、路径穿越、越权、日志敏感词扫描 |
 | T25 | 可观测性 | 结构化日志、request_id、审计日志、基础指标、健康检查完成 | API 请求产生 request_id；审计表有登录/发信记录；指标接口或日志可验证 |
-| T26 | 公网 HTTPS 部署 | `https://mail.mdaemon.cc` 或配置域名可访问；HTTP 跳 HTTPS 或拒绝；现代浏览器可用 | `curl -I http://domain`；`curl -I https://domain`；证书检查；Chrome、Edge、Safari、Firefox 冒烟 |
-| T27 | 端到端验收与性能冒烟 | AC-001 到 AC-012 全部通过；真实账号连续收发 30 分钟；P0 缺陷清零 | Playwright E2E；pytest 全量；邮件收发实测；1 万封元数据分页性能测试 |
-| T28 | 文档、PR 与发布交付 | README、部署文档、测试报告、风险清单完整；main 可部署 | 文档链接检查；`docker compose up` 从零部署；最终 PR 描述含测试证据 |
+| T26 | HTML 邮件安全渲染升级 | 前端使用 DOMPurify 白名单净化；阅读区使用 sandbox iframe 隔离 HTML 邮件；纯文本邮件仍正常展示 | 后端 HTML 净化测试；前端 XSS 样例测试；Playwright 验证脚本不执行、样式表格图片正常 |
+| T27 | 草稿自动保存协议对齐 | 写信内容每 30 秒自动保存；使用 PATCH 更新已有草稿；页面关闭或刷新前不丢内容 | 草稿 API PATCH 测试；Vitest fake timer 验证 30 秒保存；Playwright 刷新后恢复草稿 |
+| T28 | 纯文本编辑模式 | 写信支持富文本和纯文本切换；纯文本模式不发送 HTML；互转后正文内容不丢 | ComposePanel 单测覆盖模式切换；发送 payload 断言；Playwright 新建纯文本邮件 |
+| T29 | 收件人 Tag 输入框 | To、Cc、Bcc 支持多收件人 Tag 输入、删除、键盘导航和重复校验 | Vitest 覆盖输入、删除、重复、键盘操作；发送接口校验重复收件人 |
+| T30 | 内嵌图片增强 | 正文可上传内嵌图片；图片可调整大小和位置；发送后 HTML 正文保留图片引用 | 前端编辑器测试；附件和图片上传测试；Playwright 插入图片、调整尺寸、发送草稿 |
+| T31 | 附件拖拽与分块上传 | 附件支持拖拽和点击上传；大文件按分块上传；显示进度和失败状态 | 上传 API 分块测试；Vitest 拖拽上传测试；Playwright 上传多附件并验证进度 |
+| T32 | 默认签名自动插入 | 新邮件和回复邮件自动插入当前账号默认签名，正文与签名之间空一行 | 设置签名后新建和回复测试；发送 payload 断言签名内容 |
+| T33 | 签名管理 CRUD | 支持新增、编辑、删除、多签名列表和设为默认 | 后端签名 API 测试；前端签名设置页测试；默认签名唯一性测试 |
+| T34 | 富文本签名编辑器 | 签名支持图片和链接，复用现有邮件富文本编辑能力 | 富文本签名保存读取测试；XSS 净化测试；Playwright 编辑签名并插入邮件 |
+| T35 | 联系人持久化模型 | 新增联系人、联系人分组标签、黑白名单所需数据库模型与迁移 | 模型测试；Alembic upgrade/downgrade/upgrade；唯一约束测试 |
+| T36 | 联系人列表分页搜索 | 联系人页支持分页、关键词搜索和空状态 | 后端分页搜索测试；前端联系人列表测试；Playwright 搜索联系人 |
+| T37 | 联系人 CRUD 与字段 | 支持新增、编辑、删除联系人；字段包含姓名、邮箱、手机、备注 | API CRUD 测试；表单校验测试；Playwright 新增编辑删除联系人 |
+| T38 | 联系人分组与标签 | 联系人可绑定分组和标签；列表可按分组或标签筛选 | API 分组标签测试；前端筛选测试；删除分组后的联系人处理测试 |
+| T39 | 自动收录联系人 | 发送成功后自动写入或更新联系人库；重复邮箱不创建重复联系人 | 发送邮件后联系人库断言；重复收件人去重测试；联系人更新时间测试 |
+| T40 | 联系人黑名单 | 标记黑名单后，刷新或同步邮件时匹配发件人自动移动到垃圾箱 | 黑名单规则测试；IMAP move/copy fake 测试；Playwright 黑名单后刷新列表 |
+| T41 | 联系人白名单 | 标记白名单后，Webmail 层不执行黑名单和本地垃圾规则 | 白名单优先级测试；黑白名单冲突测试；刷新同步行为测试 |
+| T42 | 修改密码入口 | 提供 Webmail 层修改密码入口；当前阶段记录新密码并重新验证 IMAP 登录，邮件服务器深度改密不纳入本轮 | API 验证旧密码和新密码测试；错误密码测试；前端表单测试 |
+| T43 | 语言与时区设置 | 用户可保存语言和时区；日期展示使用用户时区 | 设置 API 测试；日期格式化单测；Playwright 切换时区后邮件时间变化 |
+| T44 | 回复引用方式设置 | 支持顶部引用和底部引用；默认底部引用；引用格式输出发件人、发送时间、收件人、主题 | 设置 API 测试；回复生成内容单测；Playwright 回复邮件验证引用位置 |
+| T45 | 文件夹创建重命名删除 | 支持用户文件夹创建、重命名、删除；系统默认文件夹不可删除 | IMAP 文件夹操作 fake 测试；系统文件夹保护测试；前端文件夹管理测试 |
+| T46 | 未读数角标一致性 | 文件夹未读数在列表刷新、已读未读切换、自动刷新后保持一致 | 后端未读计数测试；前端状态同步测试；Playwright 标记已读后角标减少 |
+| T47 | 全文检索 | 支持当前账号邮件全文检索，覆盖主题、发件人、收件人、正文摘要和正文缓存 | 搜索 API 测试；索引或缓存测试；无结果和分页测试 |
+| T48 | 条件筛选搜索 | 支持按发件人、日期范围、附件类型筛选邮件 | API 参数校验测试；组合筛选测试；前端筛选表单测试 |
 
 ## 5. 测试总计划
 
@@ -109,7 +149,16 @@ python3 scripts/plan_status.py validate
 - 部署：`docker compose up -d`、`curl /api/health`、`curl /api/ready`
 - 计划校验：`python3 scripts/plan_status.py validate`
 
-## 6. 假设与默认值
+## 6. 2026-05-07 功能补充记录
+
+- 认证：新增 `/api/auth/register`，注册时复用 IMAP 凭证校验，成功后写入 `mail_accounts` 并创建会话；前端提供登录/注册切换页。
+- 联系人：保留发信后的最近联系人记录，并在主界面新增联系人面板，可搜索联系人并直接发起写信。
+- 自动刷新：邮件工作台每 30 秒自动刷新当前文件夹，保留当前阅读上下文；顶部显示自动刷新状态。
+- 已读同步：邮件列表同步时写入 PostgreSQL 邮件元数据；打开邮件、标记已读和标记未读时同步更新 `mail_messages.is_read`。
+- 回复引用：收件箱邮件列表支持右键菜单，点击“回复并引用”后打开写信面板，自动填充收件人、`Re:` 主题和原文引用。
+- 回归证据：`PYTHONPATH=/Users/mac/项目/webmail-邮件系统/backend ../.venv/bin/pytest` 通过 88 个后端用例；`npm run build` 通过；`npm test -- --run src/App.test.tsx src/mail/ComposePanel.test.tsx` 通过 21 个前端用例。
+
+## 7. 假设与默认值
 
 - 本计划覆盖 MVP 全量，不包含 `v1.1` 到 `v2.0` 后续路线。
 - 进度追踪采用 Markdown 状态表，不使用 GitHub Issues。

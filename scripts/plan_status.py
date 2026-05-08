@@ -207,10 +207,10 @@ def update_task(args: argparse.Namespace) -> None:
 def validate_plan(_: argparse.Namespace) -> None:
     _, rows, _ = load_plan()
     errors = validate_rows(rows)
-    expected_ids = [f"T{number:02d}" for number in range(1, 29)]
+    expected_ids = [f"T{number:02d}" for number in range(1, len(rows) + 1)]
     actual_ids = [row.task_id for row in rows]
     if actual_ids != expected_ids:
-        errors.append(f"任务ID必须连续为 T01 到 T28，实际为：{', '.join(actual_ids)}")
+        errors.append(f"任务ID必须连续为 T01 到 T{len(rows):02d}，实际为：{', '.join(actual_ids)}")
 
     if errors:
         raise PlanError("\n".join(errors))

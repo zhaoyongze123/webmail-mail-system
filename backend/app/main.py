@@ -6,7 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 
 from app.attachments import upload_temp_attachments
-from app.auth import LoginRequest, clear_session_cookie, get_current_session, login_user, logout_user, set_session_cookie
+from app.auth import LoginRequest, RegisterRequest, clear_session_cookie, get_current_session, login_user, logout_user, register_user, set_session_cookie
 from app.compose import SendMailRequest, send_mail
 from app.contacts import search_recent_contacts
 from app.config import get_settings
@@ -152,6 +152,19 @@ def metrics(request: Request) -> dict[str, object]:
 )
 def login(request: Request, response: Response, payload: LoginRequest) -> dict[str, object]:
     session_id, user_data, csrf_token = login_user(request, payload)
+    set_session_cookie(response, session_id, csrf_token)
+    return success_response(request, user_data)
+
+
+@app.post(
+    "/api/auth/register",
+    tags=["auth"],
+    response_model=ApiResponse,
+    summary="注册邮箱账号",
+    response_description="注册成功后的当前用户信息",
+)
+def register(request: Request, response: Response, payload: RegisterRequest) -> dict[str, object]:
+    session_id, user_data, csrf_token = register_user(request, payload)
     set_session_cookie(response, session_id, csrf_token)
     return success_response(request, user_data)
 

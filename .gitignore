@@ -21,3 +21,6 @@ coverage/
 htmlcov/
 playwright-report/
 test-results/
+
+# Local planning source files
+副本邮件系统功能清单.xlsx

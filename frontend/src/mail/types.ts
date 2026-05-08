@@ -84,6 +84,39 @@ export type SettingsPayload = {
   preferences: UserSettingsPreferences;
 };
 
+export type AuthPayload = {
+  email: string;
+};
+
+export type AuthCredentials = {
+  email: string;
+  password: string;
+  remember?: boolean;
+  display_name?: string;
+};
+
+export type ContactItem = {
+  email: string;
+  last_used_at: string;
+};
+
+export type ContactListPayload = {
+  query: string;
+  contacts: ContactItem[];
+};
+
+export type MessageDetailPayload = {
+  uid: string;
+  subject: string;
+  from?: MailAddress[];
+  to?: MailAddress[];
+  cc?: MailAddress[];
+  date?: string | null;
+  html_body?: string | null;
+  text_body?: string | null;
+  read?: boolean;
+};
+
 export type ReaderRenderContext = {
   folder: string;
   uid: string;

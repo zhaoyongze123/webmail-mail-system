@@ -407,6 +407,26 @@ def test_message_operations_mark_read_and_mark_unread_apply_to_all_uids(
         assert expected_flag not in FakeImapAdapter.mailboxes[("INBOX", "102")].flags
 
 
+def test_message_operations_mark_read_syncs_database_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+    FakeImapAdapter.seed_message("INBOX", "101")
+    synced: list[tuple[str, str, list[str], bool]] = []
+
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(
+        mailbox_module,
+        "persist_message_read_state",
+        lambda email, folder, uids, *, is_read: synced.append((email, folder, list(uids), is_read)),
+    )
+
+    response = _request_operation(client, "INBOX", action="mark_read", uids=["101"])
+    _assert_success(response)
+
+    assert synced == [("user@example.com", "INBOX", ["101"], True)]
+
+
 @pytest.mark.parametrize("action", ["flag", "star"])
 def test_message_operations_flag_and_star_set_flagged_flag(
     monkeypatch: pytest.MonkeyPatch,

@@ -1,6 +1,10 @@
 import type {
   ApiResponse,
+  AuthCredentials,
+  AuthPayload,
+  ContactListPayload,
   FolderListPayload,
+  MessageDetailPayload,
   MessageListPayload,
   MessageOperationAction,
   MessageOperationPayload,
@@ -54,6 +58,33 @@ export async function fetchFolders(): Promise<FolderListPayload> {
   return requestApi<FolderListPayload>('/api/folders', { method: 'GET' });
 }
 
+export async function login(credentials: AuthCredentials): Promise<AuthPayload> {
+  return requestApi<AuthPayload>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: credentials.email,
+      password: credentials.password,
+      remember: Boolean(credentials.remember),
+    }),
+  });
+}
+
+export async function register(credentials: AuthCredentials): Promise<AuthPayload> {
+  return requestApi<AuthPayload>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: credentials.email,
+      password: credentials.password,
+      remember: Boolean(credentials.remember),
+      display_name: credentials.display_name || null,
+    }),
+  });
+}
+
+export async function logout(): Promise<{ logged_out: boolean }> {
+  return requestApi<{ logged_out: boolean }>('/api/auth/logout', { method: 'POST' });
+}
+
 export async function fetchFolderMessages(
   folder: string,
   options: { page?: number; pageSize?: number; refresh?: boolean } = {},
@@ -96,6 +127,20 @@ export async function updateMessageOperation(
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export async function fetchMessageDetail(folder: string, uid: string): Promise<MessageDetailPayload> {
+  return requestApi<MessageDetailPayload>(`/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}`, {
+    method: 'GET',
+  });
+}
+
+export async function fetchContacts(query = '', limit = 10): Promise<ContactListPayload> {
+  const params = new URLSearchParams({
+    query,
+    limit: String(limit),
+  });
+  return requestApi<ContactListPayload>(`/api/contacts?${params.toString()}`, { method: 'GET' });
 }
 
 export async function moveMessages(
