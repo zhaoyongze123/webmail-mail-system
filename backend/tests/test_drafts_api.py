@@ -626,10 +626,9 @@ def test_save_existing_draft_updates_content_and_reuses_draft_id(monkeypatch: py
     assert first_response.status_code == 200
     first_data = _parse_response_data(first_response)
 
-    second_response = client.post(
-        "/api/drafts",
+    second_response = client.patch(
+        f"/api/drafts/{first_data['draft_id']}",
         json=_make_draft_payload(
-            draft_id=str(first_data["draft_id"]),
             to=["receiver@example.com"],
             cc=["cc@example.com"],
             subject="第二次主题",
@@ -654,6 +653,19 @@ def test_save_existing_draft_updates_content_and_reuses_draft_id(monkeypatch: py
     parts = list(message.walk())
     assert any(part.get_content_type() == "text/plain" and "第二次文本" in part.get_content() for part in parts)
     assert any(part.get_content_type() == "text/html" and "第二次 HTML" in part.get_content() for part in parts)
+
+
+def test_patch_missing_draft_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = client.patch("/api/drafts/missing-draft", json=_make_draft_payload())
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["success"] is False
+    assert _extract_error(body)["code"] == "DRAFT_NOT_FOUND"
 
 
 def test_get_draft_restores_all_fields(monkeypatch: pytest.MonkeyPatch) -> None:

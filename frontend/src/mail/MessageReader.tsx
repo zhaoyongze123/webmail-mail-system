@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify';
 import { useEffect, useMemo, useState } from 'react';
 import type { ApiResponse } from './types';
 
@@ -42,12 +43,119 @@ type LoadState =
   | { status: 'loaded'; message: MessageDetail; error: null }
   | { status: 'error'; message: null; error: string };
 
+const ALLOWED_HTML_TAGS = [
+  'a',
+  'abbr',
+  'b',
+  'blockquote',
+  'br',
+  'caption',
+  'code',
+  'col',
+  'colgroup',
+  'div',
+  'em',
+  'figcaption',
+  'figure',
+  'font',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'hr',
+  'i',
+  'img',
+  'li',
+  'ol',
+  'p',
+  'pre',
+  's',
+  'small',
+  'span',
+  'strong',
+  'strike',
+  'sub',
+  'sup',
+  'del',
+  'ins',
+  'style',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'u',
+  'ul',
+];
+
+const ALLOWED_HTML_ATTR = [
+  'align',
+  'alt',
+  'bgcolor',
+  'border',
+  'cellpadding',
+  'cellspacing',
+  'class',
+  'colspan',
+  'height',
+  'href',
+  'id',
+  'lang',
+  'name',
+  'rel',
+  'rowspan',
+  'src',
+  'style',
+  'target',
+  'title',
+  'width',
+  'valign',
+  'color',
+  'face',
+  'size',
+];
+
+const SANITIZE_CONFIG = {
+  ALLOWED_TAGS: ALLOWED_HTML_TAGS,
+  ALLOWED_ATTR: ALLOWED_HTML_ATTR,
+  ALLOW_DATA_ATTR: false,
+  ADD_DATA_URI_TAGS: ['img'],
+  FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'base'],
+};
+
 function buildMessageUrl(folder: string, uid: number | string) {
   return `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(String(uid))}`;
 }
 
 function buildAttachmentUrl(folder: string, uid: number | string, attachmentId: string) {
   return `${buildMessageUrl(folder, uid)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&#39;';
+      default:
+        return char;
+    }
+  });
+}
+
+function renderPlainTextHtml(value: string) {
+  return escapeHtml(value).split(/\r\n|\r|\n/).join('<br>');
 }
 
 async function requestMessage(folder: string, uid: number | string): Promise<MessageDetail> {
@@ -67,23 +175,49 @@ async function requestMessage(folder: string, uid: number | string): Promise<Mes
 }
 
 export function sanitizeMessageHtml(html: string) {
-  const parser = new DOMParser();
-  const document = parser.parseFromString(html, 'text/html');
+  return DOMPurify.sanitize(html, SANITIZE_CONFIG);
+}
 
-  document.querySelectorAll('script, iframe, object, embed, base, form, input, button').forEach((node) => node.remove());
-  document.body.querySelectorAll<HTMLElement>('*').forEach((element) => {
-    for (const attribute of Array.from(element.attributes)) {
-      const name = attribute.name.toLowerCase();
-      const value = attribute.value.trim().toLowerCase();
-      const isDangerousHandler = name.startsWith('on');
-      const isDangerousUrl = ['href', 'src', 'xlink:href', 'formaction'].includes(name) && value.startsWith('javascript:');
-      if (isDangerousHandler || isDangerousUrl) {
-        element.removeAttribute(attribute.name);
-      }
+function isPlainTextFallback(html: string, text: string) {
+  return html.trim() === renderPlainTextHtml(text).trim();
+}
+
+type MessageBodyViewProps = {
+  html?: string | null;
+  text?: string | null;
+  htmlTestId?: string;
+  textTestId?: string;
+  htmlClassName?: string;
+  textClassName?: string;
+};
+
+export function MessageBodyView({ html, text, htmlTestId, textTestId, htmlClassName, textClassName }: MessageBodyViewProps) {
+  const safeHtml = useMemo(() => {
+    if (!html) {
+      return null;
     }
-  });
+    const sanitized = sanitizeMessageHtml(html);
+    if (text && isPlainTextFallback(sanitized, text)) {
+      return null;
+    }
+    return sanitized;
+  }, [html, text]);
 
-  return document.body.innerHTML;
+  if (safeHtml) {
+    return (
+      <div
+        className={htmlClassName ?? 'message-html-body'}
+        data-testid={htmlTestId}
+        dangerouslySetInnerHTML={{ __html: safeHtml }}
+      />
+    );
+  }
+
+  return (
+    <pre className={textClassName ?? 'message-text-body'} data-testid={textTestId}>
+      {text || '这封邮件没有正文内容。'}
+    </pre>
+  );
 }
 
 function formatAddress(address: MailAddress | string) {
@@ -174,13 +308,6 @@ export default function MessageReader({ folder, uid, onSessionExpired, onReply, 
     };
   }, [folder, uid, onSessionExpired]);
 
-  const safeHtml = useMemo(() => {
-    if (state.status !== 'loaded' || !state.message.html_body) {
-      return null;
-    }
-    return sanitizeMessageHtml(state.message.html_body);
-  }, [state]);
-
   if (!folder || uid === null || uid === undefined || uid === '') {
     return (
       <section className="message-reader message-reader-empty" aria-label="邮件阅读区">
@@ -249,11 +376,14 @@ export default function MessageReader({ folder, uid, onSessionExpired, onReply, 
       </header>
 
       <section className="message-reader-body" aria-label="邮件正文">
-        {safeHtml ? (
-          <div data-testid="message-html-body" dangerouslySetInnerHTML={{ __html: safeHtml }} />
-        ) : (
-          <pre data-testid="message-text-body">{message.text_body || '这封邮件没有正文内容。'}</pre>
-        )}
+        <MessageBodyView
+          html={message.html_body}
+          htmlTestId="message-html-body"
+          htmlClassName="message-html-body"
+          text={message.text_body}
+          textTestId="message-text-body"
+          textClassName="message-text-body"
+        />
       </section>
 
       <section className="message-reader-attachments" aria-label="附件">

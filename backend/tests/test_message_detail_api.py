@@ -399,7 +399,10 @@ def test_message_detail_preserves_rich_text_html(monkeypatch: pytest.MonkeyPatch
         date_value=datetime(2026, 5, 7, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
         text_body="纯文本备用正文",
         html_body=(
+            '<style>.notice{color:#2ecc71;font-size:20px;}'
+            '.unsafe{background-image:url(https://evil.example/track.png);behavior:url(xss.htc);}</style>'
             '<p><span style="color:#e74c3c;background-color:#fff3cd;font-family:Arial;font-size:18px;">红色正文</span></p>'
+            '<p class="notice unsafe">样式块正文</p>'
             '<table><tbody><tr><td style="border:1px solid #d8dee9;">单元格</td></tr></tbody></table>'
             '<img src="data:image/png;base64,aGVsbG8=" alt="内联图片">'
             '<script>alert("xss")</script>'
@@ -413,11 +416,44 @@ def test_message_detail_preserves_rich_text_html(monkeypatch: pytest.MonkeyPatch
     payload = _extract_detail_payload(response.json())
     html_body = _first_present(payload, ("html_body",), ("body", "html"), ("body_html",))
 
-    assert _contains_all(html_body, ["红色正文", "table", "单元格", "data:image/png"])
+    assert _contains_all(html_body, ["红色正文", "样式块正文", "table", "单元格", "data:image/png"])
+    assert 'class="notice unsafe"' in str(html_body)
+    assert "color:#2ecc71" in str(html_body)
+    assert "font-size:20px" in str(html_body)
     assert "color:#e74c3c" in str(html_body)
     assert "background-color:#fff3cd" in str(html_body)
     assert "font-family:Arial" in str(html_body)
     assert "script" not in str(html_body).lower()
+    assert "behavior" not in str(html_body).lower()
+    assert "evil.example" not in str(html_body).lower()
+
+
+def test_message_detail_preserves_font_tags_in_html_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    raw_bytes = _make_message_bytes(
+        subject="字体标签邮件",
+        sender_name="Font Sender",
+        sender_email="font@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 9, 45, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="字体标签纯文本备用正文",
+        html_body='<div><font color="red">红色字体正文</font></div>',
+    )
+    FakeImapAdapter.seed_message("INBOX", "102", raw_bytes)
+
+    response = client.get("/api/folders/INBOX/messages/102")
+
+    assert response.status_code == 200
+    payload = _extract_detail_payload(response.json())
+    html_body = _first_present(payload, ("html_body",), ("body", "html"), ("body_html",))
+
+    assert "<font color=\"red\">" in str(html_body)
+    assert "&lt;font" not in str(html_body)
+    assert "红色字体正文" in str(html_body)
 
 
 def test_message_detail_returns_plain_text_body_when_html_missing(monkeypatch: pytest.MonkeyPatch) -> None:

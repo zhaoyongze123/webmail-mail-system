@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import Message
@@ -12,15 +12,21 @@ from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
 
 import bleach
+import tinycss2
 from fastapi import status
+from premailer import transform
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import delete, func, select
 
 from app.auth import AuthSession
 from app.cache import JsonCache
 from app.config import get_settings
+from app.contacts import list_blacklisted_contacts, list_whitelisted_contacts
 from app.errors import AppError
 from app import mail_adapters, redis_client
 from app.mail_adapters import ImapSettings, MailAdapterError, _parse_status_response
+from app.db import get_session_factory
+from app.models import MailAccount, MailFolder, MailMessage
 from app.mail_state import ensure_mail_account, persist_message_read_state, sync_folders, sync_message_summaries
 from app.security import validate_attachment_id
 
@@ -60,6 +66,11 @@ ALLOWED_HTML_TAGS = [
     "s",
     "span",
     "strong",
+    "strike",
+    "sub",
+    "sup",
+    "del",
+    "ins",
     "table",
     "tbody",
     "td",
@@ -153,6 +164,51 @@ def _allowed_html_attr(tag: str, name: str, value: str) -> bool:
     if tag in {"td", "th"}:
         return name in {"colspan", "rowspan"}
     return False
+
+
+def _sanitize_style_block(css: str) -> str:
+    safe_rules: list[str] = []
+    for rule in tinycss2.parse_rule_list(css, skip_comments=True, skip_whitespace=True):
+        if rule.type != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        if not selector or any(token in selector.lower() for token in ("@", "expression", "javascript:", "behavior:")):
+            continue
+        declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
+        safe_declarations: list[str] = []
+        for declaration in declarations:
+            if declaration.type != "declaration":
+                continue
+            property_name = declaration.lower_name
+            if property_name not in ALLOWED_CSS_PROPERTIES:
+                continue
+            value = tinycss2.serialize(declaration.value).strip()
+            lowered_value = value.lower()
+            if any(token in lowered_value for token in ("expression", "javascript:", "vbscript:", "behavior:", "@import")):
+                continue
+            if "url(" in lowered_value and "data:image/" not in lowered_value:
+                continue
+            priority = " !important" if declaration.important else ""
+            safe_declarations.append(f"{property_name}:{value}{priority}")
+        if safe_declarations:
+            safe_rules.append(f"{selector}{{{';'.join(safe_declarations)}}}")
+    return "\n".join(safe_rules)
+
+
+def _sanitize_style_blocks(value: str) -> str:
+    def replace_style(match: re.Match[str]) -> str:
+        sanitized = _sanitize_style_block(match.group(1))
+        return f"<style>{sanitized}</style>" if sanitized else ""
+
+    return re.sub(r"(?is)<style\b[^>]*>(.*?)</style>", replace_style, value)
+
+
+def _inline_safe_css(value: str) -> str:
+    sanitized_html = _sanitize_style_blocks(value)
+    try:
+        return transform(sanitized_html, allow_network=False, remove_classes=False, disable_leftover_css=True)
+    except Exception:
+        return re.sub(r"(?is)<style\b[^>]*>.*?</style>", "", sanitized_html)
 
 
 @dataclass(frozen=True)
@@ -261,6 +317,19 @@ def _system_folder_map(existing: list[str]) -> dict[str, str]:
     }
 
 
+def _is_protected_folder(folder: str, folder_map: dict[str, str]) -> bool:
+    normalized = folder.strip().strip('"')
+    return normalized in folder_map or normalized in folder_map.values()
+
+
+def _folder_exists(folder_name: str, existing: list[str]) -> bool:
+    normalized = folder_name.strip().strip('"')
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    return any(candidate.strip().strip('"').lower() == lowered for candidate in existing)
+
+
 def _resolved_target_folder(target_folder: str | None, folder_map: dict[str, str]) -> str | None:
     if target_folder is None:
         return None
@@ -279,34 +348,210 @@ def _uid_fetch_message_bytes(adapter: Any, uid: str) -> bytes:
     return adapter.fetch_message_bytes(uid)
 
 
+def _normalize_sender_email(row: dict[str, Any]) -> str:
+    sender = row.get("sender")
+    if not isinstance(sender, dict):
+        return ""
+    return str(sender.get("email") or "").strip().lower()
+
+
+def _remove_message_records(email: str, folder_name: str, uids: list[str]) -> None:
+    normalized_email = email.strip().lower()
+    uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
+    if not uid_values:
+        return
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+        if account is None:
+            return
+        folder = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder_name))
+        if folder is None:
+            return
+        db_session.execute(
+            delete(MailMessage).where(
+                MailMessage.account_id == account.id,
+                MailMessage.folder_id == folder.id,
+                MailMessage.imap_uid.in_(uid_values),
+            )
+        )
+        folder.total_count = int(
+            db_session.scalar(
+                select(func.count()).select_from(MailMessage).where(
+                    MailMessage.account_id == account.id,
+                    MailMessage.folder_id == folder.id,
+                )
+            )
+            or 0
+        )
+        folder.unread_count = int(
+            db_session.scalar(
+                select(func.count()).select_from(MailMessage).where(
+                    MailMessage.account_id == account.id,
+                    MailMessage.folder_id == folder.id,
+                    MailMessage.is_read.is_(False),
+                )
+            )
+            or 0
+        )
+        folder.last_synced_at = datetime.now(timezone.utc)
+        db_session.commit()
+
+
+def _sync_folder_snapshot(email: str, adapter: Any) -> list[dict[str, Any]]:
+    raw_folders = adapter.list_folders()
+    existing = [_folder_name_from_list_line(line) for line in raw_folders]
+    folders: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for canonical, folder_type, display_name, aliases in SYSTEM_FOLDERS:
+        name = _resolve_system_folder(existing, canonical, aliases)
+        seen_names.add(name)
+        status_data = _status_dict(adapter.status(name, "(MESSAGES UNSEEN UIDVALIDITY)"))
+        folders.append(
+            {
+                "name": name,
+                "canonical_name": canonical,
+                "display_name": display_name,
+                "type": folder_type,
+                "delimiter": "/",
+                "unread_count": int(status_data.get("UNSEEN", 0)),
+                "total_count": int(status_data.get("MESSAGES", 0)),
+                "uid_validity": status_data.get("UIDVALIDITY"),
+            }
+        )
+    for name in sorted(existing):
+        if name in seen_names:
+            continue
+        status_data = _status_dict(adapter.status(name, "(MESSAGES UNSEEN UIDVALIDITY)"))
+        folders.append(
+            {
+                "name": name,
+                "canonical_name": name,
+                "display_name": name,
+                "type": "custom",
+                "delimiter": "/",
+                "unread_count": int(status_data.get("UNSEEN", 0)),
+                "total_count": int(status_data.get("MESSAGES", 0)),
+                "uid_validity": status_data.get("UIDVALIDITY"),
+            }
+        )
+    sync_folders(email, folders)
+    return folders
+
+
+def _move_blacklisted_messages(session: AuthSession, adapter: Any, folder: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blacklisted_emails = set(list_blacklisted_contacts(session))
+    whitelisted_emails = set(list_whitelisted_contacts(session))
+    if not blacklisted_emails:
+        return rows
+    folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in adapter.list_folders()])
+    trash_folder = _resolved_target_folder(".Trash", folder_map) or ".Trash"
+    kept_rows: list[dict[str, Any]] = []
+    moved_uids: list[str] = []
+    for row in rows:
+        sender_email = _normalize_sender_email(row)
+        if sender_email and sender_email in whitelisted_emails:
+            kept_rows.append(row)
+            continue
+        if sender_email and sender_email in blacklisted_emails:
+            adapter.copy_message(str(row["uid"]), str(trash_folder))
+            adapter.store_flags(str(row["uid"]), "+FLAGS", "(\\Deleted)")
+            moved_uids.append(str(row["uid"]))
+            continue
+        kept_rows.append(row)
+    if moved_uids:
+        adapter.expunge()
+        _remove_message_records(session.email, folder, moved_uids)
+    return kept_rows
+
+
 def list_folders(session: AuthSession) -> list[dict[str, Any]]:
     adapter = _connect_imap(session)
     try:
         ensure_mail_account(session.email)
-        raw_folders = adapter.list_folders()
-        existing = [_folder_name_from_list_line(line) for line in raw_folders]
-        folders: list[dict[str, Any]] = []
-        for canonical, folder_type, display_name, aliases in SYSTEM_FOLDERS:
-            name = _resolve_system_folder(existing, canonical, aliases)
-            status_data = _status_dict(adapter.status(name, "(MESSAGES UNSEEN UIDVALIDITY)"))
-            folders.append(
-                {
-                    "name": name,
-                    "canonical_name": canonical,
-                    "display_name": display_name,
-                    "type": folder_type,
-                    "delimiter": "/",
-                    "unread_count": int(status_data.get("UNSEEN", 0)),
-                    "total_count": int(status_data.get("MESSAGES", 0)),
-                    "uid_validity": status_data.get("UIDVALIDITY"),
-                }
-            )
-        sync_folders(session.email, folders)
-        return folders
+        return _sync_folder_snapshot(session.email, adapter)
     except MailAdapterError as exc:
         raise AppError(
             "MAILBOX_FOLDER_SYNC_FAILED",
             "同步文件夹失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def create_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
+    normalized_name = folder_name.strip()
+    if not normalized_name:
+        raise AppError("FOLDER_NAME_REQUIRED", "文件夹名称不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    ensure_mail_account(session.email)
+    adapter = _connect_imap(session)
+    try:
+        existing = [_folder_name_from_list_line(line) for line in adapter.list_folders()]
+        folder_map = _system_folder_map(existing)
+        if _is_protected_folder(normalized_name, folder_map) or _folder_exists(normalized_name, existing):
+            raise AppError("FOLDER_ALREADY_EXISTS", "系统文件夹已存在", http_status=status.HTTP_400_BAD_REQUEST)
+        adapter.create_folder(normalized_name)
+        _sync_folder_snapshot(session.email, adapter)
+        return {"folder": normalized_name, "new_name": None, "deleted": False}
+    except MailAdapterError as exc:
+        raise AppError(
+            "MAILBOX_FOLDER_CREATE_FAILED",
+            "创建文件夹失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def rename_folder(session: AuthSession, folder_name: str, new_name: str) -> dict[str, Any]:
+    old_name = folder_name.strip()
+    updated_name = new_name.strip()
+    if not old_name or not updated_name:
+        raise AppError("FOLDER_NAME_REQUIRED", "文件夹名称不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    ensure_mail_account(session.email)
+    adapter = _connect_imap(session)
+    try:
+        existing = [_folder_name_from_list_line(line) for line in adapter.list_folders()]
+        folder_map = _system_folder_map(existing)
+        if _is_protected_folder(old_name, folder_map):
+            raise AppError("FOLDER_RENAME_NOT_ALLOWED", "系统文件夹不能重命名", http_status=status.HTTP_400_BAD_REQUEST)
+        if _is_protected_folder(updated_name, folder_map) or _folder_exists(updated_name, existing):
+            raise AppError("FOLDER_ALREADY_EXISTS", "目标文件夹名称已存在", http_status=status.HTTP_400_BAD_REQUEST)
+        adapter.rename_folder(old_name, updated_name)
+        _sync_folder_snapshot(session.email, adapter)
+        return {"folder": old_name, "new_name": updated_name, "deleted": False}
+    except MailAdapterError as exc:
+        raise AppError(
+            "MAILBOX_FOLDER_RENAME_FAILED",
+            "重命名文件夹失败",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            details={"operation": exc.operation},
+        ) from exc
+    finally:
+        adapter.logout()
+
+
+def delete_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
+    normalized_name = folder_name.strip()
+    if not normalized_name:
+        raise AppError("FOLDER_NAME_REQUIRED", "文件夹名称不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    ensure_mail_account(session.email)
+    adapter = _connect_imap(session)
+    try:
+        existing = [_folder_name_from_list_line(line) for line in adapter.list_folders()]
+        folder_map = _system_folder_map(existing)
+        if _is_protected_folder(normalized_name, folder_map):
+            raise AppError("FOLDER_DELETE_NOT_ALLOWED", "系统文件夹不可删除", http_status=status.HTTP_400_BAD_REQUEST)
+        adapter.delete_folder(normalized_name)
+        _sync_folder_snapshot(session.email, adapter)
+        return {"folder": normalized_name, "new_name": None, "deleted": True}
+    except MailAdapterError as exc:
+        raise AppError(
+            "MAILBOX_FOLDER_DELETE_FAILED",
+            "删除文件夹失败",
             http_status=status.HTTP_502_BAD_GATEWAY,
             details={"operation": exc.operation},
         ) from exc
@@ -391,7 +636,8 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
 
 
 def _clean_html(value: str) -> str:
-    value = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", "", value)
+    value = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", value)
+    value = _inline_safe_css(value)
     clean_options: dict[str, Any] = {
         "tags": ALLOWED_HTML_TAGS,
         "attributes": _allowed_html_attr,
@@ -415,7 +661,7 @@ def _clean_html(value: str) -> str:
             value,
             **clean_options,
         )
-    return bleach.linkify(cleaned, callbacks=[_link_attrs])
+    return cleaned
 
 
 def _link_attrs(attrs: dict[tuple[str | None, str], str], new: bool = False) -> dict[tuple[str | None, str], str]:
@@ -437,6 +683,49 @@ def _snippet(html_body: str, text_body: str) -> str:
     return re.sub(r"\s+", " ", source).strip()[:180]
 
 
+def _attachment_category(content_type: str) -> str:
+    lowered = content_type.strip().lower()
+    if lowered.startswith("image/"):
+        return "image"
+    if lowered.startswith("audio/"):
+        return "audio"
+    if lowered.startswith("video/"):
+        return "video"
+    if lowered == "application/pdf":
+        return "pdf"
+    if lowered in {
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/rtf",
+        "application/vnd.oasis.opendocument.text",
+        "text/plain",
+        "text/rtf",
+    }:
+        return "document"
+    if lowered in {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv",
+    }:
+        return "spreadsheet"
+    if lowered in {
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }:
+        return "presentation"
+    if lowered in {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-tar",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-7z-compressed",
+        "application/x-rar-compressed",
+    }:
+        return "archive"
+    return "other"
+
+
 def _read_flag(message: Message) -> bool:
     flags = " ".join(message.get_all("X-IMAP-Flags", []))
     status_value = message.get("Status", "")
@@ -449,16 +738,37 @@ def _message_summary(uid: str, raw: bytes) -> dict[str, Any]:
     sent_at = _message_datetime(message)
     sender = _addresses(message.get("From"))
     recipients = _addresses(message.get("To"))
+    attachment_types = sorted({_attachment_category(item["content_type"]) for item in attachments if item.get("content_type")})
     return {
         "uid": str(uid),
         "message_id": message.get("Message-ID"),
         "subject": _decode_header_value(message.get("Subject")) or "(无主题)",
         "sender": sender[0] if sender else {"name": "", "email": ""},
         "to": recipients,
+        "cc": _addresses(message.get("Cc")),
         "date": sent_at.isoformat() if sent_at else None,
         "read": _read_flag(message),
         "has_attachments": bool(attachments),
+        "attachment_types": attachment_types,
         "snippet": _snippet(html_body, text_body),
+        "html_body": html_body,
+        "text_body": text_body,
+    }
+
+
+def _message_list_item(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "uid": str(row.get("uid") or ""),
+        "message_id": row.get("message_id"),
+        "subject": str(row.get("subject") or "(无主题)"),
+        "sender": row.get("sender") if isinstance(row.get("sender"), dict) else {"name": "", "email": ""},
+        "to": row.get("to") if isinstance(row.get("to"), list) else [],
+        "cc": row.get("cc") if isinstance(row.get("cc"), list) else [],
+        "date": row.get("date"),
+        "read": bool(row.get("read")),
+        "has_attachments": bool(row.get("has_attachments")),
+        "attachment_types": row.get("attachment_types") if isinstance(row.get("attachment_types"), list) else [],
+        "snippet": str(row.get("snippet") or ""),
     }
 
 
@@ -486,8 +796,263 @@ def _message_cache_key(email: str, folder: str, page: int, page_size: int) -> st
     return f"mail:list:{email}:{folder}:{page}:{page_size}"
 
 
-def _search_cache_key(email: str, folder: str, query: str, page: int, page_size: int) -> str:
-    return f"mail:search:{email}:{folder}:{query}:{page}:{page_size}"
+def _search_cache_key(
+    email: str,
+    folder: str,
+    query: str,
+    page: int,
+    page_size: int,
+    sender: str = "",
+    date_from: date | None = None,
+    date_to: date | None = None,
+    has_attachments: bool | None = None,
+) -> str:
+    return ":".join(
+        [
+            "mail",
+            "search",
+            email,
+            folder,
+            query,
+            sender,
+            date_from.isoformat() if date_from else "",
+            date_to.isoformat() if date_to else "",
+            "" if has_attachments is None else ("1" if has_attachments else "0"),
+            str(page),
+            str(page_size),
+        ]
+    )
+
+
+def _message_search_text(row: dict[str, Any]) -> str:
+    sender = row.get("sender") if isinstance(row.get("sender"), dict) else {}
+    recipients = row.get("to") if isinstance(row.get("to"), list) else []
+    cc_recipients = row.get("cc") if isinstance(row.get("cc"), list) else []
+    parts: list[str] = [
+        str(row.get("subject") or ""),
+        str(sender.get("name") or ""),
+        str(sender.get("email") or ""),
+        str(row.get("snippet") or ""),
+        str(row.get("text_body") or ""),
+        re.sub(r"<[^>]+>", " ", str(row.get("html_body") or "")),
+    ]
+    for recipient in [*recipients, *cc_recipients]:
+        if not isinstance(recipient, dict):
+            parts.append(str(recipient or ""))
+            continue
+        parts.append(str(recipient.get("name") or ""))
+        parts.append(str(recipient.get("email") or ""))
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip().lower()
+
+
+def _message_detail_cache_key(email: str, folder: str, uid: str) -> str:
+    return f"mail:detail:{email.strip().lower()}:{folder}:{uid}"
+
+
+def _invalidate_message_cache(email: str, folders: list[str]) -> None:
+    normalized_email = email.strip().lower()
+    unique_folders = [folder.strip() for folder in dict.fromkeys(folder for folder in folders if folder and folder.strip())]
+    if not unique_folders:
+        return
+
+    try:
+        client = redis_client.get_redis_client()
+        keys: list[str] = []
+        for folder in unique_folders:
+            keys.extend(str(key) for key in client.scan_iter(match=f"mail:list:{normalized_email}:{folder}:*"))
+            keys.extend(str(key) for key in client.scan_iter(match=f"mail:search:{normalized_email}:{folder}:*"))
+            keys.extend(str(key) for key in client.scan_iter(match=f"mail:detail:{normalized_email}:{folder}:*"))
+        if keys:
+            client.delete(*keys)
+    except Exception:
+        return
+
+
+def _parse_message_date(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed
+
+
+def _datetime_to_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _message_matches_attachment_state(message: dict[str, Any], has_attachments: bool | None) -> bool:
+    if has_attachments is None:
+        return True
+    return bool(message.get("has_attachments")) is has_attachments
+
+
+def _message_matches_sender(message: dict[str, Any], sender: str | None) -> bool:
+    if not sender:
+        return True
+    sender_text = sender.lower()
+    message_sender = message.get("sender") or {}
+    sender_name = str(message_sender.get("name", "")).lower()
+    sender_email = str(message_sender.get("email", "")).lower()
+    return sender_text in sender_name or sender_text in sender_email
+
+
+def _message_matches_date_range(message: dict[str, Any], date_from: date | None, date_to: date | None) -> bool:
+    if date_from is None and date_to is None:
+        return True
+    message_date = _parse_message_date(message.get("date"))
+    if message_date is None:
+        return False
+    current_date = message_date.date()
+    if date_from and current_date < date_from:
+        return False
+    if date_to and current_date > date_to:
+        return False
+    return True
+
+
+def _message_matches_query(message: dict[str, Any], query: str) -> bool:
+    lowered = query.lower()
+    return lowered in _message_search_text(message) or lowered in str(message.get("_search_text", "")).lower()
+
+
+def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> dict[str, dict[str, Any]]:
+    uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
+    if not uid_values:
+        return {}
+
+    try:
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == session.email.strip().lower()))
+            if account is None:
+                return {}
+            folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
+            if folder_row is None:
+                return {}
+            cached_messages = db_session.scalars(
+                select(MailMessage).where(
+                    MailMessage.account_id == account.id,
+                    MailMessage.folder_id == folder_row.id,
+                    MailMessage.imap_uid.in_(uid_values),
+                )
+            ).all()
+    except Exception:
+        return {}
+
+    detail_cache = JsonCache(redis_client.get_redis_client())
+    rows: dict[str, dict[str, Any]] = {}
+    for message in cached_messages:
+        uid_text = str(message.imap_uid)
+        detail_payload = detail_cache.get(_message_detail_cache_key(session.email, folder, uid_text)) or {}
+        rows[uid_text] = {
+            "uid": str(message.imap_uid),
+            "message_id": message.message_id,
+            "subject": str(message.subject or "(无主题)"),
+            "sender": {
+                "name": str(message.sender_name or ""),
+                "email": str(message.sender_email or ""),
+            },
+            "to": [{"name": "", "email": email} for email in (message.to_emails or [])],
+            "cc": [{"name": "", "email": email} for email in (message.cc_emails or [])],
+            "date": _datetime_to_iso(message.sent_at),
+            "read": bool(message.is_read),
+            "has_attachments": bool(message.has_attachments),
+            "attachment_types": [],
+            "snippet": str(message.snippet or ""),
+            "html_body": str(detail_payload.get("html_body") or ""),
+            "text_body": str(detail_payload.get("text_body") or ""),
+            "_search_text": str(detail_payload.get("search_text") or ""),
+        }
+    return rows
+
+
+def _persist_message_cache(session: AuthSession, folder: str, summary: dict[str, Any], detail: dict[str, Any]) -> None:
+    normalized_email = session.email.strip().lower()
+    settings = get_settings()
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+        if account is None:
+            account = MailAccount(
+                email=normalized_email,
+                display_name=None,
+                imap_host=settings.mail_imap_host,
+                imap_port=settings.mail_imap_port,
+                imap_ssl=settings.mail_imap_ssl,
+                smtp_host=settings.mail_smtp_host,
+                smtp_port=settings.mail_smtp_port,
+                smtp_ssl=settings.mail_smtp_ssl,
+            )
+            db_session.add(account)
+            db_session.flush()
+        folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
+        if folder_row is None:
+            folder_row = MailFolder(
+                account_id=account.id,
+                name=folder,
+                display_name=folder,
+                folder_type="custom",
+                delimiter="/",
+            )
+            db_session.add(folder_row)
+            db_session.flush()
+
+        uid_value = int(str(summary["uid"]))
+        message = db_session.scalar(
+            select(MailMessage).where(
+                MailMessage.account_id == account.id,
+                MailMessage.folder_id == folder_row.id,
+                MailMessage.imap_uid == uid_value,
+            )
+        )
+        if message is None:
+            message = MailMessage(account_id=account.id, folder_id=folder_row.id, imap_uid=uid_value)
+            db_session.add(message)
+
+        sender = summary.get("sender") if isinstance(summary.get("sender"), dict) else {}
+        to_items = detail.get("to") if isinstance(detail.get("to"), list) else summary.get("to", [])
+        cc_items = detail.get("cc") if isinstance(detail.get("cc"), list) else summary.get("cc", [])
+
+        message.message_id = str(summary.get("message_id") or "") or None
+        message.subject = str(summary.get("subject") or "")
+        message.sender_name = str(sender.get("name") or "") or None
+        message.sender_email = str(sender.get("email") or "") or None
+        message.to_emails = [str(item.get("email") or "") for item in to_items if isinstance(item, dict) and item.get("email")]
+        message.cc_emails = [str(item.get("email") or "") for item in cc_items if isinstance(item, dict) and item.get("email")]
+        message.sent_at = datetime.fromisoformat(str(summary["date"])) if summary.get("date") else None
+        message.received_at = message.sent_at
+        message.snippet = str(summary.get("snippet") or "")
+        message.has_attachments = bool(detail.get("attachments"))
+        message.is_read = bool(summary.get("read"))
+        message.cached_at = datetime.now(timezone.utc)
+        db_session.commit()
+    detail_cache = JsonCache(redis_client.get_redis_client())
+    uid_text = str(summary["uid"])
+    html_body = str(detail.get("html_body") or "")
+    text_body = str(detail.get("text_body") or "")
+    detail_cache.set(
+        _message_detail_cache_key(session.email, folder, uid_text),
+        {
+            "html_body": html_body,
+            "text_body": text_body,
+            "search_text": re.sub(r"\s+", " ", f"{text_body} {re.sub(r'<[^>]+>', ' ', html_body)}").strip(),
+        },
+        ttl_seconds=3600,
+    )
+
+
+def _page_uids(uids: list[str], page: int, page_size: int) -> list[str]:
+    def uid_sort_key(uid: str) -> tuple[int, str]:
+        return (int(uid), uid) if str(uid).isdigit() else (0, str(uid))
+
+    offset = max(page - 1, 0) * page_size
+    return sorted((str(uid) for uid in uids), key=uid_sort_key, reverse=True)[offset : offset + page_size]
 
 
 def list_messages(
@@ -503,23 +1068,36 @@ def list_messages(
     if not refresh:
         cached = cache.get(key)
         if cached:
-            return MailboxPage(cached=True, **cached)
+            cached_payload = dict(cached)
+            cached_messages = cached_payload.get("messages")
+            if isinstance(cached_messages, list):
+                cached_payload["messages"] = [
+                    _message_list_item(message) for message in cached_messages if isinstance(message, dict)
+                ]
+            return MailboxPage(cached=True, **cached_payload)
 
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
         uids = _uid_search(adapter, "ALL")
-        messages = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
-        messages.sort(key=lambda item: item["date"] or "", reverse=True)
-        sync_message_summaries(session.email, folder, messages, total_count=len(messages))
-        offset = max(page - 1, 0) * page_size
-        page_messages = messages[offset : offset + page_size]
+        page_uids = _page_uids(uids, page, page_size)
+        cached_rows = _cached_message_rows(session, folder, page_uids)
+        page_messages: list[dict[str, Any]] = []
+        for uid in page_uids:
+            row = cached_rows.get(str(uid))
+            if row is None:
+                row = _message_summary(uid, _uid_fetch_message_bytes(adapter, uid))
+            page_messages.append(row)
+        page_messages = _move_blacklisted_messages(session, adapter, folder, page_messages)
+        page_messages.sort(key=lambda item: item["date"] or "", reverse=True)
+        sync_message_summaries(session.email, folder, page_messages, total_count=len(uids))
+        response_messages = [_message_list_item(message) for message in page_messages]
         payload = {
             "folder": folder,
             "page": page,
             "page_size": page_size,
-            "total": len(messages),
-            "messages": page_messages,
+            "total": len(uids),
+            "messages": response_messages,
         }
         cache.set(key, payload, ttl_seconds=60)
         return MailboxPage(cached=False, **payload)
@@ -541,14 +1119,28 @@ def search_messages(
     *,
     page: int = 1,
     page_size: int = 30,
+    sender: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    has_attachments: bool | None = None,
     refresh: bool = False,
 ) -> MailboxPage:
     normalized_query = query.strip()
     if not normalized_query:
         raise AppError("SEARCH_QUERY_REQUIRED", "搜索关键词不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
-
+    normalized_sender = sender.strip() if sender else ""
     cache = JsonCache(redis_client.get_redis_client())
-    key = _search_cache_key(session.email, folder, normalized_query, page, page_size)
+    key = _search_cache_key(
+        session.email,
+        folder,
+        normalized_query,
+        page,
+        page_size,
+        normalized_sender.lower(),
+        date_from,
+        date_to,
+        has_attachments,
+    )
     if not refresh:
         cached = cache.get(key)
         if cached:
@@ -558,25 +1150,35 @@ def search_messages(
     try:
         adapter.select_folder(folder)
         uids = _uid_search(adapter, "ALL")
-        rows = [_message_summary(uid, _uid_fetch_message_bytes(adapter, uid)) for uid in uids]
+        cached_rows = _cached_message_rows(session, folder, uids)
+        rows: list[dict[str, Any]] = []
+        for uid in uids:
+            row = cached_rows.get(str(uid))
+            if row is None:
+                raw = _uid_fetch_message_bytes(adapter, uid)
+                row = _message_summary(uid, raw)
+            rows.append(row)
+        rows = _move_blacklisted_messages(session, adapter, folder, rows)
         sync_message_summaries(session.email, folder, rows, total_count=len(rows))
-        lowered = normalized_query.lower()
         messages = [
             row
             for row in rows
-            if lowered in str(row.get("subject", "")).lower()
-            or lowered in str(row.get("snippet", "")).lower()
-            or lowered in str(row.get("sender", {})).lower()
-            or lowered in str(row.get("to", [])).lower()
+            if _message_matches_query(row, normalized_query)
+            and _message_matches_sender(row, normalized_sender)
+            and _message_matches_date_range(row, date_from, date_to)
+            and _message_matches_attachment_state(row, has_attachments)
         ]
         messages.sort(key=lambda item: item["date"] or "", reverse=True)
         offset = max(page - 1, 0) * page_size
+        response_messages = []
+        for row in messages[offset : offset + page_size]:
+            response_messages.append(_message_list_item(row))
         payload = {
             "folder": folder,
             "page": page,
             "page_size": page_size,
             "total": len(messages),
-            "messages": messages[offset : offset + page_size],
+            "messages": response_messages,
         }
         cache.set(key, payload, ttl_seconds=60)
         return MailboxPage(cached=False, **payload)
@@ -596,11 +1198,20 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
     try:
         adapter.select_folder(folder)
         raw = _uid_fetch_message_bytes(adapter, uid)
+        summary = _message_summary(uid, raw)
         detail = _message_detail(uid, raw)
-        if bool(session.preferences.get("mark_read_on_open", True)):
+        system_preferences = session.preferences.get("system")
+        mark_read_on_open = True
+        if isinstance(system_preferences, dict):
+            mark_read_on_open = bool(system_preferences.get("mark_read_on_open", True))
+        if mark_read_on_open:
             adapter.mark_seen(uid)
             persist_message_read_state(session.email, folder, [uid], is_read=True)
+            summary["read"] = True
+            _sync_folder_snapshot(session.email, adapter)
+            _invalidate_message_cache(session.email, [folder])
             detail["read"] = True
+        _persist_message_cache(session, folder, summary, detail)
         return detail
     except MailAdapterError as exc:
         raise AppError(
@@ -666,10 +1277,21 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
                 adapter.store_flags(uid, "-FLAGS", "(\\Flagged)")
         if payload.action == "mark_read":
             persist_message_read_state(session.email, folder, payload.uids, is_read=True)
+            _sync_folder_snapshot(session.email, adapter)
+            _invalidate_message_cache(session.email, [folder])
         elif payload.action == "mark_unread":
             persist_message_read_state(session.email, folder, payload.uids, is_read=False)
+            _sync_folder_snapshot(session.email, adapter)
+            _invalidate_message_cache(session.email, [folder])
         if payload.action in {"delete", "move"}:
             adapter.expunge()
+            _sync_folder_snapshot(session.email, adapter)
+            affected_folders = [folder]
+            if payload.action == "delete":
+                affected_folders.append(trash_folder)
+            elif target_folder is not None:
+                affected_folders.append(target_folder)
+            _invalidate_message_cache(session.email, affected_folders)
         return {"action": payload.action, "folder": folder, "target_folder": target_folder, "uids": payload.uids}
     except MailAdapterError as exc:
         raise AppError(

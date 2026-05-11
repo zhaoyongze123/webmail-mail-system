@@ -2,13 +2,25 @@ import type {
   ApiResponse,
   AuthCredentials,
   AuthPayload,
+  ContactListQuery,
   ContactListPayload,
+  ContactPayload,
+  ContactUpsertPayload,
   FolderListPayload,
+  FolderOperationResult,
   MessageDetailPayload,
   MessageListPayload,
   MessageOperationAction,
   MessageOperationPayload,
   MessageOperationResult,
+  MessageSearchOptions,
+  ChangePasswordPayload,
+  ChangePasswordResult,
+  MailSignature,
+  SignatureDefaultPayload,
+  SignatureListPayload,
+  SignatureUpdatePayload,
+  SignatureUpsertPayload,
   SettingsPayload,
   UserSettingsPreferences,
 } from './types';
@@ -58,6 +70,26 @@ export async function fetchFolders(): Promise<FolderListPayload> {
   return requestApi<FolderListPayload>('/api/folders', { method: 'GET' });
 }
 
+export async function createFolder(name: string): Promise<FolderOperationResult> {
+  return requestApi<FolderOperationResult>('/api/folders', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function renameFolder(name: string, newName: string): Promise<FolderOperationResult> {
+  return requestApi<FolderOperationResult>(`/api/folders/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name, new_name: newName }),
+  });
+}
+
+export async function deleteFolder(name: string): Promise<FolderOperationResult> {
+  return requestApi<FolderOperationResult>(`/api/folders/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function login(credentials: AuthCredentials): Promise<AuthPayload> {
   return requestApi<AuthPayload>('/api/auth/login', {
     method: 'POST',
@@ -104,13 +136,25 @@ export async function fetchFolderMessages(
 export async function searchFolderMessages(
   folder: string,
   query: string,
-  options: { page?: number; pageSize?: number; refresh?: boolean } = {},
+  options: MessageSearchOptions = {},
 ): Promise<MessageListPayload> {
   const params = new URLSearchParams({
     q: query,
     page: String(options.page ?? 1),
     page_size: String(options.pageSize ?? 30),
   });
+  if (options.sender?.trim()) {
+    params.set('sender', options.sender.trim());
+  }
+  if (options.dateFrom) {
+    params.set('date_from', options.dateFrom);
+  }
+  if (options.dateTo) {
+    params.set('date_to', options.dateTo);
+  }
+  if (typeof options.hasAttachments === 'boolean') {
+    params.set('has_attachments', String(options.hasAttachments));
+  }
   if (options.refresh) {
     params.set('refresh', 'true');
   }
@@ -135,12 +179,48 @@ export async function fetchMessageDetail(folder: string, uid: string): Promise<M
   });
 }
 
-export async function fetchContacts(query = '', limit = 10): Promise<ContactListPayload> {
-  const params = new URLSearchParams({
-    query,
-    limit: String(limit),
-  });
+export async function fetchContacts(queryOrOptions: string | ContactListQuery = '', limit = 10): Promise<ContactListPayload> {
+  const options = typeof queryOrOptions === 'string'
+    ? { query: queryOrOptions, limit }
+    : queryOrOptions;
+  const params = new URLSearchParams();
+  const query = options.query ?? '';
+  params.set('query', query);
+  if (typeof options.page === 'number') {
+    params.set('page', String(options.page));
+  }
+  if (typeof options.pageSize === 'number') {
+    params.set('page_size', String(options.pageSize));
+  } else if (typeof options.limit === 'number') {
+    params.set('limit', String(options.limit));
+  }
+  if (options.group) {
+    params.set('group', options.group);
+  }
+  if (options.tag) {
+    params.set('tag', options.tag);
+  }
   return requestApi<ContactListPayload>(`/api/contacts?${params.toString()}`, { method: 'GET' });
+}
+
+export async function createContact(payload: ContactUpsertPayload): Promise<ContactPayload> {
+  return requestApi<ContactPayload>('/api/contacts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateContact(contactId: string, payload: Partial<ContactUpsertPayload>): Promise<ContactPayload> {
+  return requestApi<ContactPayload>(`/api/contacts/${encodeURIComponent(contactId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteContact(contactId: string): Promise<{ deleted: boolean }> {
+  return requestApi<{ deleted: boolean }>(`/api/contacts/${encodeURIComponent(contactId)}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function moveMessages(
@@ -177,4 +257,126 @@ export async function saveSettings(preferences: Partial<UserSettingsPreferences>
     method: 'PUT',
     body: JSON.stringify(preferences),
   });
+}
+
+export async function uploadSettingsAvatar(file: File): Promise<SettingsPayload> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const csrfToken = readCookie(CSRF_COOKIE_NAME);
+  const headers: Record<string, string> = {};
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const response = await fetch('/api/settings/avatar', {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: formData,
+  });
+  const payload = (await response.json()) as ApiResponse<SettingsPayload>;
+  if (!response.ok || !payload.success) {
+    const message = payload.error?.message || '请求失败，请稍后重试';
+    const error = new Error(message) as Error & { code?: string };
+    error.code = payload.error?.code;
+    throw error;
+  }
+  return payload.data as SettingsPayload;
+}
+
+export function formatDateByTimezone(
+  value: string | null | undefined,
+  options?: { locale?: string; timezone?: string; dateStyle?: Intl.DateTimeFormatOptions['dateStyle']; timeStyle?: Intl.DateTimeFormatOptions['timeStyle'] },
+): string {
+  if (!value) {
+    return '未提供';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  try {
+    return new Intl.DateTimeFormat(options?.locale ?? 'zh-CN', {
+      dateStyle: options?.dateStyle ?? 'medium',
+      timeStyle: options?.timeStyle ?? 'short',
+      timeZone: options?.timezone,
+    }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat(options?.locale ?? 'zh-CN', {
+      dateStyle: options?.dateStyle ?? 'medium',
+      timeStyle: options?.timeStyle ?? 'short',
+    }).format(date);
+  }
+}
+
+export async function changePassword(payload: ChangePasswordPayload): Promise<ChangePasswordResult> {
+  return requestApi<ChangePasswordResult>('/api/settings/password', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchSignatures(): Promise<SignatureListPayload> {
+  const payload = await requestApi<SignatureListPayload>('/api/signatures', { method: 'GET' });
+  return {
+    signatures: payload.signatures.map(normalizeSignature),
+  };
+}
+
+export async function fetchDefaultSignature(): Promise<SignatureDefaultPayload> {
+  const payload = await requestApi<SignatureDefaultPayload>('/api/signatures/default', { method: 'GET' });
+  return {
+    signature: payload.signature ? normalizeSignature(payload.signature) : null,
+  };
+}
+
+export async function createSignature(payload: SignatureUpsertPayload): Promise<{ signature: MailSignature }> {
+  const result = await requestApi<{ signature: MailSignature }>('/api/signatures', {
+    method: 'POST',
+    body: JSON.stringify(signatureRequestBody(payload)),
+  });
+  return { signature: normalizeSignature(result.signature) };
+}
+
+export async function updateSignature(id: string, payload: SignatureUpdatePayload): Promise<{ signature: MailSignature }> {
+  const result = await requestApi<{ signature: MailSignature }>(`/api/signatures/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(signatureRequestBody(payload)),
+  });
+  return { signature: normalizeSignature(result.signature) };
+}
+
+export async function deleteSignature(id: string): Promise<{ deleted: boolean }> {
+  return requestApi<{ deleted: boolean }>(`/api/signatures/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function setDefaultSignature(id: string): Promise<SignatureDefaultPayload> {
+  const payload = await requestApi<SignatureDefaultPayload>(`/api/signatures/${encodeURIComponent(id)}/default`, {
+    method: 'POST',
+  });
+  return {
+    signature: payload.signature ? normalizeSignature(payload.signature) : null,
+  };
+}
+
+function normalizeSignature(signature: MailSignature): MailSignature {
+  return {
+    ...signature,
+    html_body: signature.html_body ?? signature.content ?? '',
+  };
+}
+
+function signatureRequestBody(payload: SignatureUpdatePayload) {
+  const body: Record<string, unknown> = {};
+  if (payload.name !== undefined) {
+    body.name = payload.name;
+  }
+  if (payload.html_body !== undefined) {
+    body.content = payload.html_body;
+  }
+  if (payload.is_default !== undefined) {
+    body.is_default = payload.is_default;
+  }
+  return body;
 }

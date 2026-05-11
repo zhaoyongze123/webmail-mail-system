@@ -63,18 +63,31 @@ describe('MessageReader', () => {
     expect(onForward).toHaveBeenCalledWith(expect.objectContaining({ uid: 42, subject: '项目周报' }));
   });
 
-  it('HTML 正文会移除脚本、事件处理和 javascript 链接', async () => {
+  it('HTML 正文会保留富文本样式并净化危险内容', async () => {
     mockFetch.mockResolvedValue(
       mockApiResponse({
         success: true,
         data: {
           uid: 7,
           folder: 'INBOX',
-          subject: '安全样例',
+          subject: '富文本样例',
           from: 'security@example.com',
           to: ['user@example.com'],
           html_body:
-            '<p onclick="window.__xss=1">安全内容</p><script>window.__xss=1</script><a href="javascript:alert(1)">危险链接</a><img src="javascript:alert(2)" onerror="window.__xss=1">',
+            '<div align="center" style="color:#e74c3c;text-align:center;">'
+            + '<p><i>斜体</i> <u>下划线</u> <s>删除线</s></p>'
+            + '<p>H<sub>2</sub>O 与 x<sup>2</sup></p>'
+            + '<hr>'
+            + '<ol><li>第一项</li><li>第二项</li></ol>'
+            + '<ul><li>A</li><li>B</li></ul>'
+            + '<p onclick="window.__xss=1">安全内容</p>'
+            + '<table><tbody><tr><td>单元格</td></tr></tbody></table>'
+            + '<img src="data:image/png;base64,aGVsbG8=" alt="内联图片">'
+            + '<script>window.__xss=1</script>'
+            + '<a href="javascript:alert(1)">危险链接</a>'
+            + '<img src="javascript:alert(2)" onerror="window.__xss=1">'
+            + '</div>',
+          text_body: '安全内容',
           attachments: [],
         },
         error: null,
@@ -84,13 +97,52 @@ describe('MessageReader', () => {
     render(<MessageReader folder="INBOX" uid={7} />);
 
     const body = await screen.findByTestId('message-html-body');
-    const html = body.innerHTML.toLowerCase();
-    expect(html).toContain('安全内容');
-    expect(html).not.toContain('<script');
-    expect(html).not.toContain('onclick');
-    expect(html).not.toContain('onerror');
-    expect(html).not.toContain('javascript:');
+    expect(body.tagName).toBe('DIV');
+    const centeredBlock = body.querySelector('div[align="center"]') as HTMLElement | null;
+    expect(centeredBlock).not.toBeNull();
+    expect(centeredBlock?.getAttribute('style')).toContain('color:#e74c3c');
+    expect(centeredBlock?.getAttribute('style')).toContain('text-align:center');
+    expect(body.querySelector('i')?.textContent).toBe('斜体');
+    expect(body.querySelector('u')?.textContent).toBe('下划线');
+    expect(body.querySelector('s')?.textContent).toBe('删除线');
+    expect(body.querySelector('sub')?.textContent).toBe('2');
+    expect(body.querySelector('sup')?.textContent).toBe('2');
+    expect(body.querySelector('hr')).not.toBeNull();
+    expect(body.querySelectorAll('ol li')).toHaveLength(2);
+    expect(body.querySelectorAll('ul li')).toHaveLength(2);
+    expect(body.textContent).toContain('安全内容');
+    expect(body.textContent).toContain('单元格');
+    expect(body.querySelector('img')?.getAttribute('src')).toContain('data:image/png');
+    expect(body.innerHTML).not.toContain('<script');
+    expect(body.innerHTML).not.toContain('onclick');
+    expect(body.innerHTML).not.toContain('onerror');
+    expect(body.innerHTML).not.toContain('javascript:');
     expect((window as Window & { __xss?: number }).__xss).toBeUndefined();
+  });
+
+  it('纯文本邮件即使带有文本转 HTML 结果也会回退为纯文本展示', async () => {
+    mockFetch.mockResolvedValue(
+      mockApiResponse({
+        success: true,
+        data: {
+          uid: 8,
+          folder: 'INBOX',
+          subject: '纯文本样例',
+          from: 'plain@example.com',
+          to: ['user@example.com'],
+          html_body: '第一行<br>第二行',
+          text_body: '第一行\n第二行',
+          attachments: [],
+        },
+        error: null,
+      }),
+    );
+
+    render(<MessageReader folder="INBOX" uid={8} />);
+
+    const textBody = await screen.findByTestId('message-text-body');
+    expect(textBody.textContent).toBe('第一行\n第二行');
+    expect(screen.queryByTestId('message-html-body')).toBeNull();
   });
 
   it('附件下载链接使用后端附件接口', async () => {

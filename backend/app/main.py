@@ -1,35 +1,78 @@
+import base64
+from datetime import date
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Query, Request, Response, UploadFile, status
+from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.attachments import upload_temp_attachments
-from app.auth import LoginRequest, RegisterRequest, clear_session_cookie, get_current_session, login_user, logout_user, register_user, set_session_cookie
+from app.attachments import store_temp_attachment_chunk, upload_temp_attachments
+from app.auth import (
+    LoginRequest,
+    RegisterRequest,
+    clear_session_cookie,
+    get_current_session,
+    login_user,
+    logout_user,
+    register_user,
+    set_session_cookie,
+    update_session_password,
+    verify_mailbox_password,
+)
 from app.compose import SendMailRequest, send_mail
-from app.contacts import search_recent_contacts
+from app.contacts import (
+    create_contact,
+    delete_contact,
+    get_contact,
+    list_blacklisted_contacts,
+    search_contacts,
+    search_contacts_for_autocomplete,
+    update_contact,
+)
 from app.config import get_settings
-from app.drafts import DraftPayload, delete_draft, get_draft, save_draft
+from app.drafts import DraftPayload, delete_draft, get_draft, save_draft, update_draft
 from app.errors import AppError
-from app.cache import UserPreferenceStore
+from app.mail_preferences import get_user_preferences, update_user_preferences
 from app.mailbox import (
     MessageOperationRequest,
+    create_folder,
+    delete_folder,
     get_message_attachment,
     get_message_detail,
     list_folders,
     list_messages,
     operate_messages,
+    rename_folder,
     search_messages,
 )
 from app.middleware import request_id_middleware
 from app.observability import metrics_store, record_audit_event
+from app.signatures import router as signatures_router
 from app.responses import app_error_response, error_response, success_response
-from app.schemas import ApiResponse
+from app.schemas import (
+    ApiResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
+    ContactCreateRequest,
+    ContactUpdateRequest,
+    FolderCreateRequest,
+    FolderDeleteRequest,
+    FolderOperationResponse,
+    FolderRenameRequest,
+)
 from app.security import add_security_headers, log_sanitized_event, validate_attachment_id, validate_csrf_request
 
 
 settings = get_settings()
+
+
+def _system_preferences(preferences: dict[str, object]) -> dict[str, object]:
+    system_preferences = preferences.get("system")
+    if isinstance(system_preferences, dict):
+        return system_preferences
+    return {}
 
 app = FastAPI(title="Webmail MVP API", version="0.1.0")
 app.middleware("http")(request_id_middleware)
@@ -40,6 +83,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(signatures_router)
 
 
 @app.middleware("http")
@@ -66,8 +110,41 @@ class BulkMessageRequest(BaseModel):
 
 
 class SettingsUpdateRequest(BaseModel):
-    page_size: int | None = Field(default=None, ge=1, le=100)
-    mark_read_on_open: bool | None = None
+    system: dict[str, object] | None = None
+    user: dict[str, object] | None = None
+    theme: dict[str, object] | None = None
+
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, value: dict[str, object] | None) -> dict[str, object] | None:
+        if value is None:
+            return value
+        timezone = value.get("timezone")
+        if isinstance(timezone, str):
+            try:
+                ZoneInfo(timezone)
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError("无效的时区") from exc
+        reply_quote_position = value.get("reply_quote_position")
+        if reply_quote_position is not None and reply_quote_position not in {"top", "bottom"}:
+            raise ValueError("引用位置无效")
+        page_size = value.get("page_size")
+        if page_size is not None and (not isinstance(page_size, int) or page_size < 1 or page_size > 100):
+            raise ValueError("每页显示数量无效")
+        language = value.get("language")
+        if language is not None and (not isinstance(language, str) or len(language) < 2 or len(language) > 32):
+            raise ValueError("语言配置无效")
+        return value
+
+    @field_validator("theme")
+    @classmethod
+    def validate_theme(cls, value: dict[str, object] | None) -> dict[str, object] | None:
+        if value is None:
+            return value
+        mode = value.get("mode")
+        if mode is not None and mode not in {"light", "dark"}:
+            raise ValueError("主题模式无效")
+        return value
 
 
 @app.exception_handler(AppError)
@@ -203,7 +280,7 @@ def me(request: Request) -> dict[str, object]:
 )
 def get_settings_api(request: Request) -> dict[str, object]:
     session = get_current_session(request)
-    preferences = UserPreferenceStore().get(session.email)
+    preferences = get_user_preferences(session.email)
     return success_response(
         request,
         {
@@ -222,11 +299,12 @@ def get_settings_api(request: Request) -> dict[str, object]:
 )
 def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dict[str, object]:
     session = get_current_session(request)
-    preferences = UserPreferenceStore().update(
+    preferences = update_user_preferences(
         session.email,
         {
-            "page_size": payload.page_size,
-            "mark_read_on_open": payload.mark_read_on_open,
+            "system": payload.system or {},
+            "user": payload.user or {},
+            "theme": payload.theme or {},
         },
     )
     return success_response(
@@ -236,6 +314,82 @@ def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dic
             "preferences": preferences,
         },
     )
+
+
+@app.post(
+    "/api/settings/avatar",
+    tags=["settings"],
+    response_model=ApiResponse,
+    summary="上传当前用户头像",
+    response_description="更新后的账号和设置偏好",
+)
+async def upload_settings_avatar(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+    session = get_current_session(request)
+    content_type = (file.content_type or "").strip().lower()
+    if not content_type.startswith("image/"):
+        raise AppError(
+            "SETTINGS_AVATAR_INVALID_TYPE",
+            "头像仅支持图片文件",
+            http_status=status.HTTP_400_BAD_REQUEST,
+        )
+    content = await file.read()
+    max_bytes = 2 * 1024 * 1024
+    if not content:
+        raise AppError(
+            "SETTINGS_AVATAR_EMPTY",
+            "头像文件不能为空",
+            http_status=status.HTTP_400_BAD_REQUEST,
+        )
+    if len(content) > max_bytes:
+        raise AppError(
+            "SETTINGS_AVATAR_TOO_LARGE",
+            "头像大小不能超过 2 MB",
+            http_status=status.HTTP_413_CONTENT_TOO_LARGE,
+        )
+    data_url = f"data:{content_type};base64,{base64.b64encode(content).decode('ascii')}"
+    preferences = update_user_preferences(
+        session.email,
+        {
+            "user": {
+                "avatar_url": data_url,
+            },
+        },
+    )
+    return success_response(
+        request,
+        {
+            "account": {"email": session.email},
+            "preferences": preferences,
+        },
+    )
+
+
+@app.post(
+    "/api/settings/password",
+    tags=["settings"],
+    response_model=ApiResponse,
+    summary="修改当前账号密码",
+    response_description="修改密码结果",
+)
+def change_password_api(request: Request, payload: ChangePasswordRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    if payload.current_password == payload.new_password:
+        raise AppError(
+            "PASSWORD_SAME_AS_CURRENT",
+            "新密码不能与旧密码相同",
+            http_status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    verify_mailbox_password(session.email, payload.current_password)
+    verify_mailbox_password(session.email, payload.new_password)
+    update_session_password(session.session_id, payload.new_password)
+    record_audit_event(
+        request,
+        "settings.change_password",
+        success=True,
+        metadata={"email": session.email},
+    )
+    return success_response(request, ChangePasswordResponse(password_updated=True).model_dump())
 
 
 @app.get(
@@ -248,6 +402,44 @@ def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dic
 def folders(request: Request) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, {"folders": list_folders(session)})
+
+
+@app.post(
+    "/api/folders",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="创建文件夹",
+    response_description="创建后的文件夹信息",
+)
+def create_folder_api(request: Request, payload: FolderCreateRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, create_folder(session, payload.name))
+
+
+@app.patch(
+    "/api/folders/{folder}",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="重命名文件夹",
+    response_description="重命名后的文件夹信息",
+)
+def rename_folder_api(request: Request, folder: str, payload: FolderRenameRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    if folder != payload.name:
+        return success_response(request, rename_folder(session, folder, payload.new_name))
+    return success_response(request, rename_folder(session, payload.name, payload.new_name))
+
+
+@app.delete(
+    "/api/folders/{folder}",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="删除文件夹",
+    response_description="删除结果",
+)
+def delete_folder_api(request: Request, folder: str) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, delete_folder(session, folder))
 
 
 @app.get(
@@ -265,7 +457,7 @@ def messages(
     refresh: bool = False,
 ) -> dict[str, object]:
     session = get_current_session(request)
-    effective_page_size = page_size or int(session.preferences.get("page_size", 30) or 30)
+    effective_page_size = page_size or int(_system_preferences(session.preferences).get("page_size", 30) or 30)
     page_data = list_messages(
         session,
         folder,
@@ -297,18 +489,34 @@ def search_folder_messages(
     request: Request,
     folder: str,
     q: str = Query(..., min_length=1),
+    sender: str | None = Query(default=None, min_length=1),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    has_attachments: bool | None = Query(default=None),
     page: int = 1,
     page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
     session = get_current_session(request)
-    effective_page_size = page_size or int(session.preferences.get("page_size", 30) or 30)
+    normalized_sender = sender.strip() if sender else None
+    if date_from and date_to and date_from > date_to:
+        raise AppError(
+            "VALIDATION_ERROR",
+            "请求参数错误",
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            details={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
+        )
+    effective_page_size = page_size or int(_system_preferences(session.preferences).get("page_size", 30) or 30)
     page_data = search_messages(
         session,
         folder,
         q,
         page=max(page, 1),
         page_size=min(max(effective_page_size, 1), 100),
+        sender=normalized_sender,
+        date_from=date_from,
+        date_to=date_to,
+        has_attachments=has_attachments,
         refresh=refresh,
     )
     return success_response(
@@ -316,6 +524,10 @@ def search_folder_messages(
         {
             "folder": page_data.folder,
             "query": q,
+            "sender": normalized_sender,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "has_attachments": has_attachments,
             "page": page_data.page,
             "page_size": page_data.page_size,
             "total": page_data.total,
@@ -336,11 +548,26 @@ def search_messages_api(
     request: Request,
     folder: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
+    sender: str | None = Query(default=None, min_length=1),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    has_attachments: bool | None = Query(default=None),
     page: int = 1,
     page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
-    return search_folder_messages(request, folder, q, page, page_size, refresh)
+    return search_folder_messages(
+        request,
+        folder,
+        q,
+        sender=sender,
+        date_from=date_from,
+        date_to=date_to,
+        has_attachments=has_attachments,
+        page=page,
+        page_size=page_size,
+        refresh=refresh,
+    )
 
 
 @app.get(
@@ -460,6 +687,37 @@ async def upload_attachments(request: Request, files: list[UploadFile] = File(..
 
 
 @app.post(
+    "/api/attachments/chunks",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="分块上传临时附件",
+    response_description="分块上传进度和附件元数据",
+)
+async def upload_attachment_chunk(
+    request: Request,
+    attachment_id: str = Form(...),
+    chunk_index: int = Form(..., ge=0),
+    total_chunks: int = Form(..., ge=1),
+    file_size_bytes: int = Form(..., ge=0),
+    filename: str = Form(...),
+    content_type: str = Form("application/octet-stream"),
+    chunk: UploadFile = File(...),
+) -> dict[str, object]:
+    session = get_current_session(request)
+    attachment = await store_temp_attachment_chunk(
+        session,
+        attachment_id=attachment_id,
+        filename=filename,
+        content_type=content_type or "application/octet-stream",
+        file_size_bytes=file_size_bytes,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
+        chunk=chunk,
+    )
+    return success_response(request, {"attachment": attachment})
+
+
+@app.post(
     "/api/messages/send",
     tags=["compose"],
     response_model=ApiResponse,
@@ -503,15 +761,92 @@ def contacts(
     request: Request,
     query: str = Query(default="", max_length=255),
     limit: int = Query(default=10, ge=1, le=10),
+    page: int = Query(default=1, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+    group_name: str | None = Query(default=None, max_length=100),
+    tag: str | None = Query(default=None, max_length=100),
 ) -> dict[str, object]:
     session = get_current_session(request)
+    if page_size is not None or page > 1 or group_name is not None or tag is not None:
+        effective_page_size = page_size or 20
+        return success_response(
+            request,
+            search_contacts(
+                session,
+                query=query or None,
+                page=page,
+                page_size=effective_page_size,
+                group_name=group_name,
+                tag=tag,
+            ),
+        )
     return success_response(
         request,
         {
             "query": query,
-            "contacts": search_recent_contacts(session, query=query, limit=limit),
+            "contacts": search_contacts_for_autocomplete(session, query=query, limit=limit).contacts,
         },
     )
+
+
+@app.post(
+    "/api/contacts",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="新增联系人",
+    response_description="新增后的联系人",
+)
+def create_contact_api(request: Request, payload: ContactCreateRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, create_contact(session, payload))
+
+
+@app.get(
+    "/api/contacts/blacklist",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="获取黑名单联系人",
+    response_description="黑名单邮箱列表",
+)
+def contacts_blacklist(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, {"contacts": list_blacklisted_contacts(session)})
+
+
+@app.get(
+    "/api/contacts/{contact_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="获取联系人详情",
+    response_description="联系人详情",
+)
+def get_contact_api(request: Request, contact_id: str) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, get_contact(session, contact_id))
+
+
+@app.patch(
+    "/api/contacts/{contact_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="更新联系人",
+    response_description="更新后的联系人",
+)
+def update_contact_api(request: Request, contact_id: str, payload: ContactUpdateRequest) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, update_contact(session, contact_id, payload))
+
+
+@app.delete(
+    "/api/contacts/{contact_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="删除联系人",
+    response_description="删除结果",
+)
+def delete_contact_api(request: Request, contact_id: str) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, delete_contact(session, contact_id))
 
 
 @app.post(
@@ -524,6 +859,18 @@ def contacts(
 def save_mail_draft(request: Request, payload: DraftPayload) -> dict[str, object]:
     session = get_current_session(request)
     return success_response(request, save_draft(session, payload))
+
+
+@app.patch(
+    "/api/drafts/{draft_id}",
+    tags=["compose"],
+    response_model=ApiResponse,
+    summary="更新草稿",
+    response_description="草稿更新结果",
+)
+def update_mail_draft(request: Request, draft_id: str, payload: DraftPayload) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, update_draft(session, draft_id, payload))
 
 
 @app.get(

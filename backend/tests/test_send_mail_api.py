@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib
 import sys
+from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
 from email import message_from_bytes
@@ -14,6 +15,7 @@ import pytest
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from app.cache import SessionStore
 from app.errors import AppError
@@ -376,6 +378,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
@@ -384,6 +387,11 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
     monkeypatch.setattr(mail_adapters_module, "SmtpAdapter", FakeSmtpAdapter)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
+    db_module.Base.metadata.drop_all(engine)
+    db_module.Base.metadata.create_all(engine)
 
     sys.modules.pop("app.auth", None)
     sys.modules.pop("app.main", None)
@@ -568,6 +576,113 @@ def test_send_mail_success_sends_and_appends_sent_folder(monkeypatch: pytest.Mon
         "cc@example.com",
         "bcc@example.com",
     }
+
+
+def test_send_mail_refreshes_recent_contact_timestamp_without_creating_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    contacts_module = importlib.import_module("app.contacts")
+    timestamps = iter(
+        [
+            datetime(2026, 5, 7, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 7, 10, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(contacts_module, "_contact_used_at", lambda: next(timestamps))
+
+    response_first = send_mail(
+        client,
+        {
+            "to": ["receiver@example.com"],
+            "subject": "第一次发送",
+            "text_body": "正文一",
+            "attachment_ids": [],
+        },
+    )
+    assert response_first.status_code == 200
+
+    response_second = send_mail(
+        client,
+        {
+            "to": ["receiver@example.com"],
+            "subject": "第二次发送",
+            "text_body": "正文二",
+            "attachment_ids": [],
+        },
+    )
+    assert response_second.status_code == 200
+
+    fake_redis = getattr(client, "_fake_redis")
+    recent_contacts_key = "contacts:recent:user@example.com"
+    assert fake_redis.zcard(recent_contacts_key) == 1
+    assert fake_redis.zscore(recent_contacts_key, "receiver@example.com") == datetime(
+        2026, 5, 7, 10, 0, tzinfo=timezone.utc
+    ).timestamp()
+
+
+def test_send_mail_preserves_inline_image_html_markup(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = send_mail(
+        client,
+        {
+            "to": ["receiver@example.com"],
+            "subject": "内嵌图片发送",
+            "text_body": "图片正文",
+            "html_body": (
+                '<div class="inline-image" style="text-align: center;">'
+                '<img src="data:image/png;base64,aW5saW5lLWltYWdl" alt="inline.png" style="width: 420px; max-width: 100%; height: auto;" />'
+                '</div>'
+            ),
+            "attachment_ids": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(FakeSmtpAdapter.sent_messages) == 1
+    sent_message = FakeSmtpAdapter.sent_messages[0]
+    parsed_message = _parse_message(sent_message.as_bytes(policy=policy.default))
+    html_part = next(part for part in parsed_message.walk() if part.get_content_type() == "text/html")
+    html_content = html_part.get_content()
+    assert 'class="inline-image"' in html_content
+    assert 'text-align: center' in html_content
+    assert 'width: 420px' in html_content
+    assert 'data:image/png;base64,aW5saW5lLWltYWdl' in html_content
+
+
+def test_send_mail_text_only_omits_html_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = send_mail(
+        client,
+        {
+            "to": ["receiver@example.com"],
+            "subject": "纯文本发信",
+            "text_body": "只有纯文本正文",
+            "attachment_ids": [],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert len(FakeSmtpAdapter.sent_messages) == 1
+    sent_message = FakeSmtpAdapter.sent_messages[0]
+    parsed_message = _parse_message(sent_message.as_bytes(policy=policy.default))
+    assert not parsed_message.is_multipart()
+    assert parsed_message.get_content_type() == "text/plain"
+    assert parsed_message.get_content().strip() == "只有纯文本正文"
+    assert len(FakeImapAdapter.append_calls) == 1
+    _, appended_bytes = FakeImapAdapter.append_calls[0]
+    appended_message = _parse_message(appended_bytes)
+    assert not appended_message.is_multipart()
+    assert appended_message.get_content_type() == "text/plain"
 
 
 def test_send_mail_with_draft_id_deletes_saved_draft_after_sent_archive(monkeypatch: pytest.MonkeyPatch) -> None:

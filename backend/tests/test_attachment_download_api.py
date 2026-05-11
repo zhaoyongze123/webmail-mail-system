@@ -380,6 +380,46 @@ def test_attachment_download_returns_bytes_and_headers(monkeypatch: pytest.Monke
     assert candidate
 
 
+def test_attachment_download_exposes_word_attachment_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = build_app(monkeypatch)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = b"PK\x03\x04 fake docx attachment\n"
+    raw_bytes = _make_message_bytes(
+        subject="Word 附件邮件",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="Word 附件应只展示元数据",
+        html_body="<p>Word 附件应只展示元数据</p>",
+        attachments=[
+            (
+                "proposal.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "102", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/102")
+    assert detail_response.status_code == 200
+    payload = _extract_detail_payload(detail_response.json())
+    attachments = _extract_attachment_list(payload)
+
+    assert len(attachments) == 1
+    attachment = attachments[0]
+    assert attachment.get("filename") == "proposal.docx"
+    assert attachment.get("content_type") == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert attachment.get("size_bytes") == len(attachment_bytes)
+    assert "content" not in attachment
+    assert "data" not in attachment
+
+
 def test_attachment_download_invalid_attachment_id_returns_not_found_or_error(monkeypatch: pytest.MonkeyPatch) -> None:
     main_module = build_app(monkeypatch)
     client = TestClient(main_module.app, raise_server_exceptions=False)

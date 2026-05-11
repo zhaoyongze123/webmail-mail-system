@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import imaplib
 import smtplib
 import ssl
@@ -68,6 +69,63 @@ def _parse_status_response(raw: str) -> dict[str, int]:
         except ValueError:
             continue
     return result
+
+
+def _encode_modified_utf7(value: str) -> str:
+    if not value:
+        return value
+    chunks: list[str] = []
+    unicode_buffer: list[str] = []
+
+    def flush_unicode_buffer() -> None:
+        if not unicode_buffer:
+            return
+        utf16_bytes = ''.join(unicode_buffer).encode("utf-16-be")
+        encoded = base64.b64encode(utf16_bytes).decode("ascii").rstrip("=").replace("/", ",")
+        chunks.append(f"&{encoded}-")
+        unicode_buffer.clear()
+
+    for char in value:
+        if 0x20 <= ord(char) <= 0x7E:
+            flush_unicode_buffer()
+            chunks.append("&-" if char == "&" else char)
+        else:
+            unicode_buffer.append(char)
+
+    flush_unicode_buffer()
+    return "".join(chunks)
+
+
+def _decode_modified_utf7(value: str) -> str:
+    if "&" not in value:
+        return value
+
+    chunks: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "&":
+            chunks.append(value[index])
+            index += 1
+            continue
+        end_index = value.find("-", index)
+        if end_index == -1:
+            chunks.append(value[index:])
+            break
+        token = value[index + 1:end_index]
+        if token == "":
+            chunks.append("&")
+        else:
+            padding = "=" * ((4 - len(token) % 4) % 4)
+            decoded = base64.b64decode(token.replace(",", "/") + padding)
+            chunks.append(decoded.decode("utf-16-be"))
+        index = end_index + 1
+    return "".join(chunks)
+
+
+def _encode_mailbox_name(value: str) -> str:
+    if any(ord(char) > 0x7F or char == "&" for char in value):
+        return _encode_modified_utf7(value)
+    return value
 
 
 class ImapAdapter:
@@ -175,7 +233,7 @@ class ImapAdapter:
             status, data = client.list()
             if status != "OK":
                 raise MailAdapterError(f"IMAP 文件夹列表查询失败: {status}", operation="list_folders")
-            return [_decode_text(item) for item in data if item]
+            return [_decode_modified_utf7(_decode_text(item)) for item in data if item]
         except (
             OSError,
             ssl.SSLError,
@@ -188,7 +246,7 @@ class ImapAdapter:
     def select_folder(self, folder: str) -> tuple[str, list[bytes]]:
         client = self._ensure_client()
         try:
-            return client.select(folder)
+            return client.select(_encode_mailbox_name(folder))
         except (
             OSError,
             ssl.SSLError,
@@ -201,7 +259,7 @@ class ImapAdapter:
     def status(self, folder: str, items: str = "(MESSAGES UNSEEN UIDVALIDITY)") -> dict[str, int]:
         client = self._ensure_client()
         try:
-            status, data = client.status(folder, items)
+            status, data = client.status(_encode_mailbox_name(folder), items)
             if status != "OK":
                 raise MailAdapterError(f"IMAP 状态查询失败: {status}", operation="status")
             raw = _decode_text(data[0] if data else "")
@@ -342,9 +400,9 @@ class ImapAdapter:
         client = self._ensure_client()
         try:
             if hasattr(client, "uid"):
-                status, _ = client.uid("COPY", uid, target_folder)
+                status, _ = client.uid("COPY", uid, _encode_mailbox_name(target_folder))
             else:
-                status, _ = client.copy(uid, target_folder)
+                status, _ = client.copy(uid, _encode_mailbox_name(target_folder))
             if status != "OK":
                 raise MailAdapterError(f"IMAP 复制邮件失败: {status}", operation="copy_message")
         except (
@@ -355,6 +413,51 @@ class ImapAdapter:
             imaplib.IMAP4.readonly,
         ) as exc:
             raise _format_error("IMAP 复制邮件", exc) from exc
+
+    def create_folder(self, folder: str) -> None:
+        client = self._ensure_client()
+        try:
+            status, _ = client.create(_encode_mailbox_name(folder))
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 创建文件夹失败: {status}", operation="create_folder")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 创建文件夹", exc) from exc
+
+    def rename_folder(self, old_folder: str, new_folder: str) -> None:
+        client = self._ensure_client()
+        try:
+            status, _ = client.rename(_encode_mailbox_name(old_folder), _encode_mailbox_name(new_folder))
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 重命名文件夹失败: {status}", operation="rename_folder")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 重命名文件夹", exc) from exc
+
+    def delete_folder(self, folder: str) -> None:
+        client = self._ensure_client()
+        try:
+            status, _ = client.delete(_encode_mailbox_name(folder))
+            if status != "OK":
+                raise MailAdapterError(f"IMAP 删除文件夹失败: {status}", operation="delete_folder")
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP 删除文件夹", exc) from exc
 
     def expunge(self) -> None:
         client = self._ensure_client()
@@ -383,7 +486,7 @@ class ImapAdapter:
     def append_message(self, folder: str, message: EmailMessage) -> None:
         client = self._ensure_client()
         try:
-            client.append(folder, None, None, message.as_bytes())
+            client.append(_encode_mailbox_name(folder), None, None, message.as_bytes())
         except (
             OSError,
             ssl.SSLError,

@@ -220,11 +220,13 @@ def build_client(
 
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
+    mail_state_module = importlib.import_module("app.mail_state")
     redis_client_module = importlib.import_module("app.redis_client")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(mail_state_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
@@ -293,6 +295,8 @@ def assert_message_row_shape(row: dict[str, object]) -> None:
     assert row["snippet"]
     assert isinstance(row["read"], bool)
     assert isinstance(row["has_attachments"], bool)
+    assert "html_body" not in row
+    assert "text_body" not in row
 
 
 def test_message_list_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -328,6 +332,7 @@ def test_message_list_orders_by_date_desc_and_returns_required_fields(monkeypatc
 
     rows = extract_message_rows(body)
     assert [row["uid"] for row in rows] == ["103", "102"]
+    assert int(mailbox_state["fetch_count"]) == 2
     assert parse_response_datetime(rows[0]["date"]) > parse_response_datetime(rows[1]["date"])
 
     for row in rows:
@@ -388,7 +393,8 @@ def test_message_list_refresh_bypasses_cache_and_reveals_new_mail(monkeypatch: p
     refresh_body = refresh_response.json()
     refresh_rows = extract_message_rows(refresh_body)
 
-    assert int(mailbox_state["fetch_count"]) > initial_fetch_count
+    assert initial_fetch_count == 2
+    assert int(mailbox_state["fetch_count"]) == initial_fetch_count + 2
     assert refresh_rows[0]["uid"] == "104"
     assert refresh_rows[0] != initial_rows[0]
     assert_message_row_shape(refresh_rows[0])

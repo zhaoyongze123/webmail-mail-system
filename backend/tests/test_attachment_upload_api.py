@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import sys
@@ -154,6 +155,10 @@ def _make_file(name: str, content_type: str, content: bytes) -> tuple[str, tuple
     return ("files", (name, content, content_type))
 
 
+def _make_chunk_file(name: str, content_type: str, content: bytes) -> tuple[str, tuple[str, bytes, str]]:
+    return ("chunk", (name, content, content_type))
+
+
 def _extract_attachment_items(payload: object) -> list[dict[str, object]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -189,6 +194,32 @@ def _find_redis_key(fake_redis: fakeredis.FakeRedis, attachment_id: str) -> str:
         if stored_hash and attachment_id in json.dumps(stored_hash, ensure_ascii=False):
             return key_text
     pytest.fail(f"未找到包含附件 ID {attachment_id} 的 Redis 键")
+
+
+def _upload_chunk(
+    client: TestClient,
+    *,
+    attachment_id: str,
+    filename: str,
+    content_type: str,
+    content: bytes,
+    chunk_index: int,
+    total_chunks: int,
+    file_size_bytes: int,
+) -> object:
+    response = client.post(
+        "/api/attachments/chunks",
+        data={
+            "attachment_id": attachment_id,
+            "chunk_index": str(chunk_index),
+            "total_chunks": str(total_chunks),
+            "file_size_bytes": str(file_size_bytes),
+            "filename": filename,
+            "content_type": content_type,
+        },
+        files=[_make_chunk_file(filename, content_type, content)],
+    )
+    return response
 
 
 def _parse_datetime(value: object) -> datetime:
@@ -291,3 +322,78 @@ def test_upload_attachment_total_size_over_limit_returns_too_large(monkeypatch: 
     assert body["success"] is False
     error = _extract_error(body)
     assert error["code"] == "ATTACHMENT_TOO_LARGE"
+
+
+def test_upload_attachment_chunk_assembles_and_persists_temp_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake_redis = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_id = "chunk-test-001"
+    payload = b"chunked-attachment-payload"
+    first_half = payload[:10]
+    second_half = payload[10:]
+
+    first_response = _upload_chunk(
+        client,
+        attachment_id=attachment_id,
+        filename="large.bin",
+        content_type="application/octet-stream",
+        content=first_half,
+        chunk_index=0,
+        total_chunks=2,
+        file_size_bytes=len(payload),
+    )
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert first_body["success"] is True
+    first_attachment = first_body["data"]["attachment"]
+    assert first_attachment["complete"] is False
+    assert first_attachment["uploaded_chunks"] == 1
+    assert first_attachment["total_chunks"] == 2
+
+    second_response = _upload_chunk(
+        client,
+        attachment_id=attachment_id,
+        filename="large.bin",
+        content_type="application/octet-stream",
+        content=second_half,
+        chunk_index=1,
+        total_chunks=2,
+        file_size_bytes=len(payload),
+    )
+    assert second_response.status_code == 200
+    second_body = second_response.json()
+    assert second_body["success"] is True
+    second_attachment = second_body["data"]["attachment"]
+    assert second_attachment["complete"] is True
+    assert second_attachment["uploaded_chunks"] == 2
+    assert second_attachment["total_chunks"] == 2
+    assert second_attachment["size_bytes"] == len(payload)
+
+    temp_key = f"attachment:temp:user@example.com:{attachment_id}"
+    stored = fake_redis.hgetall(temp_key)
+    assert stored
+    assert base64.b64decode(str(stored["content_b64"]).encode("ascii")) == payload
+
+
+def test_upload_attachment_chunk_rejects_invalid_attachment_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = _upload_chunk(
+        client,
+        attachment_id="../invalid",
+        filename="broken.bin",
+        content_type="application/octet-stream",
+        content=b"broken",
+        chunk_index=0,
+        total_chunks=1,
+        file_size_bytes=6,
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert _extract_error(body)["code"] == "ATTACHMENT_INVALID_ID"

@@ -11,6 +11,8 @@ import fakeredis
 import pydantic.networks as pydantic_networks
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.mail_adapters import MailAdapterError
 
@@ -20,6 +22,7 @@ class FakeSettings:
         self.app_env = "test"
         self.app_name = "webmail-mvp"
         self.app_secret_key = "test-secret"
+        self.database_url = "sqlite+pysqlite:///:memory:"
         self.cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
         self.session_ttl_seconds = 60
         self.session_cookie_name = "webmail_session"
@@ -141,6 +144,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
@@ -149,8 +153,24 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
 
-    sys.modules.pop("app.auth", None)
+    sys.modules.pop("app.mail_state", None)
+    sys.modules.pop("app.mail_preferences", None)
+    models_module = importlib.import_module("app.models")
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
+    models_module.Base.metadata.create_all(engine)
+
     sys.modules.pop("app.mailbox", None)
+    sys.modules.pop("app.compose", None)
+    sys.modules.pop("app.attachments", None)
+    sys.modules.pop("app.drafts", None)
+    sys.modules.pop("app.contacts", None)
+    sys.modules.pop("app.signatures", None)
+    sys.modules.pop("app.auth", None)
     sys.modules.pop("app.main", None)
     auth_module = importlib.import_module("app.auth")
     monkeypatch.setattr(auth_module, "get_settings", lambda: settings, raising=False)
@@ -199,8 +219,13 @@ def test_settings_returns_current_account_and_default_preferences(monkeypatch: p
     body = response.json()
     assert body["success"] is True
     assert body["data"]["account"]["email"] == "user@example.com"
-    assert body["data"]["preferences"]["page_size"] == 30
-    assert body["data"]["preferences"]["mark_read_on_open"] is True
+    assert body["data"]["preferences"]["system"]["page_size"] == 30
+    assert body["data"]["preferences"]["system"]["mark_read_on_open"] is True
+    assert body["data"]["preferences"]["system"]["language"] == "zh-CN"
+    assert body["data"]["preferences"]["system"]["timezone"] == "Asia/Shanghai"
+    assert body["data"]["preferences"]["system"]["reply_quote_position"] == "bottom"
+    assert body["data"]["preferences"]["user"]["display_name"] == ""
+    assert body["data"]["preferences"]["theme"]["mode"] == "light"
 
 
 def test_settings_update_persists_and_affects_mail_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,21 +237,48 @@ def test_settings_update_persists_and_affects_mail_defaults(monkeypatch: pytest.
     update_response = client.put(
         "/api/settings",
         json={
-            "page_size": 12,
-            "mark_read_on_open": False,
+            "system": {
+                "page_size": 12,
+                "mark_read_on_open": False,
+                "language": "en-US",
+                "timezone": "America/Los_Angeles",
+                "reply_quote_position": "top",
+            },
+            "user": {
+                "display_name": "测试用户",
+                "profile_title": "产品经理",
+                "avatar_url": "https://cdn.example.com/avatar.png",
+                "bio": "负责重点客户项目",
+            },
+            "theme": {
+                "mode": "dark",
+            },
         },
     )
 
     assert update_response.status_code == 200
     update_body = update_response.json()
-    assert update_body["data"]["preferences"]["page_size"] == 12
-    assert update_body["data"]["preferences"]["mark_read_on_open"] is False
+    assert update_body["data"]["preferences"]["system"]["page_size"] == 12
+    assert update_body["data"]["preferences"]["system"]["mark_read_on_open"] is False
+    assert update_body["data"]["preferences"]["system"]["language"] == "en-US"
+    assert update_body["data"]["preferences"]["system"]["timezone"] == "America/Los_Angeles"
+    assert update_body["data"]["preferences"]["system"]["reply_quote_position"] == "top"
+    assert update_body["data"]["preferences"]["user"]["display_name"] == "测试用户"
+    assert update_body["data"]["preferences"]["user"]["profile_title"] == "产品经理"
+    assert update_body["data"]["preferences"]["user"]["avatar_url"] == "https://cdn.example.com/avatar.png"
+    assert update_body["data"]["preferences"]["user"]["bio"] == "负责重点客户项目"
+    assert update_body["data"]["preferences"]["theme"]["mode"] == "dark"
 
     refresh_response = client.get("/api/settings")
     assert refresh_response.status_code == 200
     refresh_body = refresh_response.json()
-    assert refresh_body["data"]["preferences"]["page_size"] == 12
-    assert refresh_body["data"]["preferences"]["mark_read_on_open"] is False
+    assert refresh_body["data"]["preferences"]["system"]["page_size"] == 12
+    assert refresh_body["data"]["preferences"]["system"]["mark_read_on_open"] is False
+    assert refresh_body["data"]["preferences"]["system"]["language"] == "en-US"
+    assert refresh_body["data"]["preferences"]["system"]["timezone"] == "America/Los_Angeles"
+    assert refresh_body["data"]["preferences"]["system"]["reply_quote_position"] == "top"
+    assert refresh_body["data"]["preferences"]["user"]["display_name"] == "测试用户"
+    assert refresh_body["data"]["preferences"]["theme"]["mode"] == "dark"
 
     list_response = client.get("/api/folders/INBOX/messages")
     assert list_response.status_code == 200
@@ -236,6 +288,124 @@ def test_settings_update_persists_and_affects_mail_defaults(monkeypatch: pytest.
     detail_response = client.get("/api/folders/INBOX/messages/101")
     assert detail_response.status_code == 200
     assert FakeImapAdapter.mark_seen_calls == []
+
+
+def test_change_password_updates_session_secret_and_revalidates_imap(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    change_response = client.post(
+        "/api/settings/password",
+        json={
+            "current_password": "correct-password",
+            "new_password": "updated-password",
+        },
+    )
+
+    assert change_response.status_code == 200
+    body = change_response.json()
+    assert body["success"] is True
+    assert body["data"]["password_updated"] is True
+    assert FakeImapAdapter.login_calls[-2:] == [
+        ("user@example.com", "correct-password"),
+        ("user@example.com", "updated-password"),
+    ]
+
+    session_id = client.cookies.get("webmail_session")
+    assert session_id is not None
+    session_data = importlib.import_module("app.cache").SessionStore().get(session_id)
+    assert session_data is not None
+    assert session_data["secret"] == "updated-password"
+
+
+def test_settings_avatar_upload_persists_to_user_preferences(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = client.post(
+        "/api/settings/avatar",
+        files={"file": ("avatar.png", b"avatar-image", "image/png")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    avatar_url = body["data"]["preferences"]["user"]["avatar_url"]
+    assert avatar_url.startswith("data:image/png;base64,")
+
+    refresh_response = client.get("/api/settings")
+    assert refresh_response.status_code == 200
+    refresh_body = refresh_response.json()
+    assert refresh_body["data"]["preferences"]["user"]["avatar_url"] == avatar_url
+
+
+def test_change_password_rejects_wrong_current_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    change_response = client.post(
+        "/api/settings/password",
+        json={
+            "current_password": "wrong-password",
+            "new_password": "updated-password",
+        },
+    )
+
+    assert change_response.status_code == 401
+    body = change_response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
+    assert FakeImapAdapter.login_calls[-1] == ("user@example.com", "wrong-password")
+
+
+def test_change_password_rejects_when_new_password_matches_current_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    change_response = client.post(
+        "/api/settings/password",
+        json={
+            "current_password": "correct-password",
+            "new_password": "correct-password",
+        },
+    )
+
+    assert change_response.status_code == 400
+    body = change_response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "PASSWORD_SAME_AS_CURRENT"
+    assert FakeImapAdapter.login_calls[-1] == ("user@example.com", "correct-password")
+
+
+def test_change_password_rejects_when_new_password_fails_imap_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    change_response = client.post(
+        "/api/settings/password",
+        json={
+            "current_password": "correct-password",
+            "new_password": "wrong-password",
+        },
+    )
+
+    assert change_response.status_code == 401
+    body = change_response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
+    assert FakeImapAdapter.login_calls[-2:] == [
+        ("user@example.com", "correct-password"),
+        ("user@example.com", "wrong-password"),
+    ]
 
 
 def test_logout_invalidates_current_session(monkeypatch: pytest.MonkeyPatch) -> None:

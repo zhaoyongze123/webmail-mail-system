@@ -52,6 +52,12 @@ class FakeMailboxMessage:
 
 class FakeImapAdapter:
     mailboxes: dict[tuple[str, str], FakeMailboxMessage] = {}
+    folders: dict[str, dict[str, int]] = {
+        "INBOX": {"messages": 1, "unseen": 0},
+        "Trash": {"messages": 0, "unseen": 0},
+        "Archive": {"messages": 0, "unseen": 0},
+        "Projects": {"messages": 0, "unseen": 0},
+    }
     login_calls: list[tuple[str, str]] = []
     store_calls: list[tuple[str, str, str, str | None]] = []
     copy_calls: list[tuple[str, str, str | None]] = []
@@ -72,6 +78,12 @@ class FakeImapAdapter:
     @classmethod
     def reset(cls) -> None:
         cls.mailboxes = {}
+        cls.folders = {
+            "INBOX": {"messages": 1, "unseen": 0},
+            "Trash": {"messages": 0, "unseen": 0},
+            "Archive": {"messages": 0, "unseen": 0},
+            "Projects": {"messages": 0, "unseen": 0},
+        }
         cls.login_calls = []
         cls.store_calls = []
         cls.copy_calls = []
@@ -80,6 +92,18 @@ class FakeImapAdapter:
         cls.generic_calls = []
         cls.selected_folders = []
         cls.last_instance = None
+
+    @classmethod
+    def _recount_folder(cls, folder: str) -> None:
+        messages = [message for (message_folder, _uid), message in cls.mailboxes.items() if message_folder == folder]
+        cls.folders.setdefault(folder, {"messages": 0, "unseen": 0})
+        cls.folders[folder]["messages"] = len(messages)
+        cls.folders[folder]["unseen"] = sum(1 for message in messages if "\\Seen" not in message.flags)
+
+    @classmethod
+    def _recount_folders(cls, folders: set[str]) -> None:
+        for folder in folders:
+            cls._recount_folder(folder)
 
     @classmethod
     def seed_message(
@@ -96,6 +120,7 @@ class FakeImapAdapter:
             raw_bytes=raw_bytes or _make_message_bytes(folder=folder, uid=uid),
             flags=set(flags or set()),
         )
+        cls._recount_folder(folder)
 
     def connect(self):
         self.connected = True
@@ -118,14 +143,32 @@ class FakeImapAdapter:
         return "OK", [b"1"]
 
     def list_folders(self):
-        return [
-            '(\\HasNoChildren) "/" "INBOX"',
-            '(\\HasNoChildren) "/" "Sent"',
-            '(\\HasNoChildren) "/" "Drafts"',
-            '(\\HasNoChildren) "/" "Junk"',
-            '(\\HasNoChildren) "/" "Trash"',
-            '(\\HasNoChildren) "/" "Archive"',
-        ]
+        return [f'(\\HasNoChildren) "/" "{folder}"' for folder in self.folders]
+
+    def status(self, folder: str, items: str):
+        folder_state = self.folders.setdefault(folder, {"messages": 0, "unseen": 0})
+        return "OK", [f"{folder} (MESSAGES {folder_state['messages']} UNSEEN {folder_state['unseen']} UIDVALIDITY 1)".encode("utf-8")]
+
+    def create(self, folder: str):
+        self.folders.setdefault(folder, {"messages": 0, "unseen": 0})
+        return "OK", [b"CREATE"]
+
+    def rename(self, old_folder: str, new_folder: str):
+        self.folders[new_folder] = self.folders.pop(old_folder, {"messages": 0, "unseen": 0})
+        return "OK", [b"RENAME"]
+
+    def delete(self, folder: str):
+        self.folders.pop(folder, None)
+        return "OK", [b"DELETE"]
+
+    def create_folder(self, folder: str):
+        return self.create(folder)
+
+    def rename_folder(self, old_folder: str, new_folder: str):
+        return self.rename(old_folder, new_folder)
+
+    def delete_folder(self, folder: str):
+        return self.delete(folder)
 
     def store(self, uid: str | bytes, command: str, flags: str):
         uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
@@ -137,6 +180,7 @@ class FakeImapAdapter:
                 message.flags.add(normalized_flag)
             elif command == "-FLAGS":
                 message.flags.discard(normalized_flag)
+            self._recount_folder(self.selected_folder or "")
         return "OK", [b"FLAGS"]
 
     def copy(self, uid: str | bytes, folder: str):
@@ -150,6 +194,7 @@ class FakeImapAdapter:
                 raw_bytes=source.raw_bytes,
                 flags=set(source.flags),
             )
+            self._recount_folders({self.selected_folder or "", folder})
         return "OK", [b"OK"]
 
     def move(self, uid: str | bytes, folder: str):
@@ -165,6 +210,7 @@ class FakeImapAdapter:
                 flags=set(source.flags),
             )
             del self.mailboxes[source_key]
+            self._recount_folders({self.selected_folder or "", folder})
         return "OK", [b"OK"]
 
     def expunge(self):
@@ -173,6 +219,7 @@ class FakeImapAdapter:
             for key, message in list(self.mailboxes.items()):
                 if key[0] == self.selected_folder and "\\Deleted" in message.flags:
                     del self.mailboxes[key]
+            self._recount_folder(self.selected_folder)
         return "OK", [b"OK"]
 
     def uid(self, command: str, uid: str | bytes, *args: Any):
@@ -290,11 +337,13 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
 
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
+    mail_state_module = importlib.import_module("app.mail_state")
     redis_client_module = importlib.import_module("app.redis_client")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(mail_state_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
@@ -425,6 +474,44 @@ def test_message_operations_mark_read_syncs_database_state(monkeypatch: pytest.M
     _assert_success(response)
 
     assert synced == [("user@example.com", "INBOX", ["101"], True)]
+
+
+def test_message_operations_update_folder_unread_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+    FakeImapAdapter.seed_message("INBOX", "101")
+    FakeImapAdapter.seed_message("INBOX", "102")
+
+    before_response = client.get("/api/folders")
+    _assert_success(before_response)
+    before_body = before_response.json()
+    before_folders = before_body["data"]["folders"]
+    assert isinstance(before_folders, list)
+    inbox_before = next(folder for folder in before_folders if folder["name"] == "INBOX")
+    assert inbox_before["unread_count"] == 2
+
+    read_response = _request_operation(client, "INBOX", action="mark_read", uids=["101"])
+    _assert_success(read_response)
+
+    after_read_response = client.get("/api/folders")
+    _assert_success(after_read_response)
+    after_read_body = after_read_response.json()
+    after_read_folders = after_read_body["data"]["folders"]
+    assert isinstance(after_read_folders, list)
+    inbox_after_read = next(folder for folder in after_read_folders if folder["name"] == "INBOX")
+    assert inbox_after_read["unread_count"] == 1
+
+    unread_response = _request_operation(client, "INBOX", action="mark_unread", uids=["101"])
+    _assert_success(unread_response)
+
+    after_unread_response = client.get("/api/folders")
+    _assert_success(after_unread_response)
+    after_unread_body = after_unread_response.json()
+    after_unread_folders = after_unread_body["data"]["folders"]
+    assert isinstance(after_unread_folders, list)
+    inbox_after_unread = next(folder for folder in after_unread_folders if folder["name"] == "INBOX")
+    assert inbox_after_unread["unread_count"] == 2
 
 
 @pytest.mark.parametrize("action", ["flag", "star"])
@@ -571,3 +658,36 @@ def test_message_operations_reject_invalid_action_and_empty_uids(
     body = response.json()
     assert body["success"] is False
     assert _extract_error(body)["code"] in {"VALIDATION_ERROR", "BAD_REQUEST", "INVALID_ACTION"}
+
+
+def test_folder_create_rename_delete_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    create_response = client.post("/api/folders", json={"name": "Work"})
+    _assert_success(create_response)
+    assert "Work" in FakeImapAdapter.folders
+
+    rename_response = client.patch("/api/folders/Work", json={"name": "Work", "new_name": "Work 2026"})
+    _assert_success(rename_response)
+    assert "Work 2026" in FakeImapAdapter.folders
+    assert "Work" not in FakeImapAdapter.folders
+
+    delete_response = client.delete("/api/folders/Work%202026")
+    _assert_success(delete_response)
+    assert "Work 2026" not in FakeImapAdapter.folders
+
+
+@pytest.mark.parametrize("folder", ["INBOX", "Trash", "Archive"])
+def test_folder_delete_rejects_system_folders(monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = client.delete(f"/api/folders/{folder}")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert _extract_error(body)["code"] == "FOLDER_DELETE_NOT_ALLOWED"

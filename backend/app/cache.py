@@ -8,10 +8,14 @@ from typing import Any, Iterator
 import redis
 
 from app.config import Settings, get_settings
+from app.schemas import (
+    DEFAULT_SETTINGS_LANGUAGE,
+    DEFAULT_SETTINGS_MARK_READ_ON_OPEN,
+    DEFAULT_SETTINGS_PAGE_SIZE,
+    DEFAULT_SETTINGS_REPLY_QUOTE_POSITION,
+    DEFAULT_SETTINGS_TIMEZONE,
+)
 from app.redis_client import get_redis_client
-
-DEFAULT_PAGE_SIZE = 30
-DEFAULT_MARK_READ_ON_OPEN = True
 
 
 class SessionStore:
@@ -38,6 +42,13 @@ class SessionStore:
 
     def refresh(self, session_id: str) -> bool:
         return bool(self.client.expire(self.key(session_id), self.settings.session_ttl_seconds))
+
+    def update(self, session_id: str, payload: dict[str, Any]) -> None:
+        key = self.key(session_id)
+        if not payload:
+            return
+        self.client.hset(key, mapping={field: self._encode(value) for field, value in payload.items()})
+        self.client.expire(key, self.settings.session_ttl_seconds)
 
     def delete(self, session_id: str) -> bool:
         return bool(self.client.delete(self.key(session_id)))
@@ -94,13 +105,15 @@ class UserPreferenceStore:
     def get(self, email: str) -> dict[str, Any]:
         data = self.client.hgetall(self.key(email))
         preferences: dict[str, Any] = {
-            "page_size": DEFAULT_PAGE_SIZE,
-            "mark_read_on_open": DEFAULT_MARK_READ_ON_OPEN,
+            "page_size": DEFAULT_SETTINGS_PAGE_SIZE,
+            "mark_read_on_open": DEFAULT_SETTINGS_MARK_READ_ON_OPEN,
+            "reply_quote_position": DEFAULT_SETTINGS_REPLY_QUOTE_POSITION,
+            "language": DEFAULT_SETTINGS_LANGUAGE,
+            "timezone": DEFAULT_SETTINGS_TIMEZONE,
         }
         if data:
-            for field in preferences:
-                if field in data:
-                    preferences[field] = self._decode(data[field])
+            for field, value in data.items():
+                preferences[field] = self._decode(value)
         return preferences
 
     def update(self, email: str, payload: dict[str, Any]) -> dict[str, Any]:

@@ -30,6 +30,15 @@ export type MailAddress = {
   email: string;
 };
 
+export type MessageAttachment = {
+  id?: string;
+  attachment_id?: string;
+  filename: string;
+  content_type?: string | null;
+  size?: number | null;
+  size_bytes?: number | null;
+};
+
 export type MailMessageSummary = {
   uid: string;
   message_id?: string | null;
@@ -39,11 +48,18 @@ export type MailMessageSummary = {
   date: string | null;
   read: boolean;
   has_attachments: boolean;
+  attachment_types?: string[];
   snippet: string;
 };
 
 export type FolderListPayload = {
   folders: MailFolder[];
+};
+
+export type FolderOperationResult = {
+  folder: string;
+  new_name?: string | null;
+  deleted?: boolean | null;
 };
 
 export type MessageListPayload = {
@@ -54,6 +70,20 @@ export type MessageListPayload = {
   messages: MailMessageSummary[];
   cached?: boolean;
   query?: string;
+  sender?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+  has_attachments?: boolean | null;
+};
+
+export type MessageSearchOptions = {
+  refresh?: boolean;
+  page?: number;
+  pageSize?: number;
+  sender?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  hasAttachments?: boolean;
 };
 
 export type MessageOperationAction = 'mark_read' | 'mark_unread' | 'delete' | 'move';
@@ -71,10 +101,29 @@ export type MessageOperationResult = {
   uids: string[];
 };
 
-export type UserSettingsPreferences = {
+export type SystemSettingsPreferences = {
   page_size: number;
   mark_read_on_open: boolean;
-  [key: string]: unknown;
+  language: string;
+  timezone: string;
+  reply_quote_position: 'top' | 'bottom';
+};
+
+export type UserProfileSettings = {
+  display_name: string;
+  profile_title: string;
+  avatar_url: string;
+  bio: string;
+};
+
+export type ThemeSettings = {
+  mode: 'light' | 'dark';
+};
+
+export type UserSettingsPreferences = {
+  system: SystemSettingsPreferences;
+  user: UserProfileSettings;
+  theme: ThemeSettings;
 };
 
 export type SettingsPayload = {
@@ -83,6 +132,43 @@ export type SettingsPayload = {
   };
   preferences: UserSettingsPreferences;
 };
+
+export type ChangePasswordPayload = {
+  current_password: string;
+  new_password: string;
+};
+
+export type ChangePasswordResult = {
+  password_updated: boolean;
+};
+
+export type MailSignature = {
+  id: string;
+  name: string;
+  content?: string;
+  html_body: string;
+  text_body?: string | null;
+  is_default?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type SignatureListPayload = {
+  signatures: MailSignature[];
+};
+
+export type SignatureDefaultPayload = {
+  signature: MailSignature | null;
+};
+
+export type SignatureUpsertPayload = {
+  name: string;
+  html_body: string;
+  text_body?: string | null;
+  is_default?: boolean;
+};
+
+export type SignatureUpdatePayload = Partial<SignatureUpsertPayload>;
 
 export type AuthPayload = {
   email: string;
@@ -96,13 +182,49 @@ export type AuthCredentials = {
 };
 
 export type ContactItem = {
+  id?: string | null;
+  name?: string;
   email: string;
-  last_used_at: string;
+  phone?: string | null;
+  note?: string | null;
+  groups?: string[];
+  tags?: string[];
+  last_used_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  source?: 'recent' | 'manual';
 };
 
 export type ContactListPayload = {
   query: string;
+  page?: number;
+  page_size?: number;
+  total?: number;
+  group?: string | null;
+  tag?: string | null;
   contacts: ContactItem[];
+};
+
+export type ContactListQuery = {
+  query?: string;
+  page?: number;
+  pageSize?: number;
+  group?: string | null;
+  tag?: string | null;
+  limit?: number;
+};
+
+export type ContactUpsertPayload = {
+  name: string;
+  email: string;
+  phone?: string | null;
+  note?: string | null;
+  groups?: string[];
+  tags?: string[];
+};
+
+export type ContactPayload = {
+  contact: ContactItem;
 };
 
 export type MessageDetailPayload = {
@@ -114,6 +236,7 @@ export type MessageDetailPayload = {
   date?: string | null;
   html_body?: string | null;
   text_body?: string | null;
+  attachments?: MessageAttachment[] | null;
   read?: boolean;
 };
 

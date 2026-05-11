@@ -74,14 +74,17 @@ def _draft_message(session: AuthSession, payload: DraftPayload) -> EmailMessage:
     return message
 
 
-def save_draft(session: AuthSession, payload: DraftPayload) -> dict[str, Any]:
+def _persist_draft(session: AuthSession, payload: DraftPayload, *, require_existing: bool) -> dict[str, Any]:
     is_update = payload.draft_id is not None
     draft_id = payload.draft_id or secrets.token_urlsafe(18)
+    redis = redis_client.get_redis_client()
+    if require_existing and not redis.exists(_draft_key(session.email, draft_id)):
+        raise AppError("DRAFT_NOT_FOUND", "草稿不存在", http_status=status.HTTP_404_NOT_FOUND)
+
     payload = payload.model_copy(update={"draft_id": draft_id})
     saved_at = datetime.now(timezone.utc).isoformat()
     data = payload.model_dump()
     data.update({"draft_id": draft_id, "status": "saved", "saved_at": saved_at, "owner": session.email})
-    redis = redis_client.get_redis_client()
     redis.hset(
         _draft_key(session.email, draft_id),
         mapping={
@@ -118,6 +121,15 @@ def save_draft(session: AuthSession, payload: DraftPayload) -> dict[str, Any]:
     finally:
         adapter.logout()
     return {"draft_id": draft_id, "status": "saved", "saved_at": saved_at}
+
+
+def save_draft(session: AuthSession, payload: DraftPayload) -> dict[str, Any]:
+    return _persist_draft(session, payload, require_existing=False)
+
+
+def update_draft(session: AuthSession, draft_id: str, payload: DraftPayload) -> dict[str, Any]:
+    payload = payload.model_copy(update={"draft_id": draft_id})
+    return _persist_draft(session, payload, require_existing=True)
 
 
 def get_draft(session: AuthSession, draft_id: str) -> dict[str, Any]:

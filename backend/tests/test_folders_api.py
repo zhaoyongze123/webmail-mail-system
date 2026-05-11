@@ -122,7 +122,10 @@ class FakeFolderImapAdapter:
 
     def list_folders(self) -> list[str]:
         self.calls.append(("list_folders",))
-        return [f'(\\HasNoChildren) "/" "{folder}"' for folder in SYSTEM_FOLDER_MAP]
+        ordered_folders = list(SYSTEM_FOLDER_MAP.keys()) + sorted(
+            folder for folder in FOLDER_FIXTURES if folder not in SYSTEM_FOLDER_MAP
+        )
+        return [f'(\\HasNoChildren) "/" "{folder}"' for folder in ordered_folders]
 
     def select_folder(self, folder: str) -> tuple[str, list[bytes]]:
         self.calls.append(("select_folder", folder))
@@ -145,6 +148,24 @@ class FakeFolderImapAdapter:
         if any(str(item).upper() == "UNSEEN" for item in criteria):
             return [str(uid) for uid in data["unseen_uids"]]
         return [str(uid) for uid in data["all_uids"]]
+
+    def create_folder(self, folder: str) -> None:
+        self.calls.append(("create_folder", folder))
+        if folder not in FOLDER_FIXTURES:
+            FOLDER_FIXTURES[folder] = {
+                "status": {"MESSAGES": 0, "UNSEEN": 0},
+                "all_uids": [],
+                "unseen_uids": [],
+            }
+
+    def rename_folder(self, old_folder: str, new_folder: str) -> None:
+        self.calls.append(("rename_folder", old_folder, new_folder))
+        if old_folder in FOLDER_FIXTURES:
+            FOLDER_FIXTURES[new_folder] = FOLDER_FIXTURES.pop(old_folder)
+
+    def delete_folder(self, folder: str) -> None:
+        self.calls.append(("delete_folder", folder))
+        FOLDER_FIXTURES.pop(folder, None)
 
 
 def make_settings() -> FakeSettings:
@@ -302,10 +323,14 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def login(client: TestClient, email: str, password: str) -> object:
-    return client.post(
+    response = client.post(
         "/api/auth/login",
         json={"email": email, "password": password, "remember": False},
     )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if response.status_code == 200 and csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+    return response
 
 
 def test_folders_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,3 +407,19 @@ def test_folders_empty_folder_returns_normally(monkeypatch: pytest.MonkeyPatch) 
     archive = next(item for item in folders if item["name"] == ".Archive")
     assert archive["total_count"] == 0
     assert archive["unread_count"] == 0
+
+
+def test_create_custom_folder_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    response = client.post("/api/folders", json={"name": "Projects"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["folder"] == "Projects"
+    folders = _extract_folder_list(client.get("/api/folders").json()["data"])
+    assert any(item["name"] == "Projects" and item["type"] == "custom" for item in folders)

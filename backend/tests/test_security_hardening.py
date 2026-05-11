@@ -9,6 +9,8 @@ import fakeredis
 import pydantic.networks as pydantic_networks
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.mail_adapters import MailAdapterError
 
@@ -18,6 +20,7 @@ class FakeSettings:
         self.app_env = "test"
         self.app_name = "webmail-mvp"
         self.app_secret_key = "test-secret"
+        self.database_url = "sqlite+pysqlite:///:memory:"
         self.cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
         self.session_ttl_seconds = 60
         self.session_cookie_name = "webmail_session"
@@ -111,6 +114,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
@@ -119,9 +123,24 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
 
+    sys.modules.pop("app.mail_state", None)
+    sys.modules.pop("app.mail_preferences", None)
+    models_module = importlib.import_module("app.models")
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
+    models_module.Base.metadata.create_all(engine)
+
     sys.modules.pop("app.auth", None)
     sys.modules.pop("app.attachments", None)
     sys.modules.pop("app.mailbox", None)
+    sys.modules.pop("app.compose", None)
+    sys.modules.pop("app.contacts", None)
+    sys.modules.pop("app.drafts", None)
+    sys.modules.pop("app.signatures", None)
     sys.modules.pop("app.main", None)
 
     auth_module = importlib.import_module("app.auth")
@@ -157,7 +176,7 @@ def test_security_headers_cookie_and_csrf(monkeypatch: pytest.MonkeyPatch) -> No
     assert me_response.status_code == 200
     assert me_response.headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
-    csrf_response = client.put("/api/settings", json={"page_size": 12})
+    csrf_response = client.put("/api/settings", json={"system": {"page_size": 12}})
     assert csrf_response.status_code == 403
     assert csrf_response.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
 

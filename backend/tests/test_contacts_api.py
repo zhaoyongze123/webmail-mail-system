@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import datetime, timezone
 from types import ModuleType
 
 import fakeredis
 import pydantic.networks as pydantic_networks
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from app.cache import SessionStore
 from app.mail_adapters import MailAdapterError
@@ -96,6 +98,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
@@ -105,6 +108,11 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
 
     _purge_app_modules()
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
+    db_module.Base.metadata.drop_all(engine)
+    db_module.Base.metadata.create_all(engine)
+
     auth_module = importlib.import_module("app.auth")
     monkeypatch.setattr(auth_module, "get_settings", lambda: settings, raising=False)
     monkeypatch.setattr(auth_module, "get_redis_client", lambda: fake_redis, raising=False)
@@ -180,3 +188,54 @@ def test_contacts_limit_caps_results(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert len(body["data"]["contacts"]) == 10
+
+
+def test_contacts_recent_search_refreshes_duplicate_email_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake_redis = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    from app.auth import AuthSession
+    from app.contacts import _contact_used_at, record_recent_contacts
+
+    session_cookie = client.cookies.get("webmail_session")
+    assert session_cookie
+    session_data = SessionStore(client=fake_redis, settings=FakeSettings()).get(session_cookie)
+    assert session_data
+    auth_session = AuthSession(
+        session_id=session_cookie,
+        email=str(session_data["email"]),
+        password=str(session_data["secret"]),
+        imap=dict(session_data.get("imap") or {}),
+        smtp=dict(session_data.get("smtp") or {}),
+        preferences={},
+    )
+
+    timestamps = iter(
+        [
+            datetime(2026, 5, 7, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 7, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 7, 11, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr("app.contacts._contact_used_at", lambda: next(timestamps))
+
+    record_recent_contacts(auth_session, ["alice@example.com"])
+    record_recent_contacts(auth_session, ["bob@example.com"])
+    record_recent_contacts(auth_session, ["alice@example.com"])
+    fake_redis.zadd("contacts:recent:user@example.com", {"carol@example.com": 1.0})
+
+    response = client.get("/api/contacts", params={"query": "example"})
+
+    assert response.status_code == 200
+    body = response.json()
+    contacts = body["data"]["contacts"]
+    assert [item["email"] for item in contacts] == [
+        "alice@example.com",
+        "bob@example.com",
+        "carol@example.com",
+    ]
+    assert contacts[0]["last_used_at"] == "2026-05-07T11:00:00+00:00"
+    assert contacts[1]["last_used_at"] == "2026-05-07T10:00:00+00:00"
+    assert contacts[2]["last_used_at"] == "1970-01-01T00:00:01+00:00"

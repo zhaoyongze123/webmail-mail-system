@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from fastapi import Request, Response, status
 from pydantic import BaseModel, EmailStr
 
-from app.cache import LoginFailureLimiter, SessionStore, UserPreferenceStore
+from app.cache import LoginFailureLimiter, SessionStore
 from app.config import Settings, get_settings
 from app.crypto import decrypt_text, encrypt_text
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
+from app.mail_preferences import get_user_preferences
 from app.mail_state import ensure_mail_account
 from app.redis_client import get_redis_client
 from app.security import issue_session_cookies, new_csrf_token, clear_session_cookies
@@ -73,6 +74,10 @@ def authenticate_mailbox(email: str, password: str, settings: Settings | None = 
             adapter.logout()
         except MailAdapterError:
             pass
+
+
+def verify_mailbox_password(email: str, password: str, settings: Settings | None = None) -> None:
+    authenticate_mailbox(email, password, settings)
 
 
 def _create_session(email: str, password: str, settings: Settings) -> tuple[str, dict[str, object], str]:
@@ -206,7 +211,15 @@ def get_current_session(request: Request) -> AuthSession:
         password=decrypt_text(str(session_data["secret"])),
         imap=dict(session_data.get("imap") or {}),
         smtp=dict(session_data.get("smtp") or {}),
-        preferences=UserPreferenceStore(client=get_redis_client()).get(str(session_data["email"])),
+        preferences=get_user_preferences(str(session_data["email"])),
+    )
+
+
+def update_session_password(session_id: str, password: str, settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    SessionStore(client=get_redis_client(), settings=settings).update(
+        session_id,
+        {"secret": encrypt_text(password)},
     )
 
 

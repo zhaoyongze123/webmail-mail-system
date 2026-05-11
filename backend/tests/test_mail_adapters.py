@@ -78,6 +78,18 @@ def make_imap_fake(bucket: list[object], label: str, *, error_on: str | None = N
                 raise FakeImapProtocolError("append failed")
             return "OK", [b"APPENDUID 1 9"]
 
+        def create(self, folder):
+            self.calls.append(("create", folder))
+            return "OK", [b"CREATE"]
+
+        def rename(self, old_folder, new_folder):
+            self.calls.append(("rename", old_folder, new_folder))
+            return "OK", [b"RENAME"]
+
+        def delete(self, folder):
+            self.calls.append(("delete", folder))
+            return "OK", [b"DELETE"]
+
     FakeImap.__name__ = f"FakeImap{label}"
     return FakeImap
 
@@ -180,6 +192,13 @@ def test_imap_connect_branches_and_commands(monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(append_call[4], bytes)
     assert b"Subject: Hello" in append_call[4]
 
+    adapter.create_folder("客户归档")
+    adapter.rename_folder("客户归档", "客户归档-2026")
+    adapter.delete_folder("客户归档-2026")
+    assert ("create", "&W6JiN19SaGM-") in client.calls
+    assert ("rename", "&W6JiN19SaGM-", "&W6JiN19SaGM--2026") in client.calls
+    assert ("delete", "&W6JiN19SaGM--2026") in client.calls
+
     adapter.logout()
     assert client.calls[-1] == ("logout",)
     assert adapter._client is None
@@ -236,6 +255,25 @@ def test_imap_login_errors_are_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
         adapter.login()
 
     assert "IMAP 登录" in str(exc_info.value)
+
+
+def test_imap_list_folders_decodes_modified_utf7(monkeypatch: pytest.MonkeyPatch) -> None:
+    bucket: list[object] = []
+    fake_cls = make_imap_fake(bucket, "Plain")
+    monkeypatch.setattr("app.mail_adapters.imaplib.IMAP4", fake_cls)
+
+    adapter = ImapAdapter(
+        ImapSettings(
+            host="imap.example.com",
+            username="user@example.com",
+            password="secret",
+        )
+    )
+    adapter.connect()
+    client = bucket[0]
+    client.list = lambda: ("OK", [b'(\\HasNoChildren) "/" "&W6JiNw-"'])
+
+    assert adapter.list_folders() == ['(\\HasNoChildren) "/" "客户"']
 
 
 def test_smtp_connect_branches_and_commands(monkeypatch: pytest.MonkeyPatch) -> None:
