@@ -3,6 +3,7 @@ export type AdminUser = {
   email: string;
   name: string;
   role: string;
+  totp_enabled?: boolean;
 };
 
 export type AdminAuthPayload = {

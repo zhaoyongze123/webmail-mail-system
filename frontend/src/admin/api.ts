@@ -115,6 +115,33 @@ export async function adminLogout(): Promise<{ logged_out: boolean }> {
   }
 }
 
+export async function adminChangePassword(payload: { current_password: string; new_password: string }) {
+  return requestAdminApi<{ password_updated: boolean }>('/api/admin/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function adminTotpSetup() {
+  return requestAdminApi<{ secret: string; provisioning_uri: string; enabled: boolean }>('/api/admin/auth/totp/setup', {
+    method: 'POST',
+  });
+}
+
+export async function adminTotpEnable(payload: { code: string }) {
+  return requestAdminApi<{ enabled: boolean }>('/api/admin/auth/totp/enable', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function adminTotpDisable(payload: { code: string }) {
+  return requestAdminApi<{ enabled: boolean }>('/api/admin/auth/totp/disable', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function fetchAdminOverview(): Promise<AdminOverviewStats> {
   return requestAdminApi<AdminOverviewStats>('/api/admin/overview', { method: 'GET' });
 }

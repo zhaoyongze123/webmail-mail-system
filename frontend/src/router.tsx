@@ -10,6 +10,7 @@ import { AdminAliasesPage } from './admin/pages/AdminAliasesPage';
 import { AdminQuotasPage } from './admin/pages/AdminQuotasPage';
 import { AdminAuditLogsPage } from './admin/pages/AdminAuditLogsPage';
 import { AdminSystemHealthPage } from './admin/pages/AdminSystemHealthPage';
+import { AdminSecurityPage } from './admin/pages/AdminSecurityPage';
 
 function AdminIndexRedirect() {
   const { hasToken } = useAdminAuth();
@@ -91,6 +92,14 @@ export function buildRoutes(): RouteObject[] {
                   element: (
                     <AdminPageShell title="系统健康" description="查看服务可用性与连接状态。">
                       <AdminSystemHealthPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'security',
+                  element: (
+                    <AdminPageShell title="安全设置" description="修改管理员密码，并管理 TOTP 二次验证入口。">
+                      <AdminSecurityPage />
                     </AdminPageShell>
                   ),
                 },

@@ -10,6 +10,7 @@ const navItems = [
   { to: '/admin/quotas', label: '配额' },
   { to: '/admin/audit-logs', label: '审计' },
   { to: '/admin/system-health', label: '健康' },
+  { to: '/admin/security', label: '安全' },
 ];
 
 export function AdminLayout() {
@@ -37,7 +38,7 @@ export function AdminLayout() {
         <div className="admin-sidebar-footer">
           <div>
             <strong>{user?.name || '管理员'}</strong>
-            <p>{user?.email || 'admin'}</p>
+            <p>{user?.email || 'admin'} · {user?.totp_enabled ? 'TOTP 已启用' : 'TOTP 未启用'}</p>
           </div>
           <button type="button" className="admin-button admin-button-secondary" onClick={() => void signOut()}>
             退出

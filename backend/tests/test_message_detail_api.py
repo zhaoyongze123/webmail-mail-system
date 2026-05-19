@@ -16,6 +16,8 @@ import fakeredis
 import pydantic.networks as pydantic_networks
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.mail_adapters import MailAdapterError
 
@@ -25,6 +27,7 @@ class FakeSettings:
         self.app_env = "test"
         self.app_name = "webmail-mvp"
         self.app_secret_key = "test-secret"
+        self.database_url = "sqlite+pysqlite:///:memory:"
         self.cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
         self.session_ttl_seconds = 60
         self.session_cookie_name = "webmail_session"
@@ -96,6 +99,11 @@ class FakeImapAdapter:
         self.logged_out = True
         return self
 
+    def list_folders(self) -> list[str]:
+        folders = {"INBOX", ".Sent", ".Drafts", ".Junk", ".Trash", ".Archive"}
+        folders.update(folder for (folder, _uid) in self.mailboxes)
+        return [f'(\\HasNoChildren) "/" "{folder}"' for folder in sorted(folders)]
+
     def select_folder(self, folder: str):
         self.selected_folder = folder
         FakeImapAdapter.selected_folders.append(folder)
@@ -134,7 +142,7 @@ class FakeImapAdapter:
         self.store(uid, "+FLAGS", "\\Seen")
         return self
 
-    def status(self, folder: str):
+    def status(self, folder: str, items: str | None = None):
         unread = 0
         total = 0
         for (candidate_folder, _uid), message in self.mailboxes.items():
@@ -239,6 +247,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
@@ -247,8 +256,28 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
 
-    sys.modules.pop("app.auth", None)
-    sys.modules.pop("app.main", None)
+    for module_name in [
+        "app.mail_state",
+        "app.mail_preferences",
+        "app.mailbox",
+        "app.contacts",
+        "app.signatures",
+        "app.auth",
+        "app.main",
+        "app.admin_auth",
+        "app.admin_api",
+    ]:
+        sys.modules.pop(module_name, None)
+
+    models_module = importlib.import_module("app.models")
+    engine = create_engine(
+        settings.database_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
+    models_module.Base.metadata.create_all(engine)
+
     auth_module = importlib.import_module("app.auth")
     monkeypatch.setattr(auth_module, "get_settings", lambda: settings, raising=False)
     monkeypatch.setattr(auth_module, "get_redis_client", lambda: fake_redis, raising=False)
