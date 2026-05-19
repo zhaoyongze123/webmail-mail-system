@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
 from app.errors import AppError
-from app.models import AdminRefreshToken, AdminUser, AuditLog, MailAlias, MailDomain, MailAccount, QuotaPolicy
+from app.models import AdminRefreshToken, AdminUser, AuditLog, MailAlias, MailDomain, MailAccount, MailMessage, QuotaPolicy
 from app.observability import record_audit_event
 
 
@@ -45,10 +45,14 @@ def normalize_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def get_db_session() -> Session:
-    """FastAPI 依赖项：创建一个数据库会话。"""
+def get_db_session():
+    """FastAPI 依赖项：创建数据库会话并在请求结束后关闭。"""
     session_factory = get_session_factory()
-    return session_factory()
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def paginate(*, page: int, page_size: int, total: int, items: list[Any]) -> dict[str, Any]:
@@ -131,7 +135,7 @@ def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
     """将域对象转换为后台接口输出字典。"""
     user_count = len(domain.accounts or [])
     alias_count = len(domain.aliases or [])
-    used_quota_mb = sum(account.quota_mb for account in domain.accounts or [])
+    used_quota_mb = sum(float(getattr(account, "_used_quota_mb", 0.0) or 0.0) for account in domain.accounts or [])
     return {
         "id": str(domain.id),
         "name": domain.name,
@@ -146,17 +150,49 @@ def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
     }
 
 
-def account_to_admin_dict(account: MailAccount) -> dict[str, Any]:
+def quota_usage_status(usage_percent: float) -> str:
+    """根据使用率返回统一的配额状态。"""
+    if usage_percent >= 95:
+        return "critical"
+    if usage_percent >= 80:
+        return "warning"
+    return "healthy"
+
+
+def load_account_usage_map(db: Session, account_ids: list[UUID]) -> dict[UUID, float]:
+    """聚合账号已缓存邮件体积，换算为 MB 使用量。"""
+    if not account_ids:
+        return {}
+    rows = db.execute(
+        select(MailMessage.account_id, func.coalesce(func.sum(MailMessage.size_bytes), 0))
+        .where(MailMessage.account_id.in_(account_ids))
+        .group_by(MailMessage.account_id)
+    ).all()
+    usage_map: dict[UUID, float] = {}
+    for account_id, size_bytes in rows:
+        usage_map[account_id] = round(float(size_bytes or 0) / (1024 * 1024), 2)
+    return usage_map
+
+
+def account_to_admin_dict(account: MailAccount, *, used_quota_mb: float | None = None) -> dict[str, Any]:
     """将邮箱账号转换为后台接口输出字典。"""
+    resolved_used_quota_mb = round(float(used_quota_mb if used_quota_mb is not None else getattr(account, "_used_quota_mb", 0.0) or 0.0), 2)
+    usage_percent = round((resolved_used_quota_mb / account.quota_mb) * 100, 2) if account.quota_mb else 0.0
     return {
         "id": str(account.id),
         "name": account.display_name or account.email,
         "email": account.email,
         "display_name": account.display_name,
         "domain_id": str(account.domain_id) if account.domain_id else None,
+        "domain_name": account.domain.name if getattr(account, "domain", None) else None,
         "quota_mb": account.quota_mb,
+        "used_quota_mb": resolved_used_quota_mb,
+        "usage_percent": usage_percent,
+        "quota_status": quota_usage_status(usage_percent),
+        "usage_source": getattr(account, "_usage_source", "cached"),
         "status": account.status,
         "is_admin": account.is_admin,
+        "has_local_password": bool(account.password_hash),
         "description": "管理员账号" if account.is_admin else "普通邮箱账号",
         "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
         "created_at": account.created_at.isoformat(),
@@ -170,6 +206,7 @@ def alias_to_dict(alias: MailAlias) -> dict[str, Any]:
         "id": str(alias.id),
         "name": alias.source_address,
         "domain_id": str(alias.domain_id),
+        "domain_name": alias.domain.name if getattr(alias, "domain", None) else None,
         "source_address": alias.source_address,
         "target_addresses": list(alias.target_addresses or []),
         "is_active": alias.is_active,

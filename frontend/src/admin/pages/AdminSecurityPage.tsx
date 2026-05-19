@@ -5,6 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { adminChangePassword, adminTotpDisable, adminTotpEnable, adminTotpSetup } from '../api';
 import { useAdminAuth } from '../auth';
+import { AdminDialog } from '../components/AdminHelpers';
 
 const passwordSchema = z.object({
   current_password: z.string().min(1, '请输入当前密码'),
@@ -38,6 +39,8 @@ export function AdminSecurityPage() {
   const [totpSecret, setTotpSecret] = useState<string | null>(null);
   const [provisioningUri, setProvisioningUri] = useState<string | null>(null);
   const [totpEnabled, setTotpEnabled] = useState<boolean>(Boolean((user as { totp_enabled?: boolean } | null)?.totp_enabled));
+  const [disableDialogOpen, setDisableDialogOpen] = useState(false);
+  const [disableCode, setDisableCode] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -103,6 +106,8 @@ export function AdminSecurityPage() {
     mutationFn: adminTotpDisable,
     onSuccess: (payload) => {
       totpForm.reset();
+      setDisableCode('');
+      setDisableDialogOpen(false);
       setTotpEnabled(!payload.enabled ? false : payload.enabled);
       setMessage('TOTP 已停用。');
       setError(null);
@@ -142,6 +147,7 @@ export function AdminSecurityPage() {
           </span>
         </div>
         <form className="admin-form-grid" onSubmit={submitPassword}>
+          <input type="text" autoComplete="username" value={user?.email || user?.name || 'admin'} readOnly hidden aria-hidden="true" />
           <label>
             <span>当前密码</span>
             <input type="password" autoComplete="current-password" {...passwordForm.register('current_password')} />
@@ -208,9 +214,10 @@ export function AdminSecurityPage() {
                 className="admin-button admin-button-danger"
                 disabled={totpDisableMutation.isPending}
                 onClick={() => {
-                  const code = window.prompt('请输入验证码以停用 TOTP');
-                  if (!code) return;
-                  totpDisableMutation.mutate({ code });
+                  setDisableCode('');
+                  setDisableDialogOpen(true);
+                  setMessage(null);
+                  setError(null);
                 }}
               >
                 {totpDisableMutation.isPending ? '停用中...' : '停用 TOTP'}
@@ -219,6 +226,59 @@ export function AdminSecurityPage() {
           </form>
         </div>
       </section>
+
+      <AdminDialog
+        open={disableDialogOpen}
+        title="确认停用 TOTP"
+        description="请输入当前验证器生成的 6 位验证码。校验通过后会立即停用当前管理员账号的 TOTP。"
+        onClose={() => {
+          if (totpDisableMutation.isPending) return;
+          setDisableDialogOpen(false);
+          setDisableCode('');
+        }}
+        actions={(
+          <>
+            <button
+              type="button"
+              className="admin-button admin-button-secondary"
+              disabled={totpDisableMutation.isPending}
+              onClick={() => {
+                setDisableDialogOpen(false);
+                setDisableCode('');
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="admin-button admin-button-danger"
+              disabled={totpDisableMutation.isPending || disableCode.trim().length < 6}
+              onClick={() => {
+                const normalizedCode = disableCode.trim();
+                if (normalizedCode.length < 6) {
+                  setMessage(null);
+                  setError('请输入 6 位验证码后再停用 TOTP');
+                  return;
+                }
+                totpDisableMutation.mutate({ code: normalizedCode });
+              }}
+            >
+              {totpDisableMutation.isPending ? '停用中...' : '确认停用'}
+            </button>
+          </>
+        )}
+      >
+        <label className="admin-dialog-field">
+          <span>验证码</span>
+          <input
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            placeholder="123456"
+            value={disableCode}
+            onChange={(event) => setDisableCode(event.target.value)}
+          />
+        </label>
+      </AdminDialog>
 
       {message ? <p className="admin-success-text">{message}</p> : null}
       {error ? <p className="admin-error-text">{error}</p> : null}

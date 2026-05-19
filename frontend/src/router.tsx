@@ -8,6 +8,9 @@ import { AdminDomainsPage } from './admin/pages/AdminDomainsPage';
 import { AdminUsersPage } from './admin/pages/AdminUsersPage';
 import { AdminAliasesPage } from './admin/pages/AdminAliasesPage';
 import { AdminQuotasPage } from './admin/pages/AdminQuotasPage';
+import { AdminRspamdPage } from './admin/pages/AdminRspamdPage';
+import { AdminTlsPage } from './admin/pages/AdminTlsPage';
+import { AdminQueuePage } from './admin/pages/AdminQueuePage';
 import { AdminAuditLogsPage } from './admin/pages/AdminAuditLogsPage';
 import { AdminSystemHealthPage } from './admin/pages/AdminSystemHealthPage';
 import { AdminSecurityPage } from './admin/pages/AdminSecurityPage';
@@ -80,6 +83,30 @@ export function buildRoutes(): RouteObject[] {
                   ),
                 },
                 {
+                  path: 'rspamd',
+                  element: (
+                    <AdminPageShell title="Rspamd 反垃圾" description="查看全局垃圾分阈值，并聚合域级 SPF / DMARC / DKIM 状态。">
+                      <AdminRspamdPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'tls',
+                  element: (
+                    <AdminPageShell title="TLS 与证书" description="查看当前证书状态，并触发 Let’s Encrypt 续签。">
+                      <AdminTlsPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'queue',
+                  element: (
+                    <AdminPageShell title="邮件队列" description="查看 Postfix 队列并执行 flush / 删除操作。">
+                      <AdminQueuePage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
                   path: 'audit-logs',
                   element: (
                     <AdminPageShell title="审计日志" description="浏览后台关键操作记录。">
@@ -90,7 +117,7 @@ export function buildRoutes(): RouteObject[] {
                 {
                   path: 'system-health',
                   element: (
-                    <AdminPageShell title="系统健康" description="查看服务可用性与连接状态。">
+                    <AdminPageShell title="日志与监控" description="查看邮件服务状态、磁盘用量与最近错误日志。">
                       <AdminSystemHealthPage />
                     </AdminPageShell>
                   ),

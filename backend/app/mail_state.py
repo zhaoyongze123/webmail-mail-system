@@ -60,7 +60,7 @@ def _safe_db_write(operation: str, callback) -> Any | None:
     return None
 
 
-def ensure_mail_account(email: str, *, display_name: str | None = None) -> UUIDType | None:
+def ensure_mail_account(email: str, *, display_name: str | None = None, mark_logged_in: bool = False) -> UUIDType | None:
     """确保邮箱账号在本地数据库中存在并同步连接信息。"""
     settings = get_settings()
     normalized_email = email.strip().lower()
@@ -78,6 +78,8 @@ def ensure_mail_account(email: str, *, display_name: str | None = None) -> UUIDT
                 smtp_port=settings.mail_smtp_port,
                 smtp_ssl=settings.mail_smtp_ssl,
             )
+            if mark_logged_in:
+                account.last_login_at = _now()
             db_session.add(account)
             db_session.flush()
             return account.id
@@ -88,6 +90,8 @@ def ensure_mail_account(email: str, *, display_name: str | None = None) -> UUIDT
         account.smtp_host = settings.mail_smtp_host
         account.smtp_port = settings.mail_smtp_port
         account.smtp_ssl = settings.mail_smtp_ssl
+        if mark_logged_in:
+            account.last_login_at = _now()
         account.updated_at = _now()
         return account.id
 

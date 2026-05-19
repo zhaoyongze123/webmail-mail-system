@@ -12,6 +12,7 @@ import pydantic.networks as pydantic_networks
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from app.mail_adapters import MailAdapterError
@@ -406,6 +407,40 @@ def test_change_password_rejects_when_new_password_fails_imap_login(monkeypatch:
         ("user@example.com", "correct-password"),
         ("user@example.com", "wrong-password"),
     ]
+
+
+def test_change_password_updates_local_mailbox_password_without_imap_revalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+
+    login_response = login(client, "local@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    auth_module = importlib.import_module("app.auth")
+    db_module = importlib.import_module("app.db")
+    models_module = importlib.import_module("app.models")
+    session_factory = db_module.get_session_factory()
+    with session_factory() as session:
+        account = session.scalar(select(models_module.MailAccount).where(models_module.MailAccount.email == "local@example.com"))
+        assert account is not None
+        account.password_hash = auth_module.hash_mailbox_password("correct-password")
+        session.commit()
+
+    FakeImapAdapter.reset()
+    change_response = client.post(
+        "/api/settings/password",
+        json={
+            "current_password": "correct-password",
+            "new_password": "updated-local-password",
+        },
+    )
+
+    assert change_response.status_code == 200
+    assert FakeImapAdapter.login_calls == []
+
+    with session_factory() as session:
+        account = session.scalar(select(models_module.MailAccount).where(models_module.MailAccount.email == "local@example.com"))
+        assert account is not None
+        assert auth_module.verify_mailbox_password("local@example.com", "updated-local-password") is None
 
 
 def test_logout_invalidates_current_session(monkeypatch: pytest.MonkeyPatch) -> None:

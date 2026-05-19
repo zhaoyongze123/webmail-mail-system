@@ -1,24 +1,89 @@
-# Webmail 后台一期实现说明
+# Webmail 管理后台 P1 开发计划
 
-## 当前结果
+## 1. 文档定位
 
-已完成同站 `/admin` 后台一期基础闭环，包含：
+本文件是当前仓库“管理后台 P1”开发的唯一计划真源。
 
+范围来源：
+
+- 本地输入工件：`副本邮件系统功能清单.xlsx`
+- 事实 sheet：`管理后台`
+- 本次只覆盖该 sheet 中 `P1` 条目
+
+执行规则：
+
+- 开发前先更新“当前基线”
+- 每完成一个原子任务，立即更新“进度跟踪”
+- 若实现范围、环境前提、风险发生变化，也只更新本文件
+
+## 2. 当前日期
+
+- 计划建立时间：`2026-05-19`
+
+## 3. P1 范围总表
+
+以下条目来自 Excel `管理后台` sheet 中所有 `P1` 项：
+
+### 3.1 用户与账号管理
+
+1. 用户列表
+2. 新增 / 编辑 / 停用用户
+3. 重置用户密码
+4. 邮箱配额设置
+5. 别名（Alias）管理
+
+### 3.2 域名管理
+
+6. 域名列表 / 新增 / 删除
+7. DNS 一键检测
+
+### 3.3 Postfix 队列管理
+
+8. 队列实时查看
+9. 强制重试（flush）
+10. 删除指定邮件
+
+### 3.4 Dovecot 存储管理
+
+11. 用户配额查看
+12. 用户配额修改
+
+### 3.5 Rspamd 反垃圾
+
+13. 全局垃圾分阈值配置
+14. DKIM 密钥管理
+15. SPF / DMARC 策略查看
+
+### 3.6 TLS 与安全
+
+16. TLS 证书状态查看
+17. Let's Encrypt 续签触发
+
+### 3.7 系统监控与日志
+
+18. Postfix 错误日志
+19. Dovecot 错误日志
+20. 磁盘用量监控
+21. 服务健康检测
+
+## 4. 当前基线
+
+### 4.1 已有后台一期基础
+
+当前仓库已经具备的后台基础骨架：
+
+- 同站 `/admin` 路由框架
 - 独立管理员认证
-- 域管理
-- 邮箱用户管理
-- 别名管理
-- 配额管理
-- 审计日志
-- 系统健康检查
+- 域管理基础 API
+- 邮箱用户管理基础 API
+- 别名管理基础 API
+- 配额管理基础 API
+- 审计日志 API
 - 基础 Dashboard
+- 基础系统健康页
 
-本轮交付目标是“后台一期可用后台 + 后端真实基础 API”，不是 `FUNCTION.md` 全量完成。
+当前已有后台页面入口：
 
-## 前端结构
-
-- `/` 继续保留现有用户前台
-- `/admin/login` 为管理员登录入口
 - `/admin/dashboard`
 - `/admin/domains`
 - `/admin/users`
@@ -26,119 +91,457 @@
 - `/admin/quotas`
 - `/admin/audit-logs`
 - `/admin/system-health`
+- `/admin/security`
 
-前端采用：
+### 4.2 当前已部分实现的 P1 项
 
-- `react-router-dom`
-- `@tanstack/react-query`
-- `react-hook-form`
-- `zod`
-- `@tanstack/react-table`
+以下条目不是“未开始”，而是“已有部分后端或前端基础，但没闭环”：
 
-## 后端接口
+1. 用户列表
+   当前状态：后端有分页、搜索、排序；前端缺搜索、状态过滤、分页 UI。
 
-### 认证
+2. 新增 / 编辑 / 停用用户
+   当前状态：后端已具备创建、更新、删除、状态字段；前端无新增/编辑/停用表单与操作按钮。
 
-- `POST /api/admin/auth/login`
-- `POST /api/admin/auth/refresh`
-- `POST /api/admin/auth/logout`
-- `GET /api/admin/auth/me`
-- `POST /api/admin/auth/change-password`
-- `POST /api/admin/auth/totp/setup`
-- `POST /api/admin/auth/totp/enable`
-- `POST /api/admin/auth/totp/disable`
+3. 重置用户密码
+   当前状态：存在接口，但尚未真实写入用户密码主数据，仍需闭环设计和实现。
 
-### 域管理
+4. 邮箱配额设置
+   当前状态：后端已有单用户配额修改；前端只有 prompt 修改配额，缺完整表单和列表联动。
 
-- `GET /api/admin/domains`
-- `POST /api/admin/domains`
-- `GET /api/admin/domains/{domain_id}`
-- `PATCH /api/admin/domains/{domain_id}`
-- `DELETE /api/admin/domains/{domain_id}`
-- `POST /api/admin/domains/bulk-status`
+5. 别名（Alias）管理
+   当前状态：后端已有 CRUD；前端只有列表和启停，没有新增/编辑/删除表单化交互。
 
-### 用户管理
+6. 域名列表 / 新增 / 删除
+   当前状态：已基本可用，但缺搜索、分页、详情、编辑、批量状态 UI。
 
-- `GET /api/admin/users`
-- `POST /api/admin/users`
-- `GET /api/admin/users/{user_id}`
-- `PATCH /api/admin/users/{user_id}`
-- `DELETE /api/admin/users/{user_id}`
-- `POST /api/admin/users/{user_id}/reset-password`
-- `POST /api/admin/users/bulk-action`
-- `PATCH /api/admin/users/{user_id}/quota`
+7. 用户配额查看
+   当前状态：现有是域级聚合配额，不是按表格要求展示“单用户当前用量 / 上限”。
 
-### 别名与配额
+8. 用户配额修改
+   当前状态：当前只改数据库字段，尚未接真实 Dovecot quota adapter。
 
-- `GET /api/admin/aliases`
-- `POST /api/admin/aliases`
-- `GET /api/admin/aliases/{alias_id}`
-- `PATCH /api/admin/aliases/{alias_id}`
-- `DELETE /api/admin/aliases/{alias_id}`
-- `POST /api/admin/aliases/{alias_id}/toggle`
-- `GET /api/admin/quotas`
-- `PATCH /api/admin/quotas/policy`
-- `POST /api/admin/quotas/bulk-update`
+9. 磁盘用量监控
+   当前状态：现有配额页有部分聚合展示，但不是系统监控意义上的磁盘使用量。
 
-### 审计与看板
+10. 服务健康检测
+    当前状态：当前仅有 database / redis / application 健康，并未覆盖 Postfix / Dovecot / Rspamd。
 
-- `GET /api/admin/audit-logs`
-- `GET /api/admin/overview`
-- `GET /api/admin/dashboard/trends`
-- `GET /api/admin/system-health`
+### 4.3 当前完全未实现的 P1 项
 
-## 环境变量
+1. DNS 一键检测
+2. 队列实时查看
+3. 强制重试（flush）
+4. 删除指定邮件
+5. 全局垃圾分阈值配置
+6. DKIM 密钥管理
+7. SPF / DMARC 策略查看
+8. TLS 证书状态查看
+9. Let's Encrypt 续签触发
+10. Postfix 错误日志
+11. Dovecot 错误日志
 
-- `ADMIN_JWT_SECRET`
-- `ADMIN_ACCESS_TOKEN_TTL_MINUTES`
-- `ADMIN_REFRESH_TOKEN_TTL_DAYS`
-- `ADMIN_BOOTSTRAP_USERNAME`
-- `ADMIN_BOOTSTRAP_PASSWORD`
-- `ADMIN_TOTP_ISSUER`
+## 5. 关键约束
 
-开发环境默认会在缺省时自动 bootstrap 一个管理员：
+### 5.1 不造轮子
 
-- 用户名：`admin`
-- 密码：`Admin123456!`
+实现原则：
 
-生产环境必须显式设置，不应依赖默认值。
+- 能调系统命令就不手搓底层协议
+- 能复用现有后台骨架就不新起第二套后台
+- 能用成熟组件就不用自定义重型组件
+- 能通过适配器隔离外部系统，就不把命令执行散落在路由层
 
-## 当前边界
+### 5.2 环境前提
 
-当前前端已具备的实际操作能力：
+当前本地 `docker-compose.yml` 只直接编排：
 
-- 域名：新增、启停、删除
-- 用户：列表查看、修改配额
-- 别名：列表查看、启停
-- 配额：列表查看与使用率展示
+- `postgres`
+- `redis`
+- `backend`
+- `frontend`
 
-本轮未完成：
+当前仓库没有本地编排的：
 
-- 邮件队列管理
-- maillog 检索与实时 tail
-- Postfix/Dovecot 配置查看与重载
-- 服务启停控制
-- 配置回滚
-- CSV 批量导入
-- 用户/别名/配额的完整表单化 CRUD 交互
-- 域详情抽屉、批量操作、筛选排序 UI
+- `postfix`
+- `dovecot`
+- `rspamd`
+- `certbot`
 
-## 验证结果
+因此本轮 P1 里凡是涉及真实 Mailserver 运维动作的功能，必须采用：
 
-- 后端：admin + auth + health + models 关键回归通过
-- 前端：全量 `vitest` 通过，admin 路由测试通过
-- 前端构建通过
+- 后端 adapter + command runner 封装
+- 明确区分“本地开发降级模式”和“真实服务器模式”
+- 在无外部依赖环境时，前端可开发，后端接口可测，真实执行逻辑通过 mockable adapter 或环境探测兜底
 
-## 镜像与容器说明
+### 5.3 风险边界
 
-- 后端镜像现在会包含 `alembic.ini` 与 `backend/alembic/` 迁移脚本
-- 后端容器启动入口会先执行 `alembic upgrade head`，再启动 `uvicorn`
-- 前端镜像现在改为 `npm run build + nginx`，不再依赖 Vite dev server
-- `nginx` 会直接托管静态产物，并将 `/api/*` 反向代理到 `backend:8000`
-- `/admin/*` 等前端路由通过 SPA 回退到 `index.html`
-- 前端代码更新后仍需重建镜像，容器不会自动热更新源码
+以下功能属于高风险运维动作，必须增加确认和审计：
 
-当前已知事项：
+- 队列 flush
+- 队列删除邮件
+- 修改 Dovecot 配额
+- 修改 Rspamd 全局阈值
+- 触发证书续签
 
-- Vite build 有 chunk size warning，但不影响产物生成
-- 现有 `ComposePanel` 测试仍有历史 `act(...)` warning，本轮未新增失败
+统一要求：
+
+- 前端二次确认
+- 后端写审计日志
+- 返回执行结果和 stderr 摘要
+
+## 6. 交付目标
+
+目标不是只把接口补齐，而是把 Excel 里全部 `P1` 功能做成“前后端闭环可操作”：
+
+- 有路由页面
+- 有按钮
+- 有表单
+- 有加载态 / 空状态 / 错误态
+- 有真实后端接口
+- 有必要的系统适配器
+- 有最小测试
+- 有进度更新记录
+
+## 7. 分阶段开发计划
+
+### 阶段 A：现有后台一期补齐前后端闭环
+
+阶段目标：
+
+- 把已部分实现的 P1 项先做完整
+- 优先完成当前最接近落地的用户、域名、别名、配额模块
+
+#### 模块 A1：用户列表与用户操作闭环
+
+原子任务：
+
+1. 为用户列表接口补状态过滤参数
+2. 为用户列表接口补前端可用的分页参数透传
+3. 为用户列表前端增加搜索栏
+4. 为用户列表前端增加状态筛选
+5. 为用户列表前端增加分页控件
+6. 为用户列表前端增加“新增用户”按钮
+7. 新增用户弹窗或抽屉表单
+8. 编辑用户弹窗或抽屉表单
+9. 增加停用/启用用户操作按钮
+10. 增加删除用户操作按钮
+11. 增加重置密码操作按钮
+12. 增加批量勾选列
+13. 增加批量启用/停用/删除工具栏
+14. 补齐成功 / 失败提示
+15. 补用户模块前后端测试
+
+#### 模块 A2：重置用户密码真实闭环
+
+原子任务：
+
+1. 确认当前 `MailAccount` 是否承担密码主数据
+2. 若当前库无密码字段，设计最小可用密码存储方案
+3. 补模型 / 迁移
+4. 实现密码哈希写入
+5. 改造 `POST /api/admin/users/{id}/reset-password`
+6. 补重置密码审计字段
+7. 补前端重置密码表单
+8. 补接口与回归测试
+
+#### 模块 A3：域名管理闭环
+
+原子任务：
+
+1. 为域名列表前端增加搜索
+2. 为域名列表前端增加分页
+3. 为域名列表前端增加编辑域名配额 / 状态入口
+4. 为域名列表前端增加详情查看
+5. 为域名列表前端增加批量状态切换
+6. 为删除域增加影响提示展示
+7. 补域名模块前后端测试
+
+#### 模块 A4：别名管理闭环
+
+原子任务：
+
+1. 为别名列表前端增加搜索
+2. 为别名列表前端增加分页
+3. 增加“新增别名”按钮
+4. 新增别名表单
+5. 编辑别名表单
+6. 删除别名按钮与确认框
+7. 多目标地址输入组件
+8. 冲突错误提示透传
+9. 补别名模块前后端测试
+
+#### 模块 A5：配额管理闭环
+
+原子任务：
+
+1. 为配额页增加域级策略编辑入口
+2. 为配额页增加批量更新入口
+3. 为配额页增加域筛选
+4. 为用户行增加当前上限 / 使用率展示
+5. 为配额页增加阈值状态样式
+6. 去掉 prompt，改成正式表单弹窗
+7. 补配额模块前后端测试
+
+### 阶段 B：补齐 P1 运维能力后端适配器与页面
+
+阶段目标：
+
+- 建立 Mailserver 运维类功能统一适配层
+- 完成 DNS、队列、日志、健康、TLS、Rspamd 相关 P1 功能的最小可用闭环
+
+#### 模块 B1：系统适配器底座
+
+原子任务：
+
+1. 新建 `backend/app/admin_system.py` 或等价 service 模块
+2. 新建命令执行安全封装
+3. 定义 adapter 结果结构：stdout / stderr / exit_code / duration
+4. 定义“开发模式 / 真实模式”切换策略
+5. 增加命令白名单
+6. 增加执行超时控制
+7. 增加审计写入封装
+8. 补 adapter 单测
+
+#### 模块 B2：DNS 一键检测
+
+原子任务：
+
+1. 选型 DNS 查询方案
+2. 实现域名 MX 查询
+3. 实现 SPF 查询
+4. 实现 DKIM selector 查询策略
+5. 实现 DMARC 查询
+6. 设计检测结果响应结构
+7. 实现 `GET /api/admin/domains/{id}/dns-check`
+8. 前端域名详情页增加“DNS 检测”按钮
+9. 前端展示成功 / 异常 / 未配置状态
+10. 补测试
+
+#### 模块 B3：Postfix 队列管理
+
+原子任务：
+
+1. 定义队列项数据结构
+2. 封装队列列表命令
+3. 解析 active / deferred / hold / corrupt
+4. 实现队列列表接口
+5. 封装 flush 命令
+6. 实现 flush 接口
+7. 封装删除指定队列邮件命令
+8. 实现删除指定邮件接口
+9. 队列页前端表格
+10. 队列页刷新按钮
+11. flush 操作按钮
+12. 删除操作按钮
+13. 危险操作确认弹窗
+14. 审计日志接入
+15. 测试
+
+#### 模块 B4：Dovecot 配额能力
+
+原子任务：
+
+1. 定义 quota adapter 接口
+2. 探测 `doveadm quota get` 可用性
+3. 实现单用户当前用量读取
+4. 实现批量用户配额读取
+5. 实现 `doveadm quota recalc` 或等价刷新策略
+6. 实现真实配额修改接口
+7. 前端用户配额详情展示
+8. 前端配额修改表单对接真实接口
+9. 审计接入
+10. 测试
+
+#### 模块 B5：Rspamd P1 能力
+
+原子任务：
+
+1. 梳理 Rspamd 配置读写来源
+2. 实现全局垃圾分阈值读取
+3. 实现全局垃圾分阈值更新
+4. 实现 SPF / DMARC 只读展示聚合
+5. 设计 DKIM 密钥信息结构
+6. 实现 DKIM 生成或读取适配器
+7. 增加 Rspamd 设置页面
+8. 增加阈值编辑表单
+9. 增加 DKIM 查看 / 轮换按钮
+10. 增加 SPF / DMARC 状态展示
+11. 审计接入
+12. 测试
+
+#### 模块 B6：TLS 与证书
+
+原子任务：
+
+1. 设计证书状态读取适配器
+2. 读取证书到期时间
+3. 读取证书覆盖域名
+4. 实现证书状态接口
+5. 封装证书续签触发命令
+6. 实现续签接口
+7. 前端 TLS 页面
+8. 前端状态卡片
+9. 前端续签按钮和确认流程
+10. 审计接入
+11. 测试
+
+#### 模块 B7：日志与监控
+
+原子任务：
+
+1. 设计日志读取适配器
+2. 实现 Postfix 错误日志读取
+3. 实现 Dovecot 错误日志读取
+4. 设计分页或 tail 读取策略
+5. 实现磁盘用量检测
+6. 实现服务健康检测：Postfix
+7. 实现服务健康检测：Dovecot
+8. 实现服务健康检测：Rspamd
+9. 新增日志与监控页面
+10. 增加日志切换 Tab
+11. 增加磁盘用量卡片
+12. 增加服务状态卡片
+13. 增加刷新按钮
+14. 测试
+
+### 阶段 C：联调、回归、验收与文档同步
+
+阶段目标：
+
+- 把所有 P1 页面和后端能力做完闭环
+- 完成最小可演示、可持续维护状态
+
+原子任务：
+
+1. 补后台全部路由菜单入口
+2. 统一页面 loading / empty / error UI
+3. 统一危险操作确认弹窗
+4. 统一 toast 提示
+5. 统一列表分页组件
+6. 补角色权限边界回归
+7. 补后端集成测试
+8. 补前端页面测试
+9. 跑前端构建
+10. 跑后端关键测试
+11. 跑管理后台主路径冒烟
+12. 更新本计划中的完成状态
+13. 记录剩余风险与后续 P2 边界
+
+## 8. 进度跟踪
+
+### 8.1 状态定义
+
+- `未开始`
+- `进行中`
+- `已完成`
+- `阻塞`
+
+### 8.2 阶段进度
+
+| 阶段 | 状态 | 说明 |
+| --- | --- | --- |
+| 阶段 A：现有后台一期补齐前后端闭环 | 已完成 | 已完成后台用户本地密码闭环、四个核心页面表单化、安全页统一弹层与阶段 A 最小回归 |
+| 阶段 B：补齐 P1 运维能力后端适配器与页面 | 已完成 | 已完成 DNS、Postfix 队列、Dovecot 配额、日志与监控、Rspamd、TLS 与证书闭环 |
+| 阶段 C：联调、回归、验收与文档同步 | 已完成 | 已完成真实主路径冒烟、全量回归、旧镜像运行态收口与文档同步，当前剩余为生产 mailserver 环境联调事项 |
+
+### 8.3 最新进展日志
+
+| 日期 | 状态 | 内容 |
+| --- | --- | --- |
+| 2026-05-19 | 已完成 | 依据 `副本邮件系统功能清单.xlsx` 的 `管理后台` sheet 重建 P1 开发计划文档 |
+| 2026-05-19 | 已完成 | 核对当前后台一期代码基线，区分“部分实现”与“完全未实现”条目 |
+| 2026-05-19 | 已完成 | 将本文件设为后台 P1 开发期间的唯一计划与进度同步文档 |
+| 2026-05-19 | 已完成 | 阶段 A 后端第一轮闭环：`MailAccount` 新增 `password_hash`，后台创建用户/重置密码真实写入本地密码哈希，普通用户登录改为“优先本地密码、缺失再回退 IMAP”，并新增停用用户登录拦截 |
+| 2026-05-19 | 已完成 | 阶段 A 后端接口增强：用户列表增加状态过滤，域名列表增加状态过滤，域名支持名称编辑，域/用户/别名/配额接口补充前端闭环所需字段与聚合结果 |
+| 2026-05-19 | 已完成 | 阶段 A 前端页面闭环：`/admin/users`、`/admin/domains`、`/admin/aliases`、`/admin/quotas` 已补搜索、分页、表单、批量操作或批量更新入口，替换掉 prompt 级交互 |
+| 2026-05-19 | 已完成 | 阶段 A 最小回归通过：后端 `32 passed`，前端 `76 passed`，`npm run build --prefix frontend` 成功 |
+| 2026-05-19 | 已完成 | 阶段 A 体验级收口：四个列表页已同步 URL 查询参数，刷新后可保留搜索/筛选/分页状态 |
+| 2026-05-19 | 已完成 | 阶段 A 体验级收口：用户/域名/别名/配额页面已把关键 `window.prompt / window.confirm` 替换为统一后台确认弹层和输入弹层 |
+| 2026-05-19 | 已完成 | 阶段 A 最终收口：`AdminSecurityPage` 的 TOTP 停用入口已从 `window.prompt` 切换为统一后台弹层，并补前端测试 |
+| 2026-05-19 | 已完成 | 阶段 B 已启动：新增 `backend/app/admin_system.py` 命令适配底座，接入 `GET /api/admin/domains/{id}/dns-check`，并在域名详情页增加 DNS 检测按钮与结果展示 |
+| 2026-05-19 | 已完成 | 本轮回归通过：前端 `78 passed`，后端 `backend/tests/test_admin_api.py` 为 `8 passed`，`npm run build --prefix frontend` 成功 |
+| 2026-05-19 | 已完成 | 阶段 B3 最小闭环：新增 `GET /api/admin/queue`、`POST /api/admin/queue/flush`、`POST /api/admin/queue/delete`，前端新增 `/admin/queue` 页面、侧栏入口、危险操作确认弹层，并将 Dashboard 的 `queued_jobs` 改为读取真实队列摘要 |
+| 2026-05-19 | 已完成 | 本轮回归通过：前端 `79 passed`，后端 `backend/tests/test_admin_api.py` 为 `9 passed`，`npm run build --prefix frontend` 成功 |
+| 2026-05-19 | 已完成 | 阶段 B4 首轮闭环：配额页优先读取 `doveadm quota get`，失败自动回退本地缓存聚合；新增 `POST /api/admin/users/{id}/quota/recalc` 单用户重算入口，并在配额页展示 `usage_source` 来源 |
+| 2026-05-19 | 已完成 | 本轮回归通过：前端 `79 passed`，后端 `backend/tests/test_admin_api.py` 为 `9 passed`，`npm run build --prefix frontend` 成功 |
+| 2026-05-19 | 已完成 | 阶段 B7 最小闭环：`/api/admin/system-health` 已扩展为服务状态、磁盘用量、Postfix/Dovecot 日志统一载荷，前端“系统健康”页升级为“日志与监控”页，支持刷新和日志切换 |
+| 2026-05-19 | 已完成 | 阶段 B5 最小闭环：新增 `GET /api/admin/rspamd`、`PATCH /api/admin/rspamd/thresholds`、`POST /api/admin/domains/{id}/dkim/rotate`，前端新增 `/admin/rspamd` 页面，支持全局阈值编辑、域级 SPF/DMARC/DKIM 展示与 DKIM 轮换确认流 |
+| 2026-05-19 | 已完成 | 阶段 B6 最小闭环：新增 `GET /api/admin/tls`、`POST /api/admin/tls/renew`，前端新增 `/admin/tls` 页面，支持证书状态查看与续签确认弹层；开发环境无 `certbot` 时明确返回 `unavailable` |
+| 2026-05-19 | 已完成 | 阶段 C 真实联调收口：发现本地 `5173` 运行的是旧前端静态镜像后，已重建并重启 `backend/frontend` 容器，再次核对运行态与工作区源码一致 |
+| 2026-05-19 | 已完成 | 阶段 C 后端全量回归通过：`PYTHONPATH=/Users/mac/项目/webmail-邮件系统/backend ./.venv/bin/pytest backend/tests -q` 为 `144 passed` |
+| 2026-05-19 | 已完成 | 阶段 C 后台主路径真实冒烟通过：`/admin/login`、`/admin/dashboard`、`/admin/domains`、`/admin/users`、`/admin/aliases`、`/admin/quotas`、`/admin/rspamd`、`/admin/tls`、`/admin/queue`、`/admin/audit-logs`、`/admin/system-health`、`/admin/security` 均已在重建后的真实运行态下加载成功 |
+| 2026-05-19 | 已完成 | 阶段 C 环境降级行为已验证：开发机缺少 `postqueue`、`certbot`、`journalctl`、`pgrep`、Rspamd 配置文件与 Let’s Encrypt 证书目录时，后台页面与 API 均返回明确 `unavailable` 状态，而不是伪造成功 |
+| 2026-05-19 | 已完成 | 阶段 C 体验补丁：根据浏览器冒烟结果补齐后台密码表单 `autocomplete` 与用户名辅助字段，消除新增后台页面的主要密码表单可访问性告警 |
+| 2026-05-19 | 已完成 | 阶段 C 真实缺陷修复：定位并修复后台数据库会话依赖未关闭导致的连接池耗尽问题，`get_db_session()` 已改为 `yield + close`，重启后端后连续 12 次管理员登录全部成功 |
+
+### 8.4 阶段 A 已完成项
+
+- 模块 A1：已完成用户列表搜索、状态筛选、分页、创建、编辑、启停、删除、重置密码、批量启停/删除，以及成功/失败提示
+- 模块 A2：已完成本地密码主数据方案、迁移、后台密码写入、重置密码真实闭环、普通用户登录兼容和回归测试
+- 模块 A3：已完成域名搜索、分页、编辑、详情查看、批量启停、删除影响提示展示
+- 模块 A4：已完成别名搜索、分页、新增、编辑、删除、多目标地址输入与冲突提示透传
+- 模块 A5：已完成域级策略编辑、域筛选、单用户配额修改、批量配额修改、正式表单化入口与阈值状态展示
+
+### 8.5 阶段 A 收口结论
+
+- 阶段 A 计划内“现有后台一期补齐前后端闭环”已完成
+- 当前后台交互层已无已知核心 `window.prompt` 遗留点
+- 后续剩余项转入阶段 B / C 继续推进，不再视为阶段 A 阻塞
+
+### 8.6 阶段 B 当前完成项
+
+- 模块 B1：已完成基础命令白名单、超时控制、标准化命令结果结构
+- 模块 B2：已完成 DNS 检测接口、域名详情入口与结果展示
+- 模块 B3：已完成 Postfix 队列列表、flush、删除指定邮件的最小前后端闭环
+- 模块 B4：已完成首轮 Dovecot 配额能力接入，支持 `doveadm quota get` 优先读取、失败回退缓存，以及单用户 `quota recalc`
+- 模块 B5：已完成 Rspamd 最小闭环，支持全局垃圾分阈值读取/更新、域级 SPF/DMARC/DKIM 聚合展示与 DKIM 轮换
+- 模块 B6：已完成 TLS 最小闭环，支持证书状态读取、域名覆盖展示与 certbot 续签触发入口
+- 模块 B7：已完成日志与监控最小闭环，支持 Postfix/Dovecot 日志读取、Postfix/Dovecot/Rspamd 服务状态、磁盘用量与前端监控页展示
+- 阶段 B 已全部完成
+
+### 8.7 阶段 C 完成项
+
+- 模块 C1：已完成后台全部路由菜单入口核对，真实运行态包含控制台、域名、用户、别名、配额、反垃圾、TLS、队列、审计、监控、安全页面
+- 模块 C2：已完成阶段 A/B 页面 loading / empty / error 统一样式核对，主路径冒烟未发现页面级崩溃
+- 模块 C3：已完成危险操作确认流统一，队列 flush / 删除、TLS 续签、DKIM 轮换、TOTP 停用均已使用正式确认弹层
+- 模块 C4：已完成关键提示统一，核心后台页面使用统一成功/失败反馈
+- 模块 C5：已完成后台列表分页组件统一和 URL 查询参数同步
+- 模块 C6：已完成角色权限与后台认证相关回归，未登录访问 `/admin/dashboard` 会跳回 `/admin/login`
+- 模块 C7：已完成后端全量测试回归，结果为 `144 passed`
+- 模块 C8：已完成前端页面与后台相关测试回归，并在真实浏览器中完成页面级联调检查
+- 模块 C9：已完成前端构建回归
+- 模块 C10：已完成后台关键接口烟测与主路径浏览器冒烟
+- 模块 C11：已完成计划文档同步，当前文档状态已与代码和运行态一致
+
+### 8.8 当前剩余风险与 P2 边界
+
+- 当前开发环境不具备真实 `postqueue`、`certbot`、Rspamd 配置文件、Let’s Encrypt 证书目录、`journalctl`、`pgrep` 等 mailserver 依赖，因此队列、TLS、服务状态、日志、反垃圾能力目前验证的是“真实降级路径”，不是生产 mailserver 实际命令结果
+- 若进入生产或预发 mailserver 联调，还需要在具备 Postfix/Dovecot/Rspamd/Certbot 的环境中再次验证命令权限、文件路径与审计行为
+- 当前后台一期 P1 已完成；后续新增能力应转入 P2，例如更深的日志检索、实时 tail、批量导入导出、复杂告警与真实服务控制
+
+## 9. 当前最高优先级执行顺序
+
+按“先补现有骨架，再接系统适配器”的原则，当前推荐顺序：
+
+1. 模块 A1：用户列表与用户操作闭环
+2. 模块 A2：重置用户密码真实闭环
+3. 模块 A4：别名管理闭环
+4. 模块 A5：配额管理闭环
+5. 模块 A3：域名管理闭环
+6. 模块 B1：系统适配器底座
+7. 模块 B2：DNS 一键检测
+8. 模块 B3：Postfix 队列管理
+9. 模块 B4：Dovecot 配额能力
+10. 阶段 C：联调、回归、验收与文档同步
+
+## 10. 说明
+
+本轮目标是：按照 Excel 表格中的 `管理后台` sheet，把全部 `P1` 功能做成前后端闭环。
+
+不接受的交付方式：
+
+- 只有后端接口，没有前端按钮和表单
+- 只有页面静态壳，没有真实接口
+- 只有 mock 数据，没有真实可运行逻辑
+- 完成了代码但不更新本计划进度

@@ -7,20 +7,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 from fastapi import Request, Response, status
+from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.cache import LoginFailureLimiter, SessionStore
 from app.config import Settings, get_settings
 from app.crypto import decrypt_text, encrypt_text
+from app.db import get_session_factory
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
 from app.mail_preferences import get_user_preferences
 from app.mail_state import ensure_mail_account
+from app.models import MailAccount
 from app.redis_client import get_redis_client
 from app.security import issue_session_cookies, new_csrf_token, clear_session_cookies
 from app.observability import record_audit_event
+
+
+logger = logging.getLogger("app.auth")
+mailbox_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 class LoginRequest(BaseModel):
@@ -69,9 +79,62 @@ def _imap_settings(email: str, password: str, settings: Settings) -> ImapSetting
     )
 
 
-def authenticate_mailbox(email: str, password: str, settings: Settings | None = None) -> None:
+def _safe_account_snapshot(email: str) -> dict[str, object] | None:
+    """尽力读取本地账号摘要；数据库不可用时返回空结果而不是打断登录。"""
+    normalized_email = email.strip().lower()
+    try:
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is None:
+                return None
+            return {
+                "id": str(account.id),
+                "email": account.email,
+                "status": account.status,
+                "password_hash": account.password_hash,
+            }
+    except SQLAlchemyError as exc:
+        logger.warning("读取本地邮箱账号失败 email=%s error=%s", normalized_email, exc.__class__.__name__)
+    except Exception as exc:  # pragma: no cover - 兜底保护登录主流程
+        logger.warning("读取本地邮箱账号异常 email=%s error=%s", normalized_email, exc.__class__.__name__)
+    return None
+
+
+def hash_mailbox_password(password: str) -> str:
+    """对后台创建的本地邮箱密码做哈希。"""
+    return mailbox_pwd_context.hash(password)
+
+
+def _verify_local_mailbox_password(password: str, password_hash: str) -> bool:
+    """校验本地邮箱密码是否匹配。"""
+    return mailbox_pwd_context.verify(password, password_hash)
+
+
+def has_local_mailbox_password(email: str) -> bool:
+    """判断某个邮箱账号是否启用了本地密码模式。"""
+    snapshot = _safe_account_snapshot(email)
+    return bool(snapshot and snapshot.get("password_hash"))
+
+
+def update_local_mailbox_password(email: str, new_password: str) -> None:
+    """更新本地邮箱账号密码哈希。"""
+    normalized_email = email.strip().lower()
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+        if account is None:
+            raise AppError(
+                "AUTH_ACCOUNT_NOT_FOUND",
+                "邮箱账号不存在",
+                http_status=status.HTTP_404_NOT_FOUND,
+            )
+        account.password_hash = hash_mailbox_password(new_password)
+        db_session.commit()
+
+
+def _authenticate_imap_mailbox(email: str, password: str, settings: Settings) -> None:
     """通过 IMAP 直连验证邮箱账号和密码是否有效。"""
-    settings = settings or get_settings()
     adapter = ImapAdapter(_imap_settings(email, password, settings))
     try:
         adapter.connect().login()
@@ -86,6 +149,29 @@ def authenticate_mailbox(email: str, password: str, settings: Settings | None = 
             adapter.logout()
         except MailAdapterError:
             pass
+
+
+def authenticate_mailbox(email: str, password: str, settings: Settings | None = None) -> None:
+    """校验邮箱账号密码，优先走本地密码，缺失时回退到 IMAP。"""
+    settings = settings or get_settings()
+    normalized_email = email.strip().lower()
+    snapshot = _safe_account_snapshot(normalized_email)
+    if snapshot and snapshot.get("status") == "disabled":
+        raise AppError(
+            "AUTH_ACCOUNT_DISABLED",
+            "邮箱账号已停用",
+            http_status=status.HTTP_403_FORBIDDEN,
+        )
+    password_hash = str(snapshot.get("password_hash") or "") if snapshot else ""
+    if password_hash:
+        if not _verify_local_mailbox_password(password, password_hash):
+            raise AppError(
+                "AUTH_INVALID_CREDENTIALS",
+                "邮箱或密码不正确",
+                http_status=status.HTTP_401_UNAUTHORIZED,
+            )
+        return
+    _authenticate_imap_mailbox(normalized_email, password, settings)
 
 
 def verify_mailbox_password(email: str, password: str, settings: Settings | None = None) -> None:
@@ -166,7 +252,7 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
 
     limiter.clear(ip, email)
     session_id, user_data, csrf_token = _create_session(email, payload.password, settings)
-    ensure_mail_account(email)
+    ensure_mail_account(email, mark_logged_in=True)
     record_audit_event(
         request,
         "auth.login",
@@ -190,7 +276,7 @@ def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict
             metadata={"email": email, "reason": "invalid_credentials"},
         )
         raise
-    ensure_mail_account(email, display_name=payload.display_name)
+    ensure_mail_account(email, display_name=payload.display_name, mark_logged_in=True)
     session_id, user_data, csrf_token = _create_session(email, payload.password, settings)
     record_audit_event(
         request,

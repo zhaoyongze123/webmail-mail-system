@@ -54,7 +54,7 @@ def test_key_columns_exist() -> None:
     admin_user_columns = set(AdminUser.__table__.columns.keys())
     refresh_token_columns = set(AdminRefreshToken.__table__.columns.keys())
 
-    assert {"id", "email", "domain_id", "quota_mb", "status", "is_admin", "imap_host", "smtp_host", "created_at", "updated_at"} <= account_columns
+    assert {"id", "email", "domain_id", "password_hash", "quota_mb", "status", "is_admin", "imap_host", "smtp_host", "created_at", "updated_at"} <= account_columns
     assert {"id", "account_id", "name", "type", "unread_count", "total_count"} <= folder_columns
     assert {"id", "account_id", "folder_id", "imap_uid", "to_emails", "flags", "cached_at"} <= message_columns
     assert {"id", "account_id", "subject", "attachment_refs", "status", "created_at"} <= draft_columns

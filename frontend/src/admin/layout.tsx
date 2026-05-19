@@ -8,8 +8,11 @@ const navItems = [
   { to: '/admin/users', label: '用户' },
   { to: '/admin/aliases', label: '别名' },
   { to: '/admin/quotas', label: '配额' },
+  { to: '/admin/rspamd', label: '反垃圾' },
+  { to: '/admin/tls', label: 'TLS' },
+  { to: '/admin/queue', label: '队列' },
   { to: '/admin/audit-logs', label: '审计' },
-  { to: '/admin/system-health', label: '健康' },
+  { to: '/admin/system-health', label: '监控' },
   { to: '/admin/security', label: '安全' },
 ];
 

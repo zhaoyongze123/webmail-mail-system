@@ -20,10 +20,12 @@ from app.auth import (
     RegisterRequest,
     clear_session_cookie,
     get_current_session,
+    has_local_mailbox_password,
     login_user,
     logout_user,
     register_user,
     set_session_cookie,
+    update_local_mailbox_password,
     update_session_password,
     verify_mailbox_password,
 )
@@ -410,7 +412,10 @@ def change_password_api(request: Request, payload: ChangePasswordRequest) -> dic
         )
 
     verify_mailbox_password(session.email, payload.current_password)
-    verify_mailbox_password(session.email, payload.new_password)
+    if has_local_mailbox_password(session.email):
+        update_local_mailbox_password(session.email, payload.new_password)
+    else:
+        verify_mailbox_password(session.email, payload.new_password)
     update_session_password(session.session_id, payload.new_password)
     record_audit_event(
         request,

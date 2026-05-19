@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     admin_bootstrap_username: str | None = Field(default=None, alias="ADMIN_BOOTSTRAP_USERNAME")
     admin_bootstrap_password: str | None = Field(default=None, alias="ADMIN_BOOTSTRAP_PASSWORD")
     admin_totp_issuer: str = Field(default="Webmail Admin", alias="ADMIN_TOTP_ISSUER")
+    mail_quota_enabled: bool = Field(default=True, alias="MAIL_QUOTA_ENABLED")
+    rspamd_enabled: bool = Field(default=True, alias="RSPAMD_ENABLED")
+    rspamd_actions_config_path: str = Field(default="/etc/rspamd/local.d/actions.conf", alias="RSPAMD_ACTIONS_CONFIG_PATH")
+    rspamd_dkim_key_dir: str = Field(default="/var/lib/rspamd/dkim", alias="RSPAMD_DKIM_KEY_DIR")
+    rspamd_default_dkim_selector: str = Field(default="default", alias="RSPAMD_DKIM_SELECTOR")
+    tls_enabled: bool = Field(default=True, alias="TLS_ENABLED")
+    tls_live_dir: str = Field(default="/etc/letsencrypt/live", alias="TLS_LIVE_DIR")
+    tls_certbot_command: str = Field(default="certbot", alias="TLS_CERTBOT_COMMAND")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

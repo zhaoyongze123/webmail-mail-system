@@ -2,11 +2,23 @@ import type {
   AdminAlias,
   AdminAuditLogItem,
   AdminAuthPayload,
+  AdminDomainDnsCheck,
   AdminDomain,
-  AdminHealthItem,
+  AdminSystemHealthSnapshot,
+  AdminTlsSnapshot,
   AdminMailboxUser,
   AdminOverviewStats,
+  AdminQueueSnapshot,
   AdminQuotaItem,
+  AdminRspamdSnapshot,
+  AliasFormInput,
+  AliasUpdateInput,
+  DomainFormInput,
+  ListQuery,
+  PaginatedResult,
+  QuotaPolicyFormInput,
+  UserFormInput,
+  UserUpdateInput,
 } from './types';
 import { clearAdminTokens, getAdminAccessToken, getAdminRefreshToken, setAdminTokens } from './token';
 
@@ -20,6 +32,14 @@ type ApiResponse<T> = {
   success: boolean;
   data: T | null;
   error: ApiError | null;
+};
+
+type PaginatedPayload<T> = {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  items: T[];
 };
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
@@ -37,12 +57,12 @@ function readCookie(name: string): string | null {
 
 async function parseResponse<T>(response: Response): Promise<T> {
   const payload = (await response.json()) as ApiResponse<T>;
-  if (!response.ok || !payload.success) {
+  if (!response.ok || !payload.success || payload.data == null) {
     const error = new Error(payload.error?.message || '请求失败，请稍后重试') as Error & { code?: string };
     error.code = payload.error?.code;
     throw error;
   }
-  return payload.data as T;
+  return payload.data;
 }
 
 async function refreshAdminToken() {
@@ -66,6 +86,17 @@ async function refreshAdminToken() {
   }
   setAdminTokens(payload.data.access_token, payload.data.refresh_token ?? null);
   return payload.data;
+}
+
+function buildQuery(params?: Record<string, string | number | undefined | null>) {
+  const search = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      search.set(key, String(value));
+    }
+  });
+  const text = search.toString();
+  return text ? `?${text}` : '';
 }
 
 async function requestAdminApi<T>(input: string, init?: RequestInit, retryOnAuthFailure = true): Promise<T> {
@@ -94,6 +125,16 @@ async function requestAdminApi<T>(input: string, init?: RequestInit, retryOnAuth
     return requestAdminApi<T>(input, init, false);
   }
   return parseResponse<T>(response);
+}
+
+function normalizePaginated<T>(payload: PaginatedPayload<T>): PaginatedResult<T> {
+  return {
+    page: payload.page,
+    page_size: payload.page_size,
+    total: payload.total,
+    total_pages: payload.total_pages,
+    items: payload.items,
+  };
 }
 
 export async function adminLogin(payload: { username: string; password: string }): Promise<AdminAuthPayload> {
@@ -146,19 +187,27 @@ export async function fetchAdminOverview(): Promise<AdminOverviewStats> {
   return requestAdminApi<AdminOverviewStats>('/api/admin/overview', { method: 'GET' });
 }
 
-export async function fetchAdminDomains(): Promise<{ items: AdminDomain[] }> {
-  const data = await requestAdminApi<{ items: AdminDomain[]; page?: number; total?: number } | { page: number; page_size: number; total: number; items: AdminDomain[] }>('/api/admin/domains', { method: 'GET' });
-  return { items: data.items };
+export async function fetchAdminDomains(query: ListQuery = {}): Promise<PaginatedResult<AdminDomain>> {
+  const data = await requestAdminApi<PaginatedPayload<AdminDomain>>(`/api/admin/domains${buildQuery(query)}`, { method: 'GET' });
+  return normalizePaginated(data);
 }
 
-export async function createAdminDomain(payload: { name: string; quota_limit_mb: number; status: 'active' | 'disabled' }) {
+export async function fetchAdminDomain(domainId: string) {
+  return requestAdminApi<{ domain: AdminDomain }>(`/api/admin/domains/${encodeURIComponent(domainId)}`, { method: 'GET' });
+}
+
+export async function fetchAdminDomainDnsCheck(domainId: string) {
+  return requestAdminApi<AdminDomainDnsCheck>(`/api/admin/domains/${encodeURIComponent(domainId)}/dns-check`, { method: 'GET' });
+}
+
+export async function createAdminDomain(payload: DomainFormInput) {
   return requestAdminApi<{ domain: AdminDomain }>('/api/admin/domains', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function updateAdminDomain(domainId: string, payload: { quota_limit_mb?: number; status?: 'active' | 'disabled' }) {
+export async function updateAdminDomain(domainId: string, payload: Partial<DomainFormInput>) {
   return requestAdminApi<{ domain: AdminDomain }>(`/api/admin/domains/${encodeURIComponent(domainId)}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
@@ -166,14 +215,55 @@ export async function updateAdminDomain(domainId: string, payload: { quota_limit
 }
 
 export async function deleteAdminDomain(domainId: string) {
-  return requestAdminApi<{ deleted: boolean }>(`/api/admin/domains/${encodeURIComponent(domainId)}`, {
+  return requestAdminApi<{ deleted: boolean; impact: { user_count: number; alias_count: number } }>(`/api/admin/domains/${encodeURIComponent(domainId)}`, {
     method: 'DELETE',
   });
 }
 
-export async function fetchAdminUsers(): Promise<{ items: AdminMailboxUser[] }> {
-  const data = await requestAdminApi<{ items: AdminMailboxUser[]; page?: number; total?: number } | { page: number; page_size: number; total: number; items: AdminMailboxUser[] }>('/api/admin/users', { method: 'GET' });
-  return { items: data.items };
+export async function bulkAdminDomainStatus(payload: { ids: string[]; status: 'active' | 'disabled' }) {
+  return requestAdminApi<{ updated: number }>('/api/admin/domains/bulk-status', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAdminUsers(query: ListQuery = {}): Promise<PaginatedResult<AdminMailboxUser>> {
+  const data = await requestAdminApi<PaginatedPayload<AdminMailboxUser>>(`/api/admin/users${buildQuery(query)}`, { method: 'GET' });
+  return normalizePaginated(data);
+}
+
+export async function createAdminUser(payload: UserFormInput) {
+  return requestAdminApi<{ user: AdminMailboxUser }>('/api/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAdminUser(userId: string, payload: UserUpdateInput) {
+  return requestAdminApi<{ user: AdminMailboxUser }>(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAdminUser(userId: string) {
+  return requestAdminApi<{ deleted: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function resetAdminUserPassword(userId: string, password: string) {
+  return requestAdminApi<{ password_reset: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+}
+
+export async function bulkAdminUsers(payload: { ids: string[]; action: 'activate' | 'disable' | 'delete' }) {
+  return requestAdminApi<{ updated: number }>('/api/admin/users/bulk-action', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function updateAdminUserQuota(userId: string, quota_mb: number) {
@@ -183,9 +273,35 @@ export async function updateAdminUserQuota(userId: string, quota_mb: number) {
   });
 }
 
-export async function fetchAdminAliases(): Promise<{ items: AdminAlias[] }> {
-  const data = await requestAdminApi<{ items: AdminAlias[]; page?: number; total?: number } | { page: number; page_size: number; total: number; items: AdminAlias[] }>('/api/admin/aliases', { method: 'GET' });
-  return { items: data.items };
+export async function recalcAdminUserQuota(userId: string) {
+  return requestAdminApi<{ result: { status: string; detail: string }; user: AdminMailboxUser }>(`/api/admin/users/${encodeURIComponent(userId)}/quota/recalc`, {
+    method: 'POST',
+  });
+}
+
+export async function fetchAdminAliases(query: ListQuery = {}): Promise<PaginatedResult<AdminAlias>> {
+  const data = await requestAdminApi<PaginatedPayload<AdminAlias>>(`/api/admin/aliases${buildQuery(query)}`, { method: 'GET' });
+  return normalizePaginated(data);
+}
+
+export async function createAdminAlias(payload: AliasFormInput) {
+  return requestAdminApi<{ alias: AdminAlias }>('/api/admin/aliases', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAdminAlias(aliasId: string, payload: AliasUpdateInput) {
+  return requestAdminApi<{ alias: AdminAlias }>(`/api/admin/aliases/${encodeURIComponent(aliasId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAdminAlias(aliasId: string) {
+  return requestAdminApi<{ deleted: boolean }>(`/api/admin/aliases/${encodeURIComponent(aliasId)}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function toggleAdminAlias(aliasId: string) {
@@ -194,16 +310,76 @@ export async function toggleAdminAlias(aliasId: string) {
   });
 }
 
-export async function fetchAdminQuotas(): Promise<{ items: AdminQuotaItem[] }> {
-  return requestAdminApi<{ items: AdminQuotaItem[] }>('/api/admin/quotas', { method: 'GET' });
+export async function fetchAdminQuotas(query: ListQuery = {}): Promise<{ items: AdminQuotaItem[]; user_items: AdminMailboxUser[] }> {
+  return requestAdminApi<{ items: AdminQuotaItem[]; user_items: AdminMailboxUser[] }>(`/api/admin/quotas${buildQuery(query)}`, { method: 'GET' });
+}
+
+export async function updateQuotaPolicy(payload: QuotaPolicyFormInput) {
+  return requestAdminApi<{ policy: AdminQuotaItem }>('/api/admin/quotas/policy', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function bulkUpdateQuotas(payload: { ids: string[]; quota_mb: number }) {
+  return requestAdminApi<{ updated: number }>('/api/admin/quotas/bulk-update', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function fetchAdminAuditLogs(): Promise<{ items: AdminAuditLogItem[] }> {
   return requestAdminApi<{ items: AdminAuditLogItem[] }>('/api/admin/audit-logs', { method: 'GET' });
 }
 
-export async function fetchAdminHealth(): Promise<{ items: AdminHealthItem[] }> {
-  return requestAdminApi<{ items: AdminHealthItem[] }>('/api/admin/system-health', { method: 'GET' });
+export async function fetchAdminHealth(): Promise<AdminSystemHealthSnapshot> {
+  return requestAdminApi<AdminSystemHealthSnapshot>('/api/admin/system-health', { method: 'GET' });
+}
+
+export async function fetchAdminQueue(): Promise<AdminQueueSnapshot> {
+  return requestAdminApi<AdminQueueSnapshot>('/api/admin/queue', { method: 'GET' });
+}
+
+export async function fetchAdminRspamd(): Promise<AdminRspamdSnapshot> {
+  return requestAdminApi<AdminRspamdSnapshot>('/api/admin/rspamd', { method: 'GET' });
+}
+
+export async function updateAdminRspamdThresholds(payload: { reject: number; add_header: number; greylist: number }) {
+  return requestAdminApi<{ status: string; detail: string; thresholds: { reject: number; add_header: number; greylist: number } }>('/api/admin/rspamd/thresholds', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function rotateAdminDomainDkim(domainId: string, payload?: { selector?: string | null }) {
+  return requestAdminApi<{ domain: string; status: string; detail: string; selector?: string; path?: string; public_key?: string | null }>(`/api/admin/domains/${encodeURIComponent(domainId)}/dkim/rotate`, {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export async function fetchAdminTls(): Promise<AdminTlsSnapshot> {
+  return requestAdminApi<AdminTlsSnapshot>('/api/admin/tls', { method: 'GET' });
+}
+
+export async function renewAdminTls() {
+  return requestAdminApi<{ status: string; detail: string }>('/api/admin/tls/renew', {
+    method: 'POST',
+    body: JSON.stringify({ confirm: true }),
+  });
+}
+
+export async function flushAdminQueue() {
+  return requestAdminApi<{ status: string; detail: string }>('/api/admin/queue/flush', {
+    method: 'POST',
+  });
+}
+
+export async function deleteAdminQueueItem(queueId: string) {
+  return requestAdminApi<{ queue_id: string; status: string; detail: string }>('/api/admin/queue/delete', {
+    method: 'POST',
+    body: JSON.stringify({ queue_id: queueId }),
+  });
 }
 
 export async function getAdminSession(): Promise<{ hasToken: boolean }> {

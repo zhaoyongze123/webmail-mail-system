@@ -35,12 +35,32 @@ from app.admin_common import (
     ensure_domain_scope,
     ensure_superadmin,
     get_db_session,
+    load_account_usage_map,
     paginate,
     quota_policy_to_dict,
+    quota_usage_status,
     record_admin_audit,
     normalize_pagination,
     utcnow,
 )
+from app.admin_system import (
+    delete_mail_queue_item,
+    flush_mail_queue,
+    get_domain_dkim_info,
+    get_mailbox_quota_usage,
+    get_rspamd_thresholds,
+    get_tls_certificates,
+    list_disk_usage,
+    list_mail_service_logs,
+    list_mail_queue,
+    list_service_health,
+    recalc_mailbox_quota_usage,
+    renew_tls_certificates,
+    rotate_domain_dkim_key,
+    run_domain_dns_check,
+    update_rspamd_thresholds,
+)
+from app.auth import hash_mailbox_password
 from app.config import get_settings
 from app.errors import AppError
 from app.models import AdminUser, AuditLog, MailAccount, MailAlias, MailDomain, QuotaPolicy
@@ -69,6 +89,7 @@ class DomainCreateRequest(BaseModel):
 class DomainUpdateRequest(BaseModel):
     """更新域信息的请求体。"""
 
+    name: str | None = Field(default=None, min_length=3, max_length=255)
     quota_limit_mb: int | None = Field(default=None, ge=1, le=1024 * 1024)
     status: str | None = Field(default=None, pattern="^(active|disabled)$")
 
@@ -146,6 +167,32 @@ class QuotaBulkUpdateRequest(BaseModel):
     quota_mb: int = Field(ge=1, le=1024 * 1024)
 
 
+class QueueDeleteRequest(BaseModel):
+    """删除指定队列邮件的请求体。"""
+
+    queue_id: str = Field(min_length=1, max_length=255)
+
+
+class RspamdThresholdUpdateRequest(BaseModel):
+    """更新 Rspamd 垃圾分阈值的请求体。"""
+
+    reject: float = Field(ge=0, le=100)
+    add_header: float = Field(ge=0, le=100)
+    greylist: float = Field(ge=0, le=100)
+
+
+class DkimRotateRequest(BaseModel):
+    """轮换 DKIM 私钥的请求体。"""
+
+    selector: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class TlsRenewRequest(BaseModel):
+    """TLS 续签请求体。"""
+
+    confirm: bool = True
+
+
 def _parse_uuid(value: str, *, code: str, message: str) -> UUID:
     """将字符串解析为 UUID，失败时抛出标准应用异常。"""
     try:
@@ -215,6 +262,123 @@ def _ensure_alias_no_direct_loop(source_address: str, target_addresses: list[str
             "别名目标地址不能包含自身",
             http_status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+def _email_domain(email: str) -> str:
+    """提取邮箱地址中的域名部分。"""
+    return email.strip().lower().split("@", 1)[1]
+
+
+def _resolve_target_domain(
+    db: Session,
+    *,
+    admin: AdminContext,
+    payload_domain_id: str | None,
+    email: str | None = None,
+) -> MailDomain | None:
+    """根据管理员权限、显式域 ID 或邮箱后缀推导目标域。"""
+    if admin.role == "domain_admin":
+        if admin.domain_id is None:
+            raise AppError("ADMIN_FORBIDDEN", "当前管理员未绑定域", http_status=status.HTTP_403_FORBIDDEN)
+        domain = db.get(MailDomain, admin.domain_id)
+        if domain is None:
+            raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+        if payload_domain_id and str(domain.id) != payload_domain_id:
+            raise AppError("ADMIN_FORBIDDEN", "无权操作其他域资源", http_status=status.HTTP_403_FORBIDDEN)
+        return domain
+    if payload_domain_id:
+        domain = db.get(MailDomain, _parse_uuid(payload_domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
+        if domain is None:
+            raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+        return domain
+    if email:
+        return db.scalar(select(MailDomain).where(MailDomain.name == _email_domain(email)))
+    return None
+
+
+def _load_rspamd_domains(admin: AdminContext, db: Session) -> list[MailDomain]:
+    """按当前管理员权限加载可见域名列表。"""
+    stmt = select(MailDomain).order_by(MailDomain.name.asc())
+    domains = db.scalars(stmt).all()
+    if admin.role == "domain_admin" and admin.domain_id:
+        domains = [domain for domain in domains if domain.id == admin.domain_id]
+    return domains
+
+
+def _extract_dns_check(checks: list[dict[str, object]], key: str) -> dict[str, object]:
+    """从 DNS 检测结果中提取指定检查项。"""
+    for item in checks:
+        if item.get("key") == key:
+            return item
+    return {"status": "unavailable", "detail": f"缺少 {key} 检测结果", "records": []}
+
+
+def _build_rspamd_domain_payload(domain: MailDomain) -> dict[str, Any]:
+    """构造 Rspamd 域级状态聚合结果。"""
+    dns_result = run_domain_dns_check(domain.name)
+    spf = _extract_dns_check(dns_result["checks"], "spf")
+    dmarc = _extract_dns_check(dns_result["checks"], "dmarc")
+    dkim_dns = _extract_dns_check(dns_result["checks"], "dkim")
+    dkim_local = get_domain_dkim_info(domain.name)
+    return {
+        "id": str(domain.id),
+        "name": domain.name,
+        "spf_status": spf.get("status"),
+        "spf_detail": spf.get("detail"),
+        "spf_records": spf.get("records", []),
+        "dmarc_status": dmarc.get("status"),
+        "dmarc_detail": dmarc.get("detail"),
+        "dmarc_records": dmarc.get("records", []),
+        "dkim_dns_status": dkim_dns.get("status"),
+        "dkim_dns_detail": dkim_dns.get("detail"),
+        "dkim_dns_records": dkim_dns.get("records", []),
+        "dkim_selector": dkim_local.get("selector"),
+        "dkim_local_status": dkim_local.get("status"),
+        "dkim_local_detail": dkim_local.get("detail"),
+        "dkim_key_path": dkim_local.get("path"),
+        "dkim_key_exists": dkim_local.get("exists", False),
+        "dkim_public_key": dkim_local.get("public_key"),
+    }
+
+
+def _ensure_email_matches_domain(email: str, domain: MailDomain | None) -> None:
+    """校验邮箱地址是否属于目标域。"""
+    if domain is None:
+        return
+    if _email_domain(email) != domain.name:
+        raise AppError(
+            "ADMIN_USER_DOMAIN_MISMATCH",
+            "邮箱地址与所选域不一致",
+            http_status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+def _attach_account_usage(db: Session, accounts: list[MailAccount]) -> dict[UUID, float]:
+    """为账号对象补充缓存用量，便于多个接口复用展示字段。"""
+    usage_map = load_account_usage_map(db, [account.id for account in accounts])
+    for account in accounts:
+        setattr(account, "_used_quota_mb", usage_map.get(account.id, 0.0))
+        setattr(account, "_usage_source", "cached")
+    return usage_map
+
+
+def _attach_live_quota_usage(db: Session, accounts: list[MailAccount]) -> dict[UUID, float]:
+    """优先使用 doveadm 读取实时配额，失败时回退数据库缓存聚合。"""
+    fallback_usage_map = load_account_usage_map(db, [account.id for account in accounts])
+    usage_map: dict[UUID, float] = {}
+    for account in accounts:
+        quota_result = get_mailbox_quota_usage(account.email)
+        if quota_result["status"] == "ok" and quota_result["used_quota_mb"] is not None:
+            usage_value = float(quota_result["used_quota_mb"])
+            usage_map[account.id] = usage_value
+            setattr(account, "_used_quota_mb", usage_value)
+            setattr(account, "_usage_source", quota_result["usage_source"])
+            continue
+        usage_value = fallback_usage_map.get(account.id, 0.0)
+        usage_map[account.id] = usage_value
+        setattr(account, "_used_quota_mb", usage_value)
+        setattr(account, "_usage_source", f"fallback:{quota_result['usage_source']}")
+    return usage_map
 
 
 @router.post("/auth/login", response_model=ApiResponse)
@@ -361,6 +525,7 @@ def list_domains(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     q: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
     sort: str = Query(default="name"),
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
@@ -371,6 +536,8 @@ def list_domains(
     stmt = select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.aliases))
     if q:
         stmt = stmt.where(func.lower(MailDomain.name).contains(q.strip().lower()))
+    if status_filter:
+        stmt = stmt.where(MailDomain.status == status_filter)
     if sort == "-created_at":
         stmt = stmt.order_by(MailDomain.created_at.desc())
     elif sort == "created_at":
@@ -379,6 +546,7 @@ def list_domains(
         stmt = stmt.order_by(MailDomain.name.asc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     domains = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
+    _attach_account_usage(db, [account for domain in domains for account in domain.accounts or []])
     return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[domain_to_dict(item) for item in domains]))
 
 
@@ -419,7 +587,34 @@ def get_domain(
     )
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    _attach_account_usage(db, list(domain.accounts or []))
     return success_response(request, {"domain": domain_to_dict(domain)})
+
+
+@router.get("/domains/{domain_id}/dns-check", response_model=ApiResponse)
+def check_domain_dns(
+    request: Request,
+    domain_id: str,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """检测域名的 MX / SPF / DMARC / DKIM 基础 DNS 配置。"""
+    ensure_superadmin(admin)
+    domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
+    if domain is None:
+        raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    result = run_domain_dns_check(domain.name)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.domains.dns_check",
+        success=result["status"] != "error",
+        target_type="domain",
+        target_id=str(domain.id),
+        metadata={"domain": domain.name, "status": result["status"]},
+    )
+    db.commit()
+    return success_response(request, result)
 
 
 @router.patch("/domains/{domain_id}", response_model=ApiResponse)
@@ -435,6 +630,12 @@ def update_domain(
     domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    if payload.name is not None:
+        normalized_name = _normalize_domain_name(payload.name)
+        existing = db.scalar(select(MailDomain).where(MailDomain.name == normalized_name, MailDomain.id != domain.id))
+        if existing is not None:
+            raise AppError("ADMIN_DOMAIN_EXISTS", "域名已存在", http_status=status.HTTP_400_BAD_REQUEST)
+        domain.name = normalized_name
     if payload.quota_limit_mb is not None:
         domain.quota_limit_mb = payload.quota_limit_mb
     if payload.status is not None:
@@ -486,6 +687,65 @@ def bulk_domain_status(
     return success_response(request, {"updated": len(domains)})
 
 
+@router.get("/queue", response_model=ApiResponse)
+def admin_queue_list(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """查看 Postfix 队列当前状态。"""
+    ensure_superadmin(admin)
+    result = list_mail_queue()
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.list",
+        success=result["status"] != "error",
+        target_type="mail_queue",
+        metadata={"status": result["status"], "total": result["summary"].get("total", 0)},
+    )
+    return success_response(request, result)
+
+
+@router.post("/queue/flush", response_model=ApiResponse)
+def admin_queue_flush(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """触发 Postfix 队列 flush。"""
+    ensure_superadmin(admin)
+    result = flush_mail_queue()
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.flush",
+        success=result["status"] == "ok",
+        target_type="mail_queue",
+        metadata={"status": result["status"]},
+    )
+    return success_response(request, result)
+
+
+@router.post("/queue/delete", response_model=ApiResponse)
+def admin_queue_delete(
+    request: Request,
+    payload: QueueDeleteRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """删除指定队列邮件。"""
+    ensure_superadmin(admin)
+    result = delete_mail_queue_item(payload.queue_id)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.delete",
+        success=result["status"] == "ok",
+        target_type="mail_queue",
+        target_id=payload.queue_id,
+        metadata={"status": result["status"]},
+    )
+    return success_response(request, {"queue_id": payload.queue_id, **result})
+
+
 @router.get("/users", response_model=ApiResponse)
 def list_admin_users(
     request: Request,
@@ -493,13 +753,14 @@ def list_admin_users(
     page_size: int = Query(default=20, ge=1, le=100),
     q: str | None = None,
     domain_id: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
     sort: str = Query(default="email"),
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """分页列出邮箱账号。"""
     page, page_size = normalize_pagination(page, page_size)
-    stmt = select(MailAccount)
+    stmt = select(MailAccount).options(selectinload(MailAccount.domain))
     if admin.role == "domain_admin" and admin.domain_id:
         stmt = stmt.where(MailAccount.domain_id == admin.domain_id)
     elif domain_id:
@@ -507,6 +768,8 @@ def list_admin_users(
     if q:
         keyword = q.strip().lower()
         stmt = stmt.where(or_(func.lower(MailAccount.email).contains(keyword), func.lower(func.coalesce(MailAccount.display_name, "")).contains(keyword)))
+    if status_filter:
+        stmt = stmt.where(MailAccount.status == status_filter)
     if sort == "-created_at":
         stmt = stmt.order_by(MailAccount.created_at.desc())
     elif sort == "created_at":
@@ -515,6 +778,7 @@ def list_admin_users(
         stmt = stmt.order_by(MailAccount.email.asc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
+    _attach_account_usage(db, items)
     return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[account_to_admin_dict(item) for item in items]))
 
 
@@ -526,16 +790,15 @@ def create_admin_user_account(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """创建邮箱账号。"""
-    domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效") if payload.domain_id else None
-    ensure_domain_scope(admin, domain_uuid)
     if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == payload.email.lower())):
         raise AppError("ADMIN_USER_EXISTS", "邮箱账号已存在", http_status=status.HTTP_400_BAD_REQUEST)
-    if domain_uuid is not None and db.get(MailDomain, domain_uuid) is None:
-        raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    domain = _resolve_target_domain(db, admin=admin, payload_domain_id=payload.domain_id, email=str(payload.email))
+    _ensure_email_matches_domain(str(payload.email), domain)
     account = MailAccount(
         email=payload.email.lower(),
         display_name=payload.display_name,
-        domain_id=domain_uuid,
+        domain_id=domain.id if domain else None,
+        password_hash=hash_mailbox_password(payload.password),
         quota_mb=payload.quota_mb,
         status=payload.status,
         is_admin=payload.is_admin,
@@ -550,7 +813,10 @@ def create_admin_user_account(
     db.flush()
     record_admin_audit(request, admin, "admin.users.create", success=True, target_type="mail_account", target_id=str(account.id), metadata={"email": account.email})
     db.commit()
-    db.refresh(account)
+    account = db.scalar(select(MailAccount).where(MailAccount.id == account.id).options(selectinload(MailAccount.domain)))
+    if account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    _attach_account_usage(db, [account])
     return success_response(request, {"user": account_to_admin_dict(account)})
 
 
@@ -566,6 +832,10 @@ def get_admin_user_account(
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
+    account = db.scalar(select(MailAccount).where(MailAccount.id == account.id).options(selectinload(MailAccount.domain)))
+    if account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    _attach_account_usage(db, [account])
     return success_response(request, {"user": account_to_admin_dict(account)})
 
 
@@ -583,11 +853,10 @@ def update_admin_user_account(
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
     if payload.domain_id is not None:
-        next_domain_id = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
-        ensure_domain_scope(admin, next_domain_id)
-        if db.get(MailDomain, next_domain_id) is None:
-            raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
-        account.domain_id = next_domain_id
+        next_domain = _resolve_target_domain(db, admin=admin, payload_domain_id=payload.domain_id)
+        if next_domain is not None:
+            _ensure_email_matches_domain(account.email, next_domain)
+            account.domain_id = next_domain.id
     if payload.display_name is not None:
         account.display_name = payload.display_name
     if payload.quota_mb is not None:
@@ -598,7 +867,10 @@ def update_admin_user_account(
         account.is_admin = payload.is_admin
     record_admin_audit(request, admin, "admin.users.update", success=True, target_type="mail_account", target_id=str(account.id))
     db.commit()
-    db.refresh(account)
+    account = db.scalar(select(MailAccount).where(MailAccount.id == account.id).options(selectinload(MailAccount.domain)))
+    if account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    _attach_account_usage(db, [account])
     return success_response(request, {"user": account_to_admin_dict(account)})
 
 
@@ -633,9 +905,10 @@ def reset_admin_user_password(
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
+    account.password_hash = hash_mailbox_password(payload.password)
     record_admin_audit(request, admin, "admin.users.reset_password", success=True, target_type="mail_account", target_id=user_id, metadata={"password_changed": True})
     db.commit()
-    return success_response(request, {"password_reset": True, "password": payload.password})
+    return success_response(request, {"password_reset": True})
 
 
 @router.post("/users/bulk-action", response_model=ApiResponse)
@@ -677,7 +950,7 @@ def list_aliases(
 ) -> dict[str, Any]:
     """分页列出邮件别名。"""
     page, page_size = normalize_pagination(page, page_size)
-    stmt = select(MailAlias)
+    stmt = select(MailAlias).options(selectinload(MailAlias.domain))
     if admin.role == "domain_admin" and admin.domain_id:
         stmt = stmt.where(MailAlias.domain_id == admin.domain_id)
     elif domain_id:
@@ -801,6 +1074,8 @@ def toggle_alias(
 @router.get("/quotas", response_model=ApiResponse)
 def list_quotas(
     request: Request,
+    q: str | None = None,
+    domain_id: str | None = None,
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -808,9 +1083,14 @@ def list_quotas(
     domains = db.scalars(select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.quota_policy))).all()
     if admin.role == "domain_admin" and admin.domain_id:
         domains = [item for item in domains if item.id == admin.domain_id]
+    elif domain_id:
+        domain_uuid = _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
+        domains = [item for item in domains if item.id == domain_uuid]
+    all_accounts = [account for domain in domains for account in domain.accounts or []]
+    usage_map = _attach_live_quota_usage(db, all_accounts)
     items: list[dict[str, Any]] = []
     for domain in domains:
-        used_quota_mb = sum(account.quota_mb for account in domain.accounts or [])
+        used_quota_mb = round(sum(usage_map.get(account.id, 0.0) for account in domain.accounts or []), 2)
         percentage = round((used_quota_mb / domain.quota_limit_mb) * 100, 2) if domain.quota_limit_mb else 0
         items.append(
             {
@@ -818,10 +1098,16 @@ def list_quotas(
                 "quota_limit_mb": domain.quota_limit_mb,
                 "used_quota_mb": used_quota_mb,
                 "usage_percent": percentage,
-                "status": "critical" if percentage >= 95 else "warning" if percentage >= 80 else "healthy",
+                "status": quota_usage_status(percentage),
+                "usage_source": "mixed" if any(getattr(account, "_usage_source", "").startswith("fallback:") for account in domain.accounts or []) else "doveadm",
             }
         )
-    return success_response(request, {"items": items})
+    user_items = [
+        account_to_admin_dict(account, used_quota_mb=usage_map.get(account.id, 0.0))
+        for account in all_accounts
+        if not q or q.strip().lower() in account.email.lower() or q.strip().lower() in (account.display_name or "").lower()
+    ]
+    return success_response(request, {"items": items, "user_items": user_items})
 
 
 @router.patch("/quotas/policy", response_model=ApiResponse)
@@ -867,8 +1153,40 @@ def update_user_quota(
     account.quota_mb = payload.quota_mb
     record_admin_audit(request, admin, "admin.quotas.update_user", success=True, target_type="mail_account", target_id=str(account.id), metadata={"quota_mb": payload.quota_mb})
     db.commit()
-    db.refresh(account)
+    account = db.scalar(select(MailAccount).where(MailAccount.id == account.id).options(selectinload(MailAccount.domain)))
+    if account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    usage_map = _attach_live_quota_usage(db, [account])
     return success_response(request, {"user": account_to_admin_dict(account)})
+
+
+@router.post("/users/{user_id}/quota/recalc", response_model=ApiResponse)
+def recalc_user_quota(
+    request: Request,
+    user_id: str,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """触发单个邮箱账号的真实配额重算。"""
+    account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
+    if account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    ensure_domain_scope(admin, account.domain_id)
+    result = recalc_mailbox_quota_usage(account.email)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.quotas.recalc_user",
+        success=result["status"] == "ok",
+        target_type="mail_account",
+        target_id=str(account.id),
+        metadata={"email": account.email, "status": result["status"]},
+    )
+    refreshed_account = db.scalar(select(MailAccount).where(MailAccount.id == account.id).options(selectinload(MailAccount.domain)))
+    if refreshed_account is None:
+        raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+    _attach_live_quota_usage(db, [refreshed_account])
+    return success_response(request, {"result": result, "user": account_to_admin_dict(refreshed_account)})
 
 
 @router.post("/quotas/bulk-update", response_model=ApiResponse)
@@ -923,24 +1241,155 @@ def admin_system_health(request: Request, admin: AdminContext = Depends(get_curr
     """返回后台系统健康检查结果。"""
     _ = admin
     now = datetime.now(UTC).isoformat()
-    items = [
+    database_item = {
+        "name": "database",
+        "status": "ok" if db.execute(select(1)).scalar() == 1 else "down",
+        "detail": "数据库连接正常",
+    }
+    redis_item = {
+        "name": "redis",
+        "status": "ok",
+        "detail": "Redis 已配置",
+    }
+    application_item = {
+        "name": "application",
+        "status": "ok",
+        "detail": f"应用健康检查时间 {now}",
+    }
+    service_items = list_service_health()
+    disk_items = list_disk_usage()
+    log_items = list_mail_service_logs()
+    items = [database_item, redis_item, application_item, *service_items]
+    return success_response(
+        request,
         {
-            "name": "database",
-            "status": "ok" if db.execute(select(1)).scalar() == 1 else "down",
-            "detail": "数据库连接正常",
+            "items": items,
+            "services": service_items,
+            "disks": disk_items,
+            "logs": log_items,
+            "checked_at": now,
         },
+    )
+
+
+@router.get("/rspamd", response_model=ApiResponse)
+def admin_rspamd_overview(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """返回 Rspamd 全局阈值与域级 SPF / DMARC / DKIM 聚合结果。"""
+    ensure_superadmin(admin)
+    thresholds = get_rspamd_thresholds()
+    domains = _load_rspamd_domains(admin, db)
+    domain_items = [_build_rspamd_domain_payload(domain) for domain in domains]
+    record_admin_audit(
+        request,
+        admin,
+        "admin.rspamd.overview",
+        success=thresholds["status"] != "error",
+        target_type="rspamd",
+        metadata={"domain_count": len(domain_items), "status": thresholds["status"]},
+    )
+    return success_response(
+        request,
         {
-            "name": "redis",
-            "status": "ok",
-            "detail": "Redis 已配置",
+            "thresholds": thresholds,
+            "domains": domain_items,
         },
+    )
+
+
+@router.patch("/rspamd/thresholds", response_model=ApiResponse)
+def admin_rspamd_update_thresholds(
+    request: Request,
+    payload: RspamdThresholdUpdateRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """更新 Rspamd 全局垃圾分阈值。"""
+    ensure_superadmin(admin)
+    result = update_rspamd_thresholds(
         {
-            "name": "application",
-            "status": "ok",
-            "detail": f"应用健康检查时间 {now}",
-        },
-    ]
-    return success_response(request, {"items": items, "checked_at": now})
+            "reject": payload.reject,
+            "add_header": payload.add_header,
+            "greylist": payload.greylist,
+        }
+    )
+    record_admin_audit(
+        request,
+        admin,
+        "admin.rspamd.update_thresholds",
+        success=result["status"] == "ok",
+        target_type="rspamd",
+        metadata={"status": result["status"], "thresholds": result["thresholds"]},
+    )
+    return success_response(request, result)
+
+
+@router.post("/domains/{domain_id}/dkim/rotate", response_model=ApiResponse)
+def admin_rotate_domain_dkim(
+    request: Request,
+    domain_id: str,
+    payload: DkimRotateRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """轮换指定域名的 DKIM 私钥。"""
+    ensure_superadmin(admin)
+    domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
+    if domain is None:
+        raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    result = rotate_domain_dkim_key(domain.name, selector=payload.selector)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.rspamd.rotate_dkim",
+        success=result["status"] == "ok",
+        target_type="domain",
+        target_id=str(domain.id),
+        metadata={"domain": domain.name, "status": result["status"], "selector": result.get("selector")},
+    )
+    return success_response(request, {"domain": domain.name, **result})
+
+
+@router.get("/tls", response_model=ApiResponse)
+def admin_tls_overview(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """返回当前证书状态列表。"""
+    ensure_superadmin(admin)
+    result = get_tls_certificates()
+    record_admin_audit(
+        request,
+        admin,
+        "admin.tls.overview",
+        success=result["status"] != "error",
+        target_type="tls",
+        metadata={"status": result["status"], "count": len(result.get("items", []))},
+    )
+    return success_response(request, result)
+
+
+@router.post("/tls/renew", response_model=ApiResponse)
+def admin_tls_renew(
+    request: Request,
+    payload: TlsRenewRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """触发 certbot renew。"""
+    ensure_superadmin(admin)
+    _ = payload
+    result = renew_tls_certificates()
+    record_admin_audit(
+        request,
+        admin,
+        "admin.tls.renew",
+        success=result["status"] == "ok",
+        target_type="tls",
+        metadata={"status": result["status"]},
+    )
+    return success_response(request, result)
 
 
 @router.get("/overview", response_model=ApiResponse)
@@ -952,6 +1401,7 @@ def dashboard_overview(
 ) -> dict[str, Any]:
     """返回后台仪表盘概览数据。"""
     metrics = count_dashboard_metrics(db)
+    queue_snapshot = list_mail_queue()
     recent_logs = db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(8)).all()
     return success_response(
         request,
@@ -959,7 +1409,7 @@ def dashboard_overview(
             "active_users": metrics["active_admin_total"],
             "mail_domains": metrics["domain_total"],
             "aliases": metrics["alias_total"],
-            "queued_jobs": 0,
+            "queued_jobs": queue_snapshot["summary"].get("total", 0),
             "summary": metrics,
             "recent_audits": [audit_log_to_dict(item) for item in recent_logs],
             "scope": {"role": admin.role, "domain_id": str(admin.domain_id) if admin.domain_id else None},
