@@ -5,6 +5,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Webmail 后端运行配置。
+
+    这里集中定义系统运行时所需的环境变量映射、默认值与少量派生属性，
+    以便业务代码只依赖 `get_settings()` 返回的单一配置对象。
+    """
     app_env: str = Field(default="development", alias="APP_ENV")
     app_name: str = Field(default="webmail-mvp", alias="APP_NAME")
     app_secret_key: str = Field(default="change-me-in-local-env", alias="APP_SECRET_KEY")
@@ -44,14 +49,17 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
+        """返回已清洗的跨域源列表。"""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def effective_admin_jwt_secret(self) -> str:
+        """返回后台鉴权使用的实际 JWT 密钥。"""
         return self.admin_jwt_secret or self.app_secret_key
 
     @property
     def effective_admin_bootstrap_username(self) -> str | None:
+        """返回可用于初始化后台管理员的用户名。"""
         if self.admin_bootstrap_username:
             return self.admin_bootstrap_username.strip() or None
         if self.app_env in {"development", "test"}:
@@ -60,6 +68,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_admin_bootstrap_password(self) -> str | None:
+        """返回可用于初始化后台管理员的密码。"""
         if self.admin_bootstrap_password:
             return self.admin_bootstrap_password
         if self.app_env in {"development", "test"}:
@@ -69,4 +78,10 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """获取进程内缓存的配置实例。"""
     return Settings()
+"""应用配置读取与派生配置封装。
+
+该模块统一从环境变量和 `.env` 文件读取运行参数，并提供少量派生属性，
+供数据库、认证、邮件协议与管理后台等模块复用。
+"""

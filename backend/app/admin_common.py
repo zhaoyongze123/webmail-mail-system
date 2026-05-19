@@ -1,3 +1,5 @@
+"""后台管理模块的通用上下文、权限与 DTO 转换工具。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ MAX_PAGE_SIZE = 100
 
 @dataclass(frozen=True)
 class AdminContext:
+    """当前后台请求中解析出的管理员上下文。"""
+
     user_id: UUID
     username: str
     role: str
@@ -30,21 +34,25 @@ class AdminContext:
 
 
 def utcnow() -> datetime:
+    """返回带 UTC 时区的当前时间。"""
     return datetime.now(UTC)
 
 
 def normalize_utc(value: datetime) -> datetime:
+    """将任意 datetime 规范化为 UTC 时区。"""
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 
 def get_db_session() -> Session:
+    """FastAPI 依赖项：创建一个数据库会话。"""
     session_factory = get_session_factory()
     return session_factory()
 
 
 def paginate(*, page: int, page_size: int, total: int, items: list[Any]) -> dict[str, Any]:
+    """构造通用分页响应结构。"""
     return {
         "page": page,
         "page_size": page_size,
@@ -55,12 +63,14 @@ def paginate(*, page: int, page_size: int, total: int, items: list[Any]) -> dict
 
 
 def normalize_pagination(page: int = DEFAULT_PAGE, page_size: int = DEFAULT_PAGE_SIZE) -> tuple[int, int]:
+    """将分页参数约束到安全范围内。"""
     safe_page = max(page, 1)
     safe_page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     return safe_page, safe_page_size
 
 
 def ensure_domain_scope(admin: AdminContext, domain_id: UUID | None) -> None:
+    """校验当前管理员是否有权访问指定域。"""
     if admin.role == "superadmin":
         return
     if admin.domain_id is None or domain_id != admin.domain_id:
@@ -72,6 +82,7 @@ def ensure_domain_scope(admin: AdminContext, domain_id: UUID | None) -> None:
 
 
 def ensure_superadmin(admin: AdminContext) -> None:
+    """校验当前管理员是否为超级管理员。"""
     if admin.role != "superadmin":
         raise AppError(
             "ADMIN_FORBIDDEN",
@@ -81,6 +92,7 @@ def ensure_superadmin(admin: AdminContext) -> None:
 
 
 def ensure_active_admin(user: AdminUser | None) -> AdminUser:
+    """校验管理员账号存在且启用。"""
     if user is None or not user.is_active:
         raise AppError(
             "ADMIN_AUTH_INVALID",
@@ -100,6 +112,7 @@ def record_admin_audit(
     target_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    """记录后台管理操作审计日志。"""
     payload = dict(metadata or {})
     payload.setdefault("admin_username", admin.username)
     record_audit_event(
@@ -115,6 +128,7 @@ def record_admin_audit(
 
 
 def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
+    """将域对象转换为后台接口输出字典。"""
     user_count = len(domain.accounts or [])
     alias_count = len(domain.aliases or [])
     used_quota_mb = sum(account.quota_mb for account in domain.accounts or [])
@@ -133,6 +147,7 @@ def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
 
 
 def account_to_admin_dict(account: MailAccount) -> dict[str, Any]:
+    """将邮箱账号转换为后台接口输出字典。"""
     return {
         "id": str(account.id),
         "name": account.display_name or account.email,
@@ -150,6 +165,7 @@ def account_to_admin_dict(account: MailAccount) -> dict[str, Any]:
 
 
 def alias_to_dict(alias: MailAlias) -> dict[str, Any]:
+    """将别名对象转换为后台接口输出字典。"""
     return {
         "id": str(alias.id),
         "name": alias.source_address,
@@ -165,6 +181,7 @@ def alias_to_dict(alias: MailAlias) -> dict[str, Any]:
 
 
 def quota_policy_to_dict(policy: QuotaPolicy | None, *, domain: MailDomain | None = None) -> dict[str, Any]:
+    """将配额策略转换为后台接口输出字典。"""
     return {
         "id": str(policy.id) if policy else None,
         "name": domain.name if domain else "全局默认",
@@ -179,6 +196,7 @@ def quota_policy_to_dict(policy: QuotaPolicy | None, *, domain: MailDomain | Non
 
 
 def audit_log_to_dict(log: AuditLog) -> dict[str, Any]:
+    """将审计日志对象转换为后台接口输出字典。"""
     return {
         "id": str(log.id),
         "actor": log.actor_id or log.account_id or "system",
@@ -199,6 +217,7 @@ def audit_log_to_dict(log: AuditLog) -> dict[str, Any]:
 
 
 def cleanup_refresh_tokens(db: Session, *, user_id: UUID | None = None) -> None:
+    """清理已过期的后台刷新令牌。"""
     stmt = select(AdminRefreshToken).where(AdminRefreshToken.revoked_at.is_(None))
     if user_id is not None:
         stmt = stmt.where(AdminRefreshToken.admin_user_id == user_id)
@@ -208,6 +227,7 @@ def cleanup_refresh_tokens(db: Session, *, user_id: UUID | None = None) -> None:
 
 
 def count_dashboard_metrics(db: Session) -> dict[str, int]:
+    """统计后台仪表盘所需的核心指标。"""
     return {
         "domain_total": int(db.scalar(select(func.count()).select_from(MailDomain)) or 0),
         "user_total": int(db.scalar(select(func.count()).select_from(MailAccount)) or 0),

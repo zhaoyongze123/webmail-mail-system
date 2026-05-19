@@ -1,3 +1,5 @@
+"""请求中间件与请求标识注入逻辑。"""
+
 from collections.abc import Awaitable, Callable
 from time import perf_counter
 from uuid import uuid4
@@ -13,6 +15,7 @@ async def request_id_middleware(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],
 ) -> Response:
+    """为每个请求补充 request_id，并记录请求耗时日志。"""
     request_id = request.headers.get(REQUEST_ID_HEADER) or f"req_{uuid4().hex}"
     request.state.request_id = request_id
     started_at = perf_counter()

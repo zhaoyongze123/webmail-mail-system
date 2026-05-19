@@ -1,3 +1,9 @@
+"""联系人与收件人规则管理。
+
+负责联系人 CRUD、最近联系人缓存、黑白名单规则，以及发送邮件过程中的
+联系人自动沉淀。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,20 +39,26 @@ MAX_PAGE_SIZE = 100
 
 @dataclass(frozen=True)
 class ContactItem:
+    """最近联系人缓存项。"""
+
     email: str
     last_used_at: str
 
     def as_dict(self) -> dict[str, str]:
+        """转换为可直接返回给前端的字典。"""
         return {"email": self.email, "last_used_at": self.last_used_at}
 
 
 @dataclass(frozen=True)
 class ContactRuleState:
+    """联系人黑白名单状态。"""
+
     is_blacklisted: bool = False
     is_whitelisted: bool = False
 
     @property
     def effective_rule(self) -> str:
+        """返回最终生效的联系人规则。"""
         if self.is_whitelisted:
             return "whitelist"
         if self.is_blacklisted:
@@ -55,10 +67,12 @@ class ContactRuleState:
 
 
 def _normalize_email(email: str) -> str:
+    """统一邮箱地址格式。"""
     return email.strip().lower()
 
 
 def _normalize_text(value: str | None) -> str | None:
+    """清理普通文本输入的空白。"""
     if value is None:
         return None
     normalized = value.strip()
@@ -66,31 +80,38 @@ def _normalize_text(value: str | None) -> str | None:
 
 
 def _normalize_tag(value: str) -> str:
+    """清理标签文本。"""
     return value.strip()
 
 
 def _recent_contacts_key(email: str) -> str:
+    """生成最近联系人缓存 key。"""
     return f"contacts:recent:{_normalize_email(email)}"
 
 
 def _contact_used_at() -> datetime:
+    """返回联系人最近使用时间。"""
     return datetime.now(timezone.utc)
 
 
 def _now() -> datetime:
+    """返回当前 UTC 时间。"""
     return datetime.now(timezone.utc)
 
 
 def _session_scope():
+    """延迟获取数据库 session factory。"""
     return get_session_factory()
 
 
 def _get_account(db_session, email: str) -> MailAccount | None:
+    """按邮箱地址读取账号。"""
     normalized_email = _normalize_email(email)
     return db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
 
 
 def _ensure_account(db_session, email: str) -> MailAccount:
+    """确保联系人操作对应的邮箱账号存在。"""
     settings = get_settings()
     normalized_email = _normalize_email(email)
     account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
@@ -110,6 +131,7 @@ def _ensure_account(db_session, email: str) -> MailAccount:
 
 
 def _contact_tag_items(contact: MailContact) -> list[ContactTagItem]:
+    """把标签模型转换为响应对象。"""
     return [
         ContactTagItem(name=tag.name, created_at=tag.created_at.isoformat() if tag.created_at else "")
         for tag in sorted(contact.tags, key=lambda item: item.name)
@@ -117,6 +139,7 @@ def _contact_tag_items(contact: MailContact) -> list[ContactTagItem]:
 
 
 def _contact_response(contact: MailContact) -> ContactResponse:
+    """把联系人模型转换为标准响应结构。"""
     return ContactResponse(
         id=str(contact.id),
         email=contact.email,
@@ -138,6 +161,7 @@ def _contact_response(contact: MailContact) -> ContactResponse:
 
 
 def _contact_rule_state(contact: MailContact | None) -> ContactRuleState:
+    """从联系人模型推导规则状态。"""
     if contact is None:
         return ContactRuleState()
     return ContactRuleState(
@@ -147,6 +171,7 @@ def _contact_rule_state(contact: MailContact | None) -> ContactRuleState:
 
 
 def _contact_query(db_session, account_id: UUIDType, query: str | None = None):
+    """构造联系人列表/搜索的基础查询。"""
     stmt = select(MailContact).where(MailContact.account_id == account_id)
     query_text = _normalize_text(query)
     if query_text:
@@ -165,6 +190,7 @@ def _contact_query(db_session, account_id: UUIDType, query: str | None = None):
 
 
 def _upsert_tags(db_session, contact: MailContact, tags: list[str]) -> None:
+    """按目标标签集合增量同步联系人标签。"""
     normalized = []
     seen = set()
     for tag in tags:
@@ -190,6 +216,7 @@ def _upsert_tags(db_session, contact: MailContact, tags: list[str]) -> None:
 
 
 def _safe_commit(operation: str, callback) -> Any | None:
+    """统一包装联系人相关数据库事务。"""
     try:
         session_factory = _session_scope()
         with session_factory() as db_session:
@@ -203,6 +230,7 @@ def _safe_commit(operation: str, callback) -> Any | None:
 
 
 def get_contact_rule_state(session: AuthSession, email: str) -> dict[str, bool | str]:
+    """查询某个邮箱地址在当前账号下的黑白名单状态。"""
     normalized_email = _normalize_email(email)
     default_state = ContactRuleState()
     default_result = {
@@ -234,6 +262,7 @@ def get_contact_rule_state(session: AuthSession, email: str) -> dict[str, bool |
 
 
 def record_recent_contacts(session: AuthSession, recipients: list[str]) -> None:
+    """记录最近联系人并触发联系人沉淀。"""
     recent_contacts_key = _recent_contacts_key(session.email)
     redis = redis_client.get_redis_client()
     used_at = _contact_used_at()
@@ -262,6 +291,7 @@ def upsert_contact_from_recipient(
     is_blacklisted: bool | None = None,
     is_whitelisted: bool | None = None,
 ) -> ContactResponse | None:
+    """按收件人地址新增或刷新联系人，并累计使用次数。"""
     email = _normalize_email(recipient)
     if not email:
         return None
@@ -303,6 +333,7 @@ def upsert_contact_from_recipient(
 
 
 def sync_contacts_from_recipients(session: AuthSession, recipients: list[str]) -> list[ContactResponse]:
+    """批量把收件人列表同步到联系人表。"""
     synced: list[ContactResponse] = []
     for recipient in recipients:
         contact = upsert_contact_from_recipient(session, recipient)
@@ -312,6 +343,7 @@ def sync_contacts_from_recipients(session: AuthSession, recipients: list[str]) -
 
 
 def search_recent_contacts(session: AuthSession, query: str | None = None, limit: int = AUTOCOMPLETE_LIMIT) -> list[dict[str, Any]]:
+    """从 Redis 最近联系人集合中检索自动补全候选。"""
     redis = redis_client.get_redis_client()
     key = _recent_contacts_key(session.email)
     query_text = (query or "").strip().lower()
@@ -343,6 +375,7 @@ def list_contacts(
     group_name: str | None = None,
     tag: str | None = None,
 ) -> dict[str, Any]:
+    """分页查询当前账号的联系人列表，支持关键字、分组和标签过滤。"""
     def read(db_session):
         account = _get_account(db_session, session.email)
         if account is None:
@@ -384,6 +417,7 @@ def list_contacts(
 
 
 def get_contact(session: AuthSession, contact_id: str) -> dict[str, Any]:
+    """读取当前账号下单个联系人的详情。"""
     def read(db_session):
         account = _get_account(db_session, session.email)
         if account is None:
@@ -401,6 +435,7 @@ def get_contact(session: AuthSession, contact_id: str) -> dict[str, Any]:
 
 
 def create_contact(session: AuthSession, payload: ContactCreateRequest) -> dict[str, Any]:
+    """创建手工联系人并写入标签信息。"""
     def write(db_session):
         account = _ensure_account(db_session, session.email)
         existing = db_session.scalar(
@@ -437,6 +472,7 @@ def create_contact(session: AuthSession, payload: ContactCreateRequest) -> dict[
 
 
 def update_contact(session: AuthSession, contact_id: str, payload: ContactUpdateRequest) -> dict[str, Any]:
+    """更新联系人可编辑字段，并按需重建标签集合。"""
     def write(db_session):
         account = _get_account(db_session, session.email)
         if account is None:
@@ -475,6 +511,7 @@ def update_contact(session: AuthSession, contact_id: str, payload: ContactUpdate
 
 
 def delete_contact(session: AuthSession, contact_id: str) -> dict[str, Any]:
+    """删除指定联系人。"""
     def write(db_session):
         account = _get_account(db_session, session.email)
         if account is None:
@@ -502,6 +539,7 @@ def search_contacts(
     group_name: str | None = None,
     tag: str | None = None,
 ) -> dict[str, Any]:
+    """通讯录检索别名，复用分页联系人查询逻辑。"""
     return list_contacts(session, query, page=page, page_size=page_size, group_name=group_name, tag=tag)
 
 
@@ -510,6 +548,7 @@ def search_contacts_for_autocomplete(
     query: str | None = None,
     limit: int = AUTOCOMPLETE_LIMIT,
 ) -> ContactSearchResponse:
+    """合并最近联系人与通讯录命中结果，生成自动补全列表。"""
     recent_contacts = search_recent_contacts(session, query=query, limit=limit)
     try:
         page_data = search_contacts(session, query=query, page=1, page_size=limit)
@@ -526,6 +565,7 @@ def search_contacts_for_autocomplete(
 
 
 def upsert_contacts_from_recipients(session: AuthSession, recipients: list[str]) -> None:
+    """批量同步收件人列表，失败时静默降级。"""
     if not recipients:
         return
     try:
@@ -535,6 +575,7 @@ def upsert_contacts_from_recipients(session: AuthSession, recipients: list[str])
 
 
 def list_blacklisted_contacts(session: AuthSession) -> list[str]:
+    """返回当前账号通讯录中被标记为黑名单的邮箱。"""
     try:
         def read(db_session):
             account = _get_account(db_session, session.email)
@@ -555,6 +596,7 @@ def list_blacklisted_contacts(session: AuthSession) -> list[str]:
 
 
 def list_whitelisted_contacts(session: AuthSession) -> list[str]:
+    """返回当前账号通讯录中被标记为白名单的邮箱。"""
     try:
         def read(db_session):
             account = _get_account(db_session, session.email)
@@ -575,6 +617,7 @@ def list_whitelisted_contacts(session: AuthSession) -> list[str]:
 
 
 def is_blacklisted_email(session: AuthSession, email: str) -> bool:
+    """判断某个邮箱地址是否在当前账号的黑名单中。"""
     normalized_email = _normalize_email(email)
     if not normalized_email:
         return False

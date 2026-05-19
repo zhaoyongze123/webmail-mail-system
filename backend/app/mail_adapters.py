@@ -1,3 +1,9 @@
+"""邮件协议适配层。
+
+这个模块把底层的 IMAP/SMTP 标准库封装成统一接口，供认证、收信、
+发信、草稿等业务模块复用。
+"""
+
 from __future__ import annotations
 
 import base64
@@ -10,6 +16,8 @@ from typing import Any, Iterable
 
 
 class MailAdapterError(Exception):
+    """统一的邮件适配器异常，附带失败操作名。"""
+
     def __init__(self, message: str, *, operation: str | None = None) -> None:
         self.operation = operation
         super().__init__(message)
@@ -17,6 +25,8 @@ class MailAdapterError(Exception):
 
 @dataclass(slots=True)
 class ImapSettings:
+    """IMAP 连接参数。"""
+
     host: str
     username: str
     password: str
@@ -31,6 +41,8 @@ class ImapSettings:
 
 @dataclass(slots=True)
 class SmtpSettings:
+    """SMTP 连接参数。"""
+
     host: str
     username: str
     password: str
@@ -42,22 +54,26 @@ class SmtpSettings:
 
 
 def _format_error(operation: str, exc: Exception) -> MailAdapterError:
+    """把底层异常包装成项目内统一异常。"""
     return MailAdapterError(f"{operation}失败: {exc}", operation=operation)
 
 
 def _decode_text(value: bytes | str) -> str:
+    """把 bytes/str 统一转换为字符串。"""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
 
 
 def _search_criteria_args(criteria: str | Iterable[str]) -> tuple[str, ...]:
+    """把搜索条件规范为 IMAP 可接受的参数元组。"""
     if isinstance(criteria, str):
         return (criteria,)
     return tuple(str(item) for item in criteria)
 
 
 def _parse_status_response(raw: str) -> dict[str, int]:
+    """解析 IMAP STATUS 原始响应。"""
     if "(" in raw and ")" in raw:
         raw = raw.split("(", 1)[1].rsplit(")", 1)[0]
     parts = raw.replace("\r", " ").replace("\n", " ").split()
@@ -72,6 +88,7 @@ def _parse_status_response(raw: str) -> dict[str, int]:
 
 
 def _encode_modified_utf7(value: str) -> str:
+    """把文件夹名编码为 IMAP Modified UTF-7。"""
     if not value:
         return value
     chunks: list[str] = []
@@ -97,6 +114,7 @@ def _encode_modified_utf7(value: str) -> str:
 
 
 def _decode_modified_utf7(value: str) -> str:
+    """把 IMAP Modified UTF-7 解码成人类可读字符串。"""
     if "&" not in value:
         return value
 
@@ -123,22 +141,27 @@ def _decode_modified_utf7(value: str) -> str:
 
 
 def _encode_mailbox_name(value: str) -> str:
+    """在发送 IMAP 命令前编码文件夹名称。"""
     if any(ord(char) > 0x7F or char == "&" for char in value):
         return _encode_modified_utf7(value)
     return value
 
 
 class ImapAdapter:
+    """对 ``imaplib`` 的轻量封装。"""
+
     def __init__(self, settings: ImapSettings) -> None:
         self.settings = settings
         self._client: Any | None = None
 
     def _default_port(self) -> int:
+        """根据连接模式计算默认端口。"""
         if self.settings.port is not None:
             return self.settings.port
         return 993 if self.settings.use_ssl else 143
 
     def _ensure_client(self) -> Any:
+        """确保底层 IMAP 客户端已初始化。"""
         if self._client is None:
             self.connect()
         if self._client is None:
@@ -146,6 +169,7 @@ class ImapAdapter:
         return self._client
 
     def connect(self) -> "ImapAdapter":
+        """建立 IMAP 连接。"""
         if self._client is not None:
             return self
         try:
@@ -181,6 +205,7 @@ class ImapAdapter:
             raise _format_error("IMAP 连接", exc) from exc
 
     def login(self) -> "ImapAdapter":
+        """执行 IMAP 登录。"""
         client = self._ensure_client()
         try:
             client.login(self.settings.username, self.settings.password)
@@ -195,6 +220,7 @@ class ImapAdapter:
             raise _format_error("IMAP 登录", exc) from exc
 
     def logout(self) -> None:
+        """关闭 IMAP 会话。"""
         if self._client is None:
             return
         try:
@@ -211,6 +237,7 @@ class ImapAdapter:
             self._client = None
 
     def capability(self) -> list[str]:
+        """查询服务器支持的 IMAP 能力。"""
         client = self._ensure_client()
         try:
             status, data = client.capability()
@@ -228,6 +255,7 @@ class ImapAdapter:
             raise _format_error("IMAP 能力查询", exc) from exc
 
     def list_folders(self) -> list[str]:
+        """列出邮箱中的全部文件夹。"""
         client = self._ensure_client()
         try:
             status, data = client.list()
@@ -498,6 +526,8 @@ class ImapAdapter:
 
 
 class SmtpAdapter:
+    """对 `smtplib` 的轻量封装，统一 SMTP 连接、登录和发信异常。"""
+
     def __init__(self, settings: SmtpSettings) -> None:
         self.settings = settings
         self._client: Any | None = None

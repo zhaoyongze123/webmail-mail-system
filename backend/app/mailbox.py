@@ -1,3 +1,9 @@
+"""收信、读信、搜索与邮件操作核心逻辑。
+
+这个模块负责 IMAP 文件夹映射、邮件正文与附件解析、富文本安全清洗、
+列表/详情缓存，以及邮件批量操作。
+"""
+
 from __future__ import annotations
 
 import html
@@ -121,10 +127,13 @@ ALLOWED_CSS_PROPERTIES = [
 
 
 class _SimpleCSSSanitizer:
+    """对白名单 CSS 属性做最小化清洗。"""
+
     def __init__(self, allowed_css_properties: list[str]) -> None:
         self.allowed_css_properties = set(allowed_css_properties)
 
     def sanitize_css(self, style: str) -> str:
+        """清洗行内 style，只保留安全属性和值。"""
         safe_rules: list[str] = []
         for raw_rule in style.split(";"):
             property_name, separator, raw_value = raw_rule.partition(":")
@@ -145,6 +154,7 @@ class _SimpleCSSSanitizer:
 
 
 def _allowed_html_attr(tag: str, name: str, value: str) -> bool:
+    """判断某个 HTML 属性是否允许保留。"""
     if name in {"class", "style"}:
         return True
     if tag == "a":
@@ -167,6 +177,7 @@ def _allowed_html_attr(tag: str, name: str, value: str) -> bool:
 
 
 def _sanitize_style_block(css: str) -> str:
+    """清洗 `<style>` 块中的 CSS 规则。"""
     safe_rules: list[str] = []
     for rule in tinycss2.parse_rule_list(css, skip_comments=True, skip_whitespace=True):
         if rule.type != "qualified-rule":
@@ -196,6 +207,7 @@ def _sanitize_style_block(css: str) -> str:
 
 
 def _sanitize_style_blocks(value: str) -> str:
+    """遍历并替换 HTML 中所有 `<style>` 块。"""
     def replace_style(match: re.Match[str]) -> str:
         sanitized = _sanitize_style_block(match.group(1))
         return f"<style>{sanitized}</style>" if sanitized else ""
@@ -204,6 +216,7 @@ def _sanitize_style_blocks(value: str) -> str:
 
 
 def _inline_safe_css(value: str) -> str:
+    """尽量把安全 CSS 内联进 HTML，便于邮件客户端展示。"""
     sanitized_html = _sanitize_style_blocks(value)
     try:
         return transform(sanitized_html, allow_network=False, remove_classes=False, disable_leftover_css=True)
@@ -213,6 +226,8 @@ def _inline_safe_css(value: str) -> str:
 
 @dataclass(frozen=True)
 class MailboxPage:
+    """消息列表分页结果。"""
+
     folder: str
     page: int
     page_size: int
@@ -222,12 +237,15 @@ class MailboxPage:
 
 
 class MessageOperationRequest(BaseModel):
+    """邮件批量操作请求体。"""
+
     action: str
     uids: list[str] = Field(default_factory=list)
     target_folder: str | None = None
 
     @model_validator(mode="after")
     def validate_payload(self) -> "MessageOperationRequest":
+        """校验操作类型、UID 列表和移动目标。"""
         if not self.uids:
             raise ValueError("至少需要选择一封邮件")
         allowed = {"mark_read", "mark_unread", "delete", "move", "flag", "star", "unflag", "unstar"}
@@ -239,6 +257,7 @@ class MessageOperationRequest(BaseModel):
 
 
 def _imap_settings(session: AuthSession) -> ImapSettings:
+    """根据当前登录会话构造 IMAP 参数。"""
     imap_config = session.imap
     return ImapSettings(
         host=str(imap_config.get("host") or get_settings().mail_imap_host),
@@ -254,6 +273,7 @@ def _imap_settings(session: AuthSession) -> ImapSettings:
 
 
 def _connect_imap(session: AuthSession) -> ImapAdapter:
+    """建立并登录 IMAP 会话。"""
     adapter = mail_adapters.ImapAdapter(_imap_settings(session))
     try:
         return adapter.connect().login()
@@ -267,6 +287,7 @@ def _connect_imap(session: AuthSession) -> ImapAdapter:
 
 
 def _folder_name_from_list_line(line: str) -> str:
+    """从 IMAP LIST 返回行中提取实际文件夹名称。"""
     match = re.search(r'"([^"]+)"\s*$', line.strip())
     if match:
         return match.group(1)
@@ -274,6 +295,7 @@ def _folder_name_from_list_line(line: str) -> str:
 
 
 def _folder_match_score(candidate: str, aliases: tuple[str, ...]) -> int:
+    """为系统文件夹别名匹配打分，分值越高越接近。"""
     normalized = candidate.strip().strip('"').lstrip(".").upper()
     for alias in aliases:
         alias_normalized = alias.lstrip(".").upper()
@@ -287,6 +309,7 @@ def _folder_match_score(candidate: str, aliases: tuple[str, ...]) -> int:
 
 
 def _resolve_system_folder(existing: list[str], canonical: str, aliases: tuple[str, ...]) -> str:
+    """在现有文件夹里找出最匹配某个系统文件夹的实际名称。"""
     scored = sorted(
         ((name, _folder_match_score(name, aliases)) for name in existing),
         key=lambda item: item[1],
@@ -298,6 +321,7 @@ def _resolve_system_folder(existing: list[str], canonical: str, aliases: tuple[s
 
 
 def _status_dict(status_result: Any) -> dict[str, int]:
+    """把 IMAP STATUS 响应统一转换为键值字典。"""
     if isinstance(status_result, dict):
         return {str(key).upper(): int(value) for key, value in status_result.items()}
     if isinstance(status_result, tuple) and len(status_result) >= 2:
@@ -311,6 +335,7 @@ def _status_dict(status_result: Any) -> dict[str, int]:
 
 
 def _system_folder_map(existing: list[str]) -> dict[str, str]:
+    """建立系统文件夹规范名到实际文件夹名的映射。"""
     return {
         canonical: _resolve_system_folder(existing, canonical, aliases)
         for canonical, _folder_type, _display_name, aliases in SYSTEM_FOLDERS
@@ -318,11 +343,13 @@ def _system_folder_map(existing: list[str]) -> dict[str, str]:
 
 
 def _is_protected_folder(folder: str, folder_map: dict[str, str]) -> bool:
+    """判断某个文件夹是否属于系统保留文件夹。"""
     normalized = folder.strip().strip('"')
     return normalized in folder_map or normalized in folder_map.values()
 
 
 def _folder_exists(folder_name: str, existing: list[str]) -> bool:
+    """判断指定文件夹名称是否已经存在。"""
     normalized = folder_name.strip().strip('"')
     if not normalized:
         return False
@@ -331,24 +358,28 @@ def _folder_exists(folder_name: str, existing: list[str]) -> bool:
 
 
 def _resolved_target_folder(target_folder: str | None, folder_map: dict[str, str]) -> str | None:
+    """把前端传入的目标文件夹名转换成 IMAP 实际文件夹名。"""
     if target_folder is None:
         return None
     return folder_map.get(target_folder, target_folder)
 
 
 def _uid_search(adapter: Any, criteria: str) -> list[str]:
+    """兼容不同 adapter 方法名，返回字符串形式的 UID 列表。"""
     if hasattr(adapter, "uid_search"):
         return [str(uid) for uid in adapter.uid_search(criteria)]
     return [str(uid) for uid in adapter.search_uids(criteria)]
 
 
 def _uid_fetch_message_bytes(adapter: Any, uid: str) -> bytes:
+    """兼容不同 adapter 方法名，抓取单封邮件原始字节流。"""
     if hasattr(adapter, "uid_fetch_message_bytes"):
         return adapter.uid_fetch_message_bytes(uid)
     return adapter.fetch_message_bytes(uid)
 
 
 def _normalize_sender_email(row: dict[str, Any]) -> str:
+    """从邮件摘要行中提取并规范化发件人邮箱。"""
     sender = row.get("sender")
     if not isinstance(sender, dict):
         return ""
@@ -356,6 +387,7 @@ def _normalize_sender_email(row: dict[str, Any]) -> str:
 
 
 def _remove_message_records(email: str, folder_name: str, uids: list[str]) -> None:
+    """删除本地数据库中已被移动或删除的邮件缓存记录。"""
     normalized_email = email.strip().lower()
     uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
     if not uid_values:
@@ -399,6 +431,7 @@ def _remove_message_records(email: str, folder_name: str, uids: list[str]) -> No
 
 
 def _sync_folder_snapshot(email: str, adapter: Any) -> list[dict[str, Any]]:
+    """从 IMAP 拉取文件夹快照并同步到本地状态表。"""
     raw_folders = adapter.list_folders()
     existing = [_folder_name_from_list_line(line) for line in raw_folders]
     folders: list[dict[str, Any]] = []
@@ -440,6 +473,7 @@ def _sync_folder_snapshot(email: str, adapter: Any) -> list[dict[str, Any]]:
 
 
 def _move_blacklisted_messages(session: AuthSession, adapter: Any, folder: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把命中黑名单且未被白名单豁免的邮件自动搬到垃圾箱。"""
     blacklisted_emails = set(list_blacklisted_contacts(session))
     whitelisted_emails = set(list_whitelisted_contacts(session))
     if not blacklisted_emails:
@@ -466,6 +500,7 @@ def _move_blacklisted_messages(session: AuthSession, adapter: Any, folder: str, 
 
 
 def list_folders(session: AuthSession) -> list[dict[str, Any]]:
+    """列出当前账号所有文件夹，并附带未读和总数信息。"""
     adapter = _connect_imap(session)
     try:
         ensure_mail_account(session.email)
@@ -482,6 +517,7 @@ def list_folders(session: AuthSession) -> list[dict[str, Any]]:
 
 
 def create_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
+    """创建一个新的自定义 IMAP 文件夹。"""
     normalized_name = folder_name.strip()
     if not normalized_name:
         raise AppError("FOLDER_NAME_REQUIRED", "文件夹名称不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
@@ -507,6 +543,7 @@ def create_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
 
 
 def rename_folder(session: AuthSession, folder_name: str, new_name: str) -> dict[str, Any]:
+    """重命名一个已有的自定义 IMAP 文件夹。"""
     old_name = folder_name.strip()
     updated_name = new_name.strip()
     if not old_name or not updated_name:
@@ -535,6 +572,7 @@ def rename_folder(session: AuthSession, folder_name: str, new_name: str) -> dict
 
 
 def delete_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
+    """删除一个已有的自定义 IMAP 文件夹。"""
     normalized_name = folder_name.strip()
     if not normalized_name:
         raise AppError("FOLDER_NAME_REQUIRED", "文件夹名称不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
@@ -560,6 +598,7 @@ def delete_folder(session: AuthSession, folder_name: str) -> dict[str, Any]:
 
 
 def _decode_header_value(value: str | None) -> str:
+    """解码 MIME 头字段，尽量返回人类可读文本。"""
     if not value:
         return ""
     try:
@@ -569,6 +608,7 @@ def _decode_header_value(value: str | None) -> str:
 
 
 def _addresses(value: str | None) -> list[dict[str, str]]:
+    """把邮件头地址字段解析成统一的姓名和邮箱列表。"""
     result = []
     for name, email_address in getaddresses([value or ""]):
         if not email_address:
@@ -578,6 +618,7 @@ def _addresses(value: str | None) -> list[dict[str, str]]:
 
 
 def _message_datetime(message: Message) -> datetime | None:
+    """解析邮件 Date 头并返回带时区的时间对象。"""
     value = message.get("Date")
     if not value:
         return None
@@ -591,16 +632,19 @@ def _message_datetime(message: Message) -> datetime | None:
 
 
 def _safe_filename(value: str) -> str:
+    """清理附件文件名，移除路径和危险控制字符。"""
     name = value.replace("\\", "/").split("/")[-1].strip()
     name = re.sub(r"[\r\n\x00]+", "", name)
     return name or "attachment"
 
 
 def _attachment_id(index: int) -> str:
+    """根据附件顺序生成稳定的附件标识。"""
     return f"att_{index}"
 
 
 def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str, str, list[dict[str, Any]]]:
+    """提取邮件 HTML、纯文本正文以及附件列表。"""
     html_body = ""
     text_body = ""
     attachments: list[dict[str, Any]] = []
@@ -636,6 +680,7 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
 
 
 def _clean_html(value: str) -> str:
+    """对 HTML 邮件正文做安全清洗，同时尽量保留样式表现。"""
     value = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", value)
     value = _inline_safe_css(value)
     clean_options: dict[str, Any] = {
@@ -665,6 +710,7 @@ def _clean_html(value: str) -> str:
 
 
 def _link_attrs(attrs: dict[tuple[str | None, str], str], new: bool = False) -> dict[tuple[str | None, str], str]:
+    """为正文中的链接补安全属性，并剔除危险 href。"""
     href_key = (None, "href")
     href = attrs.get(href_key, "")
     if href.lower().startswith("javascript:"):
@@ -675,15 +721,18 @@ def _link_attrs(attrs: dict[tuple[str | None, str], str], new: bool = False) -> 
 
 
 def _text_to_html(value: str) -> str:
+    """把纯文本正文转成简单 HTML 以便前端展示。"""
     return "<br>".join(html.escape(value).splitlines())
 
 
 def _snippet(html_body: str, text_body: str) -> str:
+    """生成邮件列表展示用的短摘要。"""
     source = text_body or re.sub(r"<[^>]+>", " ", html_body)
     return re.sub(r"\s+", " ", source).strip()[:180]
 
 
 def _attachment_category(content_type: str) -> str:
+    """按 MIME 类型把附件归类为图片、文档、压缩包等类别。"""
     lowered = content_type.strip().lower()
     if lowered.startswith("image/"):
         return "image"
@@ -727,12 +776,14 @@ def _attachment_category(content_type: str) -> str:
 
 
 def _read_flag(message: Message) -> bool:
+    """从邮件头信息推断这封邮件是否已读。"""
     flags = " ".join(message.get_all("X-IMAP-Flags", []))
     status_value = message.get("Status", "")
     return "\\Seen" in flags or "R" in status_value
 
 
 def _message_summary(uid: str, raw: bytes) -> dict[str, Any]:
+    """把原始邮件字节解析成列表页所需的摘要结构。"""
     message = message_from_bytes(raw, policy=default)
     html_body, text_body, attachments = _body_parts(message)
     sent_at = _message_datetime(message)
@@ -757,6 +808,7 @@ def _message_summary(uid: str, raw: bytes) -> dict[str, Any]:
 
 
 def _message_list_item(row: dict[str, Any]) -> dict[str, Any]:
+    """裁剪摘要数据，只保留列表接口需要暴露的字段。"""
     return {
         "uid": str(row.get("uid") or ""),
         "message_id": row.get("message_id"),
@@ -773,6 +825,7 @@ def _message_list_item(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _message_detail(uid: str, raw: bytes) -> dict[str, Any]:
+    """把原始邮件字节解析成详情页需要的完整结构。"""
     message = message_from_bytes(raw, policy=default)
     html_body, text_body, attachments = _body_parts(message)
     safe_html = _clean_html(html_body) if html_body else _text_to_html(text_body)
@@ -793,6 +846,7 @@ def _message_detail(uid: str, raw: bytes) -> dict[str, Any]:
 
 
 def _message_cache_key(email: str, folder: str, page: int, page_size: int) -> str:
+    """生成列表分页缓存键。"""
     return f"mail:list:{email}:{folder}:{page}:{page_size}"
 
 
@@ -807,6 +861,7 @@ def _search_cache_key(
     date_to: date | None = None,
     has_attachments: bool | None = None,
 ) -> str:
+    """生成带搜索条件的缓存键。"""
     return ":".join(
         [
             "mail",
@@ -825,6 +880,7 @@ def _search_cache_key(
 
 
 def _message_search_text(row: dict[str, Any]) -> str:
+    """汇总主题、发件人、正文和收件人，生成全文检索文本。"""
     sender = row.get("sender") if isinstance(row.get("sender"), dict) else {}
     recipients = row.get("to") if isinstance(row.get("to"), list) else []
     cc_recipients = row.get("cc") if isinstance(row.get("cc"), list) else []
@@ -846,10 +902,12 @@ def _message_search_text(row: dict[str, Any]) -> str:
 
 
 def _message_detail_cache_key(email: str, folder: str, uid: str) -> str:
+    """生成单封邮件详情缓存键。"""
     return f"mail:detail:{email.strip().lower()}:{folder}:{uid}"
 
 
 def _invalidate_message_cache(email: str, folders: list[str]) -> None:
+    """清理受影响文件夹的列表、搜索和详情缓存。"""
     normalized_email = email.strip().lower()
     unique_folders = [folder.strip() for folder in dict.fromkeys(folder for folder in folders if folder and folder.strip())]
     if not unique_folders:
@@ -869,6 +927,7 @@ def _invalidate_message_cache(email: str, folders: list[str]) -> None:
 
 
 def _parse_message_date(value: str | None) -> datetime | None:
+    """把 ISO 时间字符串安全解析为 `datetime`。"""
     if not value:
         return None
     try:
@@ -879,6 +938,7 @@ def _parse_message_date(value: str | None) -> datetime | None:
 
 
 def _datetime_to_iso(value: datetime | None) -> str | None:
+    """把时间对象标准化为 ISO 字符串。"""
     if value is None:
         return None
     if value.tzinfo is None:
@@ -887,12 +947,14 @@ def _datetime_to_iso(value: datetime | None) -> str | None:
 
 
 def _message_matches_attachment_state(message: dict[str, Any], has_attachments: bool | None) -> bool:
+    """判断邮件是否满足附件存在性筛选条件。"""
     if has_attachments is None:
         return True
     return bool(message.get("has_attachments")) is has_attachments
 
 
 def _message_matches_sender(message: dict[str, Any], sender: str | None) -> bool:
+    """判断邮件是否满足发件人模糊匹配条件。"""
     if not sender:
         return True
     sender_text = sender.lower()
@@ -903,6 +965,7 @@ def _message_matches_sender(message: dict[str, Any], sender: str | None) -> bool
 
 
 def _message_matches_date_range(message: dict[str, Any], date_from: date | None, date_to: date | None) -> bool:
+    """判断邮件日期是否落在指定区间内。"""
     if date_from is None and date_to is None:
         return True
     message_date = _parse_message_date(message.get("date"))
@@ -917,11 +980,13 @@ def _message_matches_date_range(message: dict[str, Any], date_from: date | None,
 
 
 def _message_matches_query(message: dict[str, Any], query: str) -> bool:
+    """判断邮件是否命中全文关键词搜索。"""
     lowered = query.lower()
     return lowered in _message_search_text(message) or lowered in str(message.get("_search_text", "")).lower()
 
 
 def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> dict[str, dict[str, Any]]:
+    """从本地数据库和详情缓存中回填已有邮件摘要。"""
     uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
     if not uid_values:
         return {}
@@ -973,6 +1038,7 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
 
 
 def _persist_message_cache(session: AuthSession, folder: str, summary: dict[str, Any], detail: dict[str, Any]) -> None:
+    """把邮件摘要和详情分别落到数据库与 Redis 缓存。"""
     normalized_email = session.email.strip().lower()
     settings = get_settings()
     session_factory = get_session_factory()
@@ -1048,6 +1114,7 @@ def _persist_message_cache(session: AuthSession, folder: str, summary: dict[str,
 
 
 def _page_uids(uids: list[str], page: int, page_size: int) -> list[str]:
+    """按 UID 倒序切出指定分页范围。"""
     def uid_sort_key(uid: str) -> tuple[int, str]:
         return (int(uid), uid) if str(uid).isdigit() else (0, str(uid))
 
@@ -1063,6 +1130,7 @@ def list_messages(
     page_size: int = 30,
     refresh: bool = False,
 ) -> MailboxPage:
+    """读取某个文件夹的分页邮件列表，优先命中缓存。"""
     cache = JsonCache(redis_client.get_redis_client())
     key = _message_cache_key(session.email, folder, page, page_size)
     if not refresh:
@@ -1125,6 +1193,7 @@ def search_messages(
     has_attachments: bool | None = None,
     refresh: bool = False,
 ) -> MailboxPage:
+    """执行文件夹内全文搜索，并支持发件人、日期和附件筛选。"""
     normalized_query = query.strip()
     if not normalized_query:
         raise AppError("SEARCH_QUERY_REQUIRED", "搜索关键词不能为空", http_status=status.HTTP_422_UNPROCESSABLE_CONTENT)
@@ -1194,6 +1263,7 @@ def search_messages(
 
 
 def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str, Any]:
+    """读取单封邮件详情，并按设置自动标记已读。"""
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
@@ -1225,6 +1295,7 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
 
 
 def get_message_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """读取单个附件的元数据和二进制内容。"""
     validate_attachment_id(attachment_id)
     adapter = _connect_imap(session)
     try:
@@ -1254,6 +1325,7 @@ def get_message_attachment(session: AuthSession, folder: str, uid: str, attachme
 
 
 def operate_messages(session: AuthSession, folder: str, payload: MessageOperationRequest) -> dict[str, Any]:
+    """对一组邮件执行已读、未读、删除、移动或星标操作。"""
     adapter = _connect_imap(session)
     try:
         folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in adapter.list_folders()])

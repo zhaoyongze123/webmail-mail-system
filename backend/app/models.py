@@ -1,3 +1,9 @@
+"""数据库模型定义。
+
+这里集中维护 Webmail 用户态模型与后台一期新增管理态模型，是查询、
+迁移和关系建模的统一事实源。
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -15,6 +21,8 @@ INET_COMPAT = String(45).with_variant(INET(), "postgresql")
 
 
 class MailAccount(Base):
+    """邮箱账号主表。"""
+
     __tablename__ = "mail_accounts"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -79,6 +87,8 @@ class MailAccount(Base):
 
 
 class MailDomain(Base):
+    """邮件域表。"""
+
     __tablename__ = "mail_domains"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -111,6 +121,8 @@ class MailDomain(Base):
 
 
 class MailFolder(Base):
+    """邮箱文件夹快照表。"""
+
     __tablename__ = "mail_folders"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -137,6 +149,8 @@ class MailFolder(Base):
 
 
 class MailMessage(Base):
+    """邮件摘要与状态缓存表。"""
+
     __tablename__ = "mail_messages"
     __table_args__ = (
         UniqueConstraint("account_id", "folder_id", "imap_uid"),
@@ -182,6 +196,8 @@ class MailMessage(Base):
 
 
 class MailDraft(Base):
+    """草稿表。"""
+
     __tablename__ = "mail_drafts"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -217,6 +233,8 @@ class MailDraft(Base):
 
 
 class MailSignature(Base):
+    """签名表。"""
+
     __tablename__ = "mail_signatures"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -254,6 +272,8 @@ Index(
 
 
 class MailUserPreference(Base):
+    """用户偏好设置表。"""
+
     __tablename__ = "mail_user_preferences"
     __table_args__ = (
         UniqueConstraint("account_id"),
@@ -292,6 +312,8 @@ class MailUserPreference(Base):
 
 
 class MailContact(Base):
+    """通讯录联系人实体，保存联系人属性与黑白名单状态。"""
+
     __tablename__ = "mail_contacts"
     __table_args__ = (
         UniqueConstraint("account_id", "email"),
@@ -339,6 +361,8 @@ class MailContact(Base):
 
 
 class MailContactTag(Base):
+    """联系人标签实体，用于给联系人打分类标签。"""
+
     __tablename__ = "mail_contact_tags"
     __table_args__ = (
         UniqueConstraint("contact_id", "name"),
@@ -363,6 +387,8 @@ class MailContactTag(Base):
 
 
 class MailAttachment(Base):
+    """附件元数据实体，记录临时附件或已落库附件的存储信息。"""
+
     __tablename__ = "mail_attachments"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -397,6 +423,8 @@ class MailAttachment(Base):
 
 
 class AuditLog(Base):
+    """审计日志实体，记录用户端和后台端的关键操作轨迹。"""
+
     __tablename__ = "audit_logs"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -426,6 +454,8 @@ class AuditLog(Base):
 
 
 class MailAlias(Base):
+    """域名别名实体，描述源地址到多个目标地址的映射关系。"""
+
     __tablename__ = "mail_aliases"
     __table_args__ = (
         UniqueConstraint("source_address"),
@@ -457,6 +487,8 @@ class MailAlias(Base):
 
 
 class QuotaPolicy(Base):
+    """配额策略实体，支持平台级或域级默认邮箱配额配置。"""
+
     __tablename__ = "quota_policies"
     __table_args__ = (
         UniqueConstraint("domain_id"),
@@ -489,6 +521,8 @@ class QuotaPolicy(Base):
 
 
 class AdminUser(Base):
+    """后台管理员实体，支持平台管理员和域管理员两级角色。"""
+
     __tablename__ = "admin_users"
     __table_args__ = (
         UniqueConstraint("username"),
@@ -528,6 +562,8 @@ class AdminUser(Base):
 
 
 class AdminRefreshToken(Base):
+    """后台刷新令牌实体，用于维护管理员长期会话。"""
+
     __tablename__ = "admin_refresh_tokens"
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)

@@ -1,3 +1,5 @@
+"""后台管理 API 路由：认证、域、用户、别名、配额与审计。"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -50,22 +52,30 @@ router = APIRouter(prefix="/api/admin", tags=["admin"], responses={401: {"descri
 
 
 class BulkStatusRequest(BaseModel):
+    """批量修改状态请求体。"""
+
     ids: list[str] = Field(default_factory=list, min_length=1)
     status: str = Field(pattern="^(active|disabled)$")
 
 
 class DomainCreateRequest(BaseModel):
+    """创建域的请求体。"""
+
     name: str = Field(min_length=3, max_length=255)
     quota_limit_mb: int = Field(default=10240, ge=1, le=1024 * 1024)
     status: str = Field(default="active", pattern="^(active|disabled)$")
 
 
 class DomainUpdateRequest(BaseModel):
+    """更新域信息的请求体。"""
+
     quota_limit_mb: int | None = Field(default=None, ge=1, le=1024 * 1024)
     status: str | None = Field(default=None, pattern="^(active|disabled)$")
 
 
 class AdminUserCreateRequest(BaseModel):
+    """创建后台可管理邮箱账号的请求体。"""
+
     email: EmailStr
     display_name: str | None = Field(default=None, max_length=255)
     domain_id: str | None = None
@@ -76,6 +86,8 @@ class AdminUserCreateRequest(BaseModel):
 
 
 class AdminUserUpdateRequest(BaseModel):
+    """更新后台可管理邮箱账号的请求体。"""
+
     display_name: str | None = Field(default=None, max_length=255)
     domain_id: str | None = None
     quota_mb: int | None = Field(default=None, ge=1, le=1024 * 1024)
@@ -84,26 +96,36 @@ class AdminUserUpdateRequest(BaseModel):
 
 
 class AdminUserResetPasswordRequest(BaseModel):
+    """重置邮箱账号密码的请求体。"""
+
     password: str = Field(min_length=8, max_length=256)
 
 
 class AdminUsersBulkActionRequest(BaseModel):
+    """邮箱账号批量操作请求体。"""
+
     ids: list[str] = Field(default_factory=list, min_length=1)
     action: str = Field(pattern="^(activate|disable|delete)$")
 
 
 class AliasCreateRequest(BaseModel):
+    """创建邮件别名的请求体。"""
+
     domain_id: str
     source_address: EmailStr
     target_addresses: list[EmailStr] = Field(default_factory=list, min_length=1)
 
 
 class AliasUpdateRequest(BaseModel):
+    """更新邮件别名的请求体。"""
+
     target_addresses: list[EmailStr] | None = None
     is_active: bool | None = None
 
 
 class QuotaPolicyUpdateRequest(BaseModel):
+    """更新域配额策略的请求体。"""
+
     domain_id: str | None = None
     default_quota_mb: int = Field(ge=1, le=1024 * 1024)
     warn_80_enabled: bool = True
@@ -112,15 +134,20 @@ class QuotaPolicyUpdateRequest(BaseModel):
 
 
 class UserQuotaUpdateRequest(BaseModel):
+    """更新单个邮箱账号配额的请求体。"""
+
     quota_mb: int = Field(ge=1, le=1024 * 1024)
 
 
 class QuotaBulkUpdateRequest(BaseModel):
+    """批量更新邮箱账号配额的请求体。"""
+
     ids: list[str] = Field(default_factory=list, min_length=1)
     quota_mb: int = Field(ge=1, le=1024 * 1024)
 
 
 def _parse_uuid(value: str, *, code: str, message: str) -> UUID:
+    """将字符串解析为 UUID，失败时抛出标准应用异常。"""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -128,6 +155,7 @@ def _parse_uuid(value: str, *, code: str, message: str) -> UUID:
 
 
 def _normalize_domain_name(name: str) -> str:
+    """规范化域名并执行基础格式校验。"""
     normalized = name.strip().lower()
     labels = normalized.split(".")
     if len(labels) < 2 or any(not label or len(label) > 63 for label in labels):
@@ -147,6 +175,7 @@ def _normalize_domain_name(name: str) -> str:
 
 
 def _ensure_target_addresses(targets: list[str]) -> list[str]:
+    """确保别名目标地址非空并统一小写。"""
     normalized = [item.strip().lower() for item in targets if item.strip()]
     if not normalized:
         raise AppError(
@@ -158,6 +187,7 @@ def _ensure_target_addresses(targets: list[str]) -> list[str]:
 
 
 def _ensure_alias_not_conflict(db: Session, *, source_address: str, alias_id: UUID | None = None) -> None:
+    """确保别名源地址不与现有账号或别名冲突。"""
     if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == source_address.lower())):
         raise AppError(
             "ADMIN_ALIAS_CONFLICT",
@@ -176,6 +206,7 @@ def _ensure_alias_not_conflict(db: Session, *, source_address: str, alias_id: UU
 
 
 def _ensure_alias_no_direct_loop(source_address: str, target_addresses: list[str]) -> None:
+    """避免别名形成直接自引用循环。"""
     source = source_address.strip().lower()
     normalized_targets = [item.strip().lower() for item in target_addresses]
     if source in normalized_targets:
@@ -188,6 +219,7 @@ def _ensure_alias_no_direct_loop(source_address: str, target_addresses: list[str
 
 @router.post("/auth/login", response_model=ApiResponse)
 def admin_login(request: Request, payload: AdminLoginRequest, db: Session = Depends(get_db_session)) -> dict[str, Any]:
+    """后台管理员登录接口。"""
     user, bundle = authenticate_admin(request, payload, db)
     db.commit()
     return success_response(request, build_auth_payload(user, bundle))
@@ -195,6 +227,7 @@ def admin_login(request: Request, payload: AdminLoginRequest, db: Session = Depe
 
 @router.post("/auth/refresh", response_model=ApiResponse)
 def admin_refresh(request: Request, payload: AdminRefreshRequest, db: Session = Depends(get_db_session)) -> dict[str, Any]:
+    """后台管理员刷新令牌接口。"""
     user, bundle = refresh_admin_token(request, payload, db)
     db.commit()
     return success_response(request, build_auth_payload(user, bundle))
@@ -207,6 +240,7 @@ def admin_logout(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """后台管理员退出登录接口。"""
     if payload and payload.refresh_token:
         revoke_refresh_token(db, payload.refresh_token)
     record_admin_audit(request, admin, "admin.auth.logout", success=True)
@@ -220,6 +254,7 @@ def admin_me(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """返回当前后台管理员的基本信息。"""
     user = db.get(AdminUser, admin.user_id)
     if user is None:
         raise AppError("ADMIN_AUTH_INVALID", "后台登录已失效，请重新登录", http_status=status.HTTP_401_UNAUTHORIZED)
@@ -245,6 +280,7 @@ def admin_change_password(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """修改当前后台管理员密码。"""
     user = db.get(AdminUser, admin.user_id)
     if user is None or not verify_password(payload.current_password, user.password_hash):
         raise AppError("ADMIN_AUTH_INVALID", "当前密码错误", http_status=status.HTTP_400_BAD_REQUEST)
@@ -260,6 +296,7 @@ def admin_totp_setup(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """初始化当前后台管理员的 TOTP 配置。"""
     user = db.get(AdminUser, admin.user_id)
     if user is None:
         raise AppError("ADMIN_AUTH_INVALID", "后台登录已失效，请重新登录", http_status=status.HTTP_401_UNAUTHORIZED)
@@ -285,6 +322,7 @@ def admin_totp_enable(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """启用当前后台管理员的 TOTP。"""
     user = db.get(AdminUser, admin.user_id)
     if user is None or not user.totp_secret:
         raise AppError("ADMIN_TOTP_NOT_SETUP", "请先完成 TOTP 初始化", http_status=status.HTTP_400_BAD_REQUEST)
@@ -304,6 +342,7 @@ def admin_totp_disable(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """禁用当前后台管理员的 TOTP。"""
     user = db.get(AdminUser, admin.user_id)
     if user is None or not user.totp_secret:
         raise AppError("ADMIN_TOTP_NOT_SETUP", "尚未启用 TOTP", http_status=status.HTTP_400_BAD_REQUEST)
@@ -326,6 +365,7 @@ def list_domains(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """分页列出可管理的域列表。"""
     ensure_superadmin(admin)
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.aliases))
@@ -349,6 +389,7 @@ def create_domain(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """创建新域。"""
     ensure_superadmin(admin)
     normalized = _normalize_domain_name(payload.name)
     if db.scalar(select(MailDomain).where(MailDomain.name == normalized)):
@@ -369,6 +410,7 @@ def get_domain(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """获取单个域详情。"""
     ensure_superadmin(admin)
     domain = db.scalar(
         select(MailDomain)
@@ -388,6 +430,7 @@ def update_domain(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """更新域配置。"""
     ensure_superadmin(admin)
     domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
     if domain is None:
@@ -409,6 +452,7 @@ def delete_domain(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """删除域并返回影响信息。"""
     ensure_superadmin(admin)
     domain = db.scalar(
         select(MailDomain)
@@ -431,6 +475,7 @@ def bulk_domain_status(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """批量更新域状态。"""
     ensure_superadmin(admin)
     uuids = [_parse_uuid(item, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效") for item in payload.ids]
     domains = db.scalars(select(MailDomain).where(MailDomain.id.in_(uuids))).all()
@@ -452,6 +497,7 @@ def list_admin_users(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """分页列出邮箱账号。"""
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(MailAccount)
     if admin.role == "domain_admin" and admin.domain_id:
@@ -479,6 +525,7 @@ def create_admin_user_account(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """创建邮箱账号。"""
     domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效") if payload.domain_id else None
     ensure_domain_scope(admin, domain_uuid)
     if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == payload.email.lower())):
@@ -514,6 +561,7 @@ def get_admin_user_account(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """获取单个邮箱账号详情。"""
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -529,6 +577,7 @@ def update_admin_user_account(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """更新邮箱账号信息。"""
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -560,6 +609,7 @@ def delete_admin_user_account(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """删除邮箱账号。"""
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -578,6 +628,7 @@ def reset_admin_user_password(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """重置邮箱账号密码。"""
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -594,6 +645,7 @@ def admin_users_bulk_action(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """对邮箱账号执行批量状态或删除操作。"""
     uuids = [_parse_uuid(item, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效") for item in payload.ids]
     accounts = db.scalars(select(MailAccount).where(MailAccount.id.in_(uuids))).all()
     changed = 0
@@ -623,6 +675,7 @@ def list_aliases(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """分页列出邮件别名。"""
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(MailAlias)
     if admin.role == "domain_admin" and admin.domain_id:
@@ -645,6 +698,7 @@ def create_alias(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """创建邮件别名。"""
     domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
     ensure_domain_scope(admin, domain_uuid)
     domain = db.get(MailDomain, domain_uuid)
@@ -674,6 +728,7 @@ def get_alias(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """获取单个邮件别名详情。"""
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -689,6 +744,7 @@ def update_alias(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """更新邮件别名。"""
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -712,6 +768,7 @@ def delete_alias(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """删除邮件别名。"""
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -729,6 +786,7 @@ def toggle_alias(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """切换邮件别名启用状态。"""
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -746,6 +804,7 @@ def list_quotas(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """列出域配额使用情况。"""
     domains = db.scalars(select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.quota_policy))).all()
     if admin.role == "domain_admin" and admin.domain_id:
         domains = [item for item in domains if item.id == admin.domain_id]
@@ -772,6 +831,7 @@ def update_quota_policy(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """更新域配额策略。"""
     domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效") if payload.domain_id else None
     ensure_domain_scope(admin, domain_uuid)
     if domain_uuid is not None and db.get(MailDomain, domain_uuid) is None:
@@ -799,6 +859,7 @@ def update_user_quota(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """更新单个邮箱账号配额。"""
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -817,6 +878,7 @@ def bulk_update_quotas(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """批量更新邮箱账号配额。"""
     uuids = [_parse_uuid(item, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效") for item in payload.ids]
     accounts = db.scalars(select(MailAccount).where(MailAccount.id.in_(uuids))).all()
     changed = 0
@@ -840,6 +902,7 @@ def list_audit_logs(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """分页列出审计日志。"""
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(AuditLog)
     if event_type:
@@ -857,6 +920,7 @@ def list_audit_logs(
 @router.get("/system-health", response_model=ApiResponse)
 @router.get("/system/health", response_model=ApiResponse, include_in_schema=False)
 def admin_system_health(request: Request, admin: AdminContext = Depends(get_current_admin), db: Session = Depends(get_db_session)) -> dict[str, Any]:
+    """返回后台系统健康检查结果。"""
     _ = admin
     now = datetime.now(UTC).isoformat()
     items = [
@@ -886,6 +950,7 @@ def dashboard_overview(
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """返回后台仪表盘概览数据。"""
     metrics = count_dashboard_metrics(db)
     recent_logs = db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(8)).all()
     return success_response(
@@ -904,6 +969,7 @@ def dashboard_overview(
 
 @router.get("/dashboard/trends", response_model=ApiResponse)
 def dashboard_trends(request: Request, admin: AdminContext = Depends(get_current_admin), db: Session = Depends(get_db_session)) -> dict[str, Any]:
+    """返回最近 7 天审计趋势数据。"""
     _ = admin
     today = utcnow().date()
     points: list[dict[str, Any]] = []

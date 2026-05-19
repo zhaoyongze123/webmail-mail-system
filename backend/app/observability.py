@@ -1,3 +1,5 @@
+"""请求日志、审计日志与运行指标采集。"""
+
 from __future__ import annotations
 
 import json
@@ -22,6 +24,7 @@ audit_logger = logging.getLogger("app.audit")
 
 
 def _client_ip(request: Request | None) -> str | None:
+    """提取请求来源 IP，优先使用转发链路中的真实客户端地址。"""
     if request is None:
         return None
     forwarded_for = request.headers.get("x-forwarded-for")
@@ -33,6 +36,12 @@ def _client_ip(request: Request | None) -> str | None:
 
 
 class ObservabilityMetrics:
+    """进程内观测指标汇总器。
+
+    该对象只负责内存态统计，用于在不依赖外部指标系统的情况下，
+    提供请求量、错误量、耗时和审计量的快速视图。
+    """
+
     def __init__(self) -> None:
         self._lock = Lock()
         self._started_at = time.monotonic()
@@ -45,6 +54,7 @@ class ObservabilityMetrics:
         self._audit_by_event = defaultdict(int)
 
     def record_request(self, *, status_code: int, duration_ms: float) -> None:
+        """记录一次 HTTP 请求的结果。"""
         with self._lock:
             self._request_total += 1
             if status_code >= 400:
@@ -54,11 +64,13 @@ class ObservabilityMetrics:
             self._requests_by_status[str(status_code)] += 1
 
     def record_audit(self, event_type: str) -> None:
+        """记录一次审计事件计数。"""
         with self._lock:
             self._audit_total += 1
             self._audit_by_event[event_type] += 1
 
     def snapshot(self) -> dict[str, Any]:
+        """返回当前指标快照。"""
         with self._lock:
             request_total = self._request_total
             request_duration_avg = self._request_duration_ms_total / request_total if request_total else 0.0
@@ -74,6 +86,7 @@ class ObservabilityMetrics:
             }
 
     def reset(self) -> None:
+        """重置全部统计数据。"""
         with self._lock:
             self._started_at = time.monotonic()
             self._request_total = 0
@@ -91,17 +104,20 @@ _audit_lock = Lock()
 
 
 def reset_observability_state() -> None:
+    """清空内存指标与最近审计事件缓存。"""
     metrics_store.reset()
     with _audit_lock:
         _audit_events.clear()
 
 
 def get_recent_audit_events() -> list[dict[str, Any]]:
+    """返回最近的审计事件列表。"""
     with _audit_lock:
         return list(_audit_events)
 
 
 def record_request_log(request: Request, status_code: int, duration_ms: float) -> None:
+    """写入一次结构化请求日志并同步更新内存指标。"""
     record = {
         "event": "http_request",
         "request_id": get_request_id(request),
@@ -127,6 +143,7 @@ def record_audit_event(
     target_type: str | None = None,
     target_id: str | None = None,
 ) -> None:
+    """记录审计事件，并在非测试环境持久化到数据库。"""
     event_record = {
         "event_type": event_type,
         "request_id": get_request_id(request) if request is not None else None,

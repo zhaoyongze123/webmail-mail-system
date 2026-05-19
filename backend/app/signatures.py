@@ -1,3 +1,9 @@
+"""邮件签名的增删改查和默认签名维护逻辑。
+
+这个模块提供签名列表、默认签名、创建、更新、删除和设默认等接口的
+数据库操作封装。
+"""
+
 from __future__ import annotations
 
 from uuid import UUID as UUIDType
@@ -17,15 +23,18 @@ router = APIRouter(prefix="/api/signatures", tags=["signatures"])
 
 
 def _normalize_email(email: str) -> str:
+    """标准化邮箱地址。"""
     return email.strip().lower()
 
 
 def _get_account(db_session, email: str) -> MailAccount | None:
+    """根据邮箱获取账户记录。"""
     normalized_email = _normalize_email(email)
     return db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
 
 
 def _get_signature(db_session, account_id: UUIDType, signature_id: UUIDType) -> MailSignature:
+    """校验签名归属并返回签名记录。"""
     signature = db_session.get(MailSignature, signature_id)
     if signature is None or signature.account_id != account_id:
         raise AppError("SIGNATURE_NOT_FOUND", "签名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -33,6 +42,7 @@ def _get_signature(db_session, account_id: UUIDType, signature_id: UUIDType) -> 
 
 
 def _ordered_signatures(db_session, account_id: UUIDType) -> list[MailSignature]:
+    """按默认签名、创建时间和名称排序返回签名列表。"""
     return list(
         db_session.scalars(
             select(MailSignature)
@@ -47,6 +57,7 @@ def _ordered_signatures(db_session, account_id: UUIDType) -> list[MailSignature]
 
 
 def _signature_response(signature: MailSignature) -> SignatureResponse:
+    """把数据库签名模型转换为接口响应对象。"""
     return SignatureResponse(
         id=str(signature.id),
         name=signature.name,
@@ -58,6 +69,7 @@ def _signature_response(signature: MailSignature) -> SignatureResponse:
 
 
 def _ensure_single_default(db_session, account_id: UUIDType) -> MailSignature | None:
+    """确保账号下始终只有一个默认签名。"""
     signatures = _ordered_signatures(db_session, account_id)
     if not signatures:
         return None
@@ -75,6 +87,7 @@ def _ensure_single_default(db_session, account_id: UUIDType) -> MailSignature | 
 
 
 def _set_only_default(db_session, account_id: UUIDType, default_signature: MailSignature) -> None:
+    """将指定签名设为唯一默认值。"""
     for signature in _ordered_signatures(db_session, account_id):
         signature.is_default = False
     db_session.flush()
@@ -83,6 +96,7 @@ def _set_only_default(db_session, account_id: UUIDType, default_signature: MailS
 
 
 def _write_operation(callback):
+    """执行签名相关写操作并统一提交事务。"""
     session_factory = get_session_factory()
     with session_factory() as db_session:
         result = callback(db_session)
@@ -92,6 +106,7 @@ def _write_operation(callback):
 
 @router.get("", response_model=ApiResponse, summary="获取签名列表", response_description="当前账号的签名列表")
 def list_signatures(request: Request) -> dict[str, object]:
+    """获取当前账号的签名列表。"""
     session = get_current_session(request)
 
     def write(db_session):
@@ -106,6 +121,7 @@ def list_signatures(request: Request) -> dict[str, object]:
 
 @router.get("/default", response_model=ApiResponse, summary="获取默认签名", response_description="当前账号的默认签名")
 def get_default_signature(request: Request) -> dict[str, object]:
+    """获取当前账号的默认签名。"""
     session = get_current_session(request)
 
     def write(db_session):
@@ -120,6 +136,7 @@ def get_default_signature(request: Request) -> dict[str, object]:
 
 @router.post("", response_model=ApiResponse, summary="新增签名", response_description="新增后的签名")
 def create_signature(request: Request, payload: SignatureCreateRequest) -> dict[str, object]:
+    """创建新签名。"""
     session = get_current_session(request)
 
     def write(db_session):
@@ -152,6 +169,7 @@ def create_signature(request: Request, payload: SignatureCreateRequest) -> dict[
 
 @router.patch("/{signature_id}", response_model=ApiResponse, summary="编辑签名", response_description="编辑后的签名")
 def update_signature(request: Request, signature_id: UUIDType, payload: SignatureUpdateRequest) -> dict[str, object]:
+    """更新指定签名。"""
     session = get_current_session(request)
 
     def write(db_session):
@@ -176,6 +194,7 @@ def update_signature(request: Request, signature_id: UUIDType, payload: Signatur
 
 @router.delete("/{signature_id}", response_model=ApiResponse, summary="删除签名", response_description="删除结果")
 def delete_signature(request: Request, signature_id: UUIDType) -> dict[str, object]:
+    """删除指定签名。"""
     session = get_current_session(request)
 
     def write(db_session):
@@ -197,6 +216,7 @@ def delete_signature(request: Request, signature_id: UUIDType) -> dict[str, obje
 
 @router.post("/{signature_id}/default", response_model=ApiResponse, summary="设为默认签名", response_description="更新后的默认签名")
 def set_default_signature(request: Request, signature_id: UUIDType) -> dict[str, object]:
+    """把指定签名设为默认签名。"""
     session = get_current_session(request)
 
     def write(db_session):

@@ -1,3 +1,8 @@
+"""FastAPI 应用入口。
+
+负责组装用户态 Webmail API、后台管理 API、中间件、异常处理和健康检查。
+"""
+
 import base64
 from datetime import date
 from urllib.parse import quote
@@ -70,6 +75,7 @@ settings = get_settings()
 
 
 def _system_preferences(preferences: dict[str, object]) -> dict[str, object]:
+    """从完整设置对象中提取 system 配置。"""
     system_preferences = preferences.get("system")
     if isinstance(system_preferences, dict):
         return system_preferences
@@ -90,6 +96,7 @@ app.include_router(signatures_router)
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
+    """在所有请求前后执行安全校验与响应头注入。"""
     log_sanitized_event(
         "request",
         method=request.method,
@@ -106,12 +113,16 @@ async def security_headers_middleware(request: Request, call_next):
 
 
 class BulkMessageRequest(BaseModel):
+    """用于单封或多封邮件批量操作的轻量请求体。"""
+
     folder: str = "INBOX"
     uids: list[str] = Field(default_factory=list)
     target_folder: str | None = None
 
 
 class SettingsUpdateRequest(BaseModel):
+    """用户设置更新请求体。"""
+
     system: dict[str, object] | None = None
     user: dict[str, object] | None = None
     theme: dict[str, object] | None = None
@@ -119,6 +130,7 @@ class SettingsUpdateRequest(BaseModel):
     @field_validator("system")
     @classmethod
     def validate_system(cls, value: dict[str, object] | None) -> dict[str, object] | None:
+        """校验系统设置中的时区、引用位置、分页和语言。"""
         if value is None:
             return value
         timezone = value.get("timezone")
@@ -141,6 +153,7 @@ class SettingsUpdateRequest(BaseModel):
     @field_validator("theme")
     @classmethod
     def validate_theme(cls, value: dict[str, object] | None) -> dict[str, object] | None:
+        """校验主题配置。"""
         if value is None:
             return value
         mode = value.get("mode")
@@ -151,11 +164,13 @@ class SettingsUpdateRequest(BaseModel):
 
 @app.exception_handler(AppError)
 async def handle_app_error(request: Request, exc: AppError):
+    """统一处理业务异常。"""
     return app_error_response(request, exc)
 
 
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(request: Request, exc: RequestValidationError):
+    """统一处理请求参数校验失败。"""
     if request.url.path == "/api/messages/send":
         record_audit_event(
             request,
@@ -174,6 +189,7 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, exc: Exception):
+    """兜底捕获未预期异常。"""
     return error_response(
         request,
         code="INTERNAL_ERROR",
@@ -184,6 +200,7 @@ async def handle_unexpected_error(request: Request, exc: Exception):
 
 @app.get("/api/health", tags=["health"], response_model=ApiResponse)
 def health(request: Request, verbose: bool = False) -> dict[str, object]:
+    """返回应用存活状态，并可按需附带版本信息。"""
     data = {
         "status": "ok",
         "service": settings.app_name,
@@ -199,6 +216,7 @@ def health(request: Request, verbose: bool = False) -> dict[str, object]:
 
 @app.get("/api/ready", tags=["health"], response_model=ApiResponse)
 def ready(request: Request) -> dict[str, object]:
+    """返回服务就绪状态和核心依赖配置概览。"""
     return success_response(
         request,
         {
@@ -213,6 +231,7 @@ def ready(request: Request) -> dict[str, object]:
 
 @app.get("/api/metrics", tags=["health"], response_model=ApiResponse)
 def metrics(request: Request) -> dict[str, object]:
+    """输出应用内存中的轻量指标快照。"""
     return success_response(
         request,
         {
@@ -230,6 +249,7 @@ def metrics(request: Request) -> dict[str, object]:
     response_description="登录成功后的当前用户信息",
 )
 def login(request: Request, response: Response, payload: LoginRequest) -> dict[str, object]:
+    """校验邮箱账号密码并写入会话 Cookie。"""
     session_id, user_data, csrf_token = login_user(request, payload)
     set_session_cookie(response, session_id, csrf_token)
     return success_response(request, user_data)
@@ -243,6 +263,7 @@ def login(request: Request, response: Response, payload: LoginRequest) -> dict[s
     response_description="注册成功后的当前用户信息",
 )
 def register(request: Request, response: Response, payload: RegisterRequest) -> dict[str, object]:
+    """注册邮箱账号并在成功后直接建立登录会话。"""
     session_id, user_data, csrf_token = register_user(request, payload)
     set_session_cookie(response, session_id, csrf_token)
     return success_response(request, user_data)
@@ -256,6 +277,7 @@ def register(request: Request, response: Response, payload: RegisterRequest) -> 
     response_description="退出结果",
 )
 def logout(request: Request, response: Response) -> dict[str, object]:
+    """销毁当前登录会话并清空浏览器端 Cookie。"""
     logout_user(request)
     clear_session_cookie(response)
     return success_response(request, {"logged_out": True})
@@ -269,6 +291,7 @@ def logout(request: Request, response: Response) -> dict[str, object]:
     response_description="当前会话绑定的邮箱账号",
 )
 def me(request: Request) -> dict[str, object]:
+    """返回当前会话绑定的邮箱地址。"""
     session = get_current_session(request)
     return success_response(request, {"email": session.email})
 
@@ -281,6 +304,7 @@ def me(request: Request) -> dict[str, object]:
     response_description="当前账号和设置偏好",
 )
 def get_settings_api(request: Request) -> dict[str, object]:
+    """读取当前账号的系统、用户和主题偏好。"""
     session = get_current_session(request)
     preferences = get_user_preferences(session.email)
     return success_response(
@@ -300,6 +324,7 @@ def get_settings_api(request: Request) -> dict[str, object]:
     response_description="更新后的账号和设置偏好",
 )
 def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dict[str, object]:
+    """更新当前账号的设置偏好。"""
     session = get_current_session(request)
     preferences = update_user_preferences(
         session.email,
@@ -326,6 +351,7 @@ def update_settings_api(request: Request, payload: SettingsUpdateRequest) -> dic
     response_description="更新后的账号和设置偏好",
 )
 async def upload_settings_avatar(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+    """上传头像图片并以内联 data URL 形式写入用户偏好。"""
     session = get_current_session(request)
     content_type = (file.content_type or "").strip().lower()
     if not content_type.startswith("image/"):
@@ -374,6 +400,7 @@ async def upload_settings_avatar(request: Request, file: UploadFile = File(...))
     response_description="修改密码结果",
 )
 def change_password_api(request: Request, payload: ChangePasswordRequest) -> dict[str, object]:
+    """校验旧密码并更新当前会话缓存中的邮箱密码。"""
     session = get_current_session(request)
     if payload.current_password == payload.new_password:
         raise AppError(
@@ -402,6 +429,7 @@ def change_password_api(request: Request, payload: ChangePasswordRequest) -> dic
     response_description="系统文件夹与未读数量",
 )
 def folders(request: Request) -> dict[str, object]:
+    """同步并返回当前邮箱可见文件夹列表。"""
     session = get_current_session(request)
     return success_response(request, {"folders": list_folders(session)})
 
@@ -414,6 +442,7 @@ def folders(request: Request) -> dict[str, object]:
     response_description="创建后的文件夹信息",
 )
 def create_folder_api(request: Request, payload: FolderCreateRequest) -> dict[str, object]:
+    """为当前邮箱创建自定义文件夹。"""
     session = get_current_session(request)
     return success_response(request, create_folder(session, payload.name))
 
@@ -426,6 +455,7 @@ def create_folder_api(request: Request, payload: FolderCreateRequest) -> dict[st
     response_description="重命名后的文件夹信息",
 )
 def rename_folder_api(request: Request, folder: str, payload: FolderRenameRequest) -> dict[str, object]:
+    """重命名指定的自定义文件夹。"""
     session = get_current_session(request)
     if folder != payload.name:
         return success_response(request, rename_folder(session, folder, payload.new_name))
@@ -440,6 +470,7 @@ def rename_folder_api(request: Request, folder: str, payload: FolderRenameReques
     response_description="删除结果",
 )
 def delete_folder_api(request: Request, folder: str) -> dict[str, object]:
+    """删除指定的自定义文件夹。"""
     session = get_current_session(request)
     return success_response(request, delete_folder(session, folder))
 
@@ -458,6 +489,7 @@ def messages(
     page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
+    """返回某个文件夹的分页邮件摘要列表。"""
     session = get_current_session(request)
     effective_page_size = page_size or int(_system_preferences(session.preferences).get("page_size", 30) or 30)
     page_data = list_messages(
@@ -499,6 +531,7 @@ def search_folder_messages(
     page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
+    """在指定文件夹内执行关键词和条件组合搜索。"""
     session = get_current_session(request)
     normalized_sender = sender.strip() if sender else None
     if date_from and date_to and date_from > date_to:
@@ -558,6 +591,7 @@ def search_messages_api(
     page_size: int | None = Query(default=None, ge=1, le=100),
     refresh: bool = False,
 ) -> dict[str, object]:
+    """兼容旧查询参数风格的全局搜索入口。"""
     return search_folder_messages(
         request,
         folder,
@@ -580,6 +614,7 @@ def search_messages_api(
     response_description="邮件头、正文和附件元数据",
 )
 def message_detail(request: Request, folder: str, uid: str) -> dict[str, object]:
+    """返回单封邮件的完整头部、正文和附件元数据。"""
     session = get_current_session(request)
     return success_response(request, get_message_detail(session, folder, uid))
 
@@ -592,6 +627,7 @@ def message_detail(request: Request, folder: str, uid: str) -> dict[str, object]
     response_description="邮件批量操作结果",
 )
 def message_operations(request: Request, folder: str, payload: MessageOperationRequest) -> dict[str, object]:
+    """对指定文件夹中的邮件执行批量状态或移动操作。"""
     session = get_current_session(request)
     return success_response(request, operate_messages(session, folder, payload))
 
@@ -604,6 +640,7 @@ def message_operations(request: Request, folder: str, payload: MessageOperationR
     response_description="标记已读结果",
 )
 def mark_message_read(request: Request, folder: str, uid: str) -> dict[str, object]:
+    """把单封邮件标记为已读。"""
     session = get_current_session(request)
     payload = MessageOperationRequest(action="mark_read", uids=[uid])
     return success_response(request, operate_messages(session, folder, payload))
@@ -617,6 +654,7 @@ def mark_message_read(request: Request, folder: str, uid: str) -> dict[str, obje
     response_description="标记未读结果",
 )
 def mark_message_unread(request: Request, folder: str, uid: str) -> dict[str, object]:
+    """把单封邮件标记为未读。"""
     session = get_current_session(request)
     payload = MessageOperationRequest(action="mark_unread", uids=[uid])
     return success_response(request, operate_messages(session, folder, payload))
@@ -630,6 +668,7 @@ def mark_message_unread(request: Request, folder: str, uid: str) -> dict[str, ob
     response_description="批量移动结果",
 )
 def move_messages(request: Request, payload: BulkMessageRequest) -> dict[str, object]:
+    """批量移动多封邮件到目标文件夹。"""
     session = get_current_session(request)
     folder = request.query_params.get("folder") or payload.folder
     move_payload = MessageOperationRequest(
@@ -648,6 +687,7 @@ def move_messages(request: Request, payload: BulkMessageRequest) -> dict[str, ob
     response_description="批量删除结果",
 )
 def delete_messages(request: Request, payload: BulkMessageRequest) -> dict[str, object]:
+    """批量把多封邮件移入垃圾箱并执行删除标记。"""
     session = get_current_session(request)
     folder = request.query_params.get("folder") or payload.folder
     delete_payload = MessageOperationRequest(action="delete", uids=payload.uids)
@@ -661,6 +701,7 @@ def delete_messages(request: Request, payload: BulkMessageRequest) -> dict[str, 
     response_description="附件二进制内容",
 )
 def download_attachment(request: Request, folder: str, uid: str, attachment_id: str) -> Response:
+    """下载指定邮件中的某个附件二进制内容。"""
     session = get_current_session(request)
     validate_attachment_id(attachment_id)
     attachment = get_message_attachment(session, folder, uid, attachment_id)
@@ -683,6 +724,7 @@ def download_attachment(request: Request, folder: str, uid: str, attachment_id: 
     response_description="临时附件元数据",
 )
 async def upload_attachments(request: Request, files: list[UploadFile] = File(...)) -> dict[str, object]:
+    """上传写信阶段的临时附件。"""
     session = get_current_session(request)
     attachments = await upload_temp_attachments(session, files)
     return success_response(request, {"attachments": attachments})
@@ -705,6 +747,7 @@ async def upload_attachment_chunk(
     content_type: str = Form("application/octet-stream"),
     chunk: UploadFile = File(...),
 ) -> dict[str, object]:
+    """接收大附件分块并在全部完成后组装为临时附件。"""
     session = get_current_session(request)
     attachment = await store_temp_attachment_chunk(
         session,
@@ -727,6 +770,7 @@ async def upload_attachment_chunk(
     response_description="SMTP 发送和已发送归档结果",
 )
 def send_message(request: Request, payload: SendMailRequest) -> dict[str, object]:
+    """通过 SMTP 发送邮件，并记录发送审计结果。"""
     session = get_current_session(request)
     audit_metadata = {
         "recipient_count": len(payload.to) + len(payload.cc) + len(payload.bcc),
@@ -768,6 +812,7 @@ def contacts(
     group_name: str | None = Query(default=None, max_length=100),
     tag: str | None = Query(default=None, max_length=100),
 ) -> dict[str, object]:
+    """提供联系人自动补全或分页通讯录查询。"""
     session = get_current_session(request)
     if page_size is not None or page > 1 or group_name is not None or tag is not None:
         effective_page_size = page_size or 20
@@ -799,6 +844,7 @@ def contacts(
     response_description="新增后的联系人",
 )
 def create_contact_api(request: Request, payload: ContactCreateRequest) -> dict[str, object]:
+    """新增一个手工维护的联系人。"""
     session = get_current_session(request)
     return success_response(request, create_contact(session, payload))
 
@@ -811,6 +857,7 @@ def create_contact_api(request: Request, payload: ContactCreateRequest) -> dict[
     response_description="黑名单邮箱列表",
 )
 def contacts_blacklist(request: Request) -> dict[str, object]:
+    """返回当前账号的黑名单联系人邮箱列表。"""
     session = get_current_session(request)
     return success_response(request, {"contacts": list_blacklisted_contacts(session)})
 
@@ -823,6 +870,7 @@ def contacts_blacklist(request: Request) -> dict[str, object]:
     response_description="联系人详情",
 )
 def get_contact_api(request: Request, contact_id: str) -> dict[str, object]:
+    """读取单个联系人的完整详情。"""
     session = get_current_session(request)
     return success_response(request, get_contact(session, contact_id))
 
@@ -835,6 +883,7 @@ def get_contact_api(request: Request, contact_id: str) -> dict[str, object]:
     response_description="更新后的联系人",
 )
 def update_contact_api(request: Request, contact_id: str, payload: ContactUpdateRequest) -> dict[str, object]:
+    """更新指定联系人字段。"""
     session = get_current_session(request)
     return success_response(request, update_contact(session, contact_id, payload))
 
@@ -847,6 +896,7 @@ def update_contact_api(request: Request, contact_id: str, payload: ContactUpdate
     response_description="删除结果",
 )
 def delete_contact_api(request: Request, contact_id: str) -> dict[str, object]:
+    """删除指定联系人。"""
     session = get_current_session(request)
     return success_response(request, delete_contact(session, contact_id))
 
@@ -859,6 +909,7 @@ def delete_contact_api(request: Request, contact_id: str) -> dict[str, object]:
     response_description="草稿保存结果",
 )
 def save_mail_draft(request: Request, payload: DraftPayload) -> dict[str, object]:
+    """创建一份新的邮件草稿。"""
     session = get_current_session(request)
     return success_response(request, save_draft(session, payload))
 
@@ -871,6 +922,7 @@ def save_mail_draft(request: Request, payload: DraftPayload) -> dict[str, object
     response_description="草稿更新结果",
 )
 def update_mail_draft(request: Request, draft_id: str, payload: DraftPayload) -> dict[str, object]:
+    """更新已有草稿的内容和附件引用。"""
     session = get_current_session(request)
     return success_response(request, update_draft(session, draft_id, payload))
 
@@ -883,6 +935,7 @@ def update_mail_draft(request: Request, draft_id: str, payload: DraftPayload) ->
     response_description="草稿内容",
 )
 def fetch_mail_draft(request: Request, draft_id: str) -> dict[str, object]:
+    """读取指定草稿的完整内容。"""
     session = get_current_session(request)
     return success_response(request, get_draft(session, draft_id))
 
@@ -895,5 +948,6 @@ def fetch_mail_draft(request: Request, draft_id: str) -> dict[str, object]:
     response_description="草稿删除结果",
 )
 def remove_mail_draft(request: Request, draft_id: str) -> dict[str, object]:
+    """删除指定草稿及其临时附件关联。"""
     session = get_current_session(request)
     return success_response(request, delete_draft(session, draft_id))

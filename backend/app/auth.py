@@ -1,3 +1,9 @@
+"""邮箱登录、会话持久化和凭据同步相关逻辑。
+
+这个模块负责普通邮箱账号的登录/注册、Redis 会话管理、CSRF 令牌和
+密码更新后的会话同步，供前后端认证流程复用。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,17 +24,20 @@ from app.observability import record_audit_event
 
 
 class LoginRequest(BaseModel):
+    """邮箱登录请求体。"""
     email: EmailStr
     password: str
     remember: bool = False
 
 
 class RegisterRequest(LoginRequest):
+    """邮箱注册请求体，沿用登录字段并补充昵称。"""
     display_name: str | None = None
 
 
 @dataclass(frozen=True)
 class AuthSession:
+    """当前已登录邮箱会话的运行时视图。"""
     session_id: str
     email: str
     password: str
@@ -38,6 +47,7 @@ class AuthSession:
 
 
 def _client_ip(request: Request) -> str:
+    """提取请求来源 IP，用于登录失败限流和审计。"""
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         return forwarded_for.split(",", 1)[0].strip()
@@ -47,6 +57,7 @@ def _client_ip(request: Request) -> str:
 
 
 def _imap_settings(email: str, password: str, settings: Settings) -> ImapSettings:
+    """构造 IMAP 连接参数。"""
     return ImapSettings(
         host=settings.mail_imap_host,
         port=settings.mail_imap_port,
@@ -59,6 +70,7 @@ def _imap_settings(email: str, password: str, settings: Settings) -> ImapSetting
 
 
 def authenticate_mailbox(email: str, password: str, settings: Settings | None = None) -> None:
+    """通过 IMAP 直连验证邮箱账号和密码是否有效。"""
     settings = settings or get_settings()
     adapter = ImapAdapter(_imap_settings(email, password, settings))
     try:
@@ -77,10 +89,12 @@ def authenticate_mailbox(email: str, password: str, settings: Settings | None = 
 
 
 def verify_mailbox_password(email: str, password: str, settings: Settings | None = None) -> None:
+    """复用邮箱认证逻辑校验密码。"""
     authenticate_mailbox(email, password, settings)
 
 
 def _create_session(email: str, password: str, settings: Settings) -> tuple[str, dict[str, object], str]:
+    """创建 Redis 会话并生成对应 CSRF 令牌。"""
     session_store = SessionStore(client=get_redis_client(), settings=settings)
     csrf_token = new_csrf_token()
     session_id = session_store.create(
@@ -106,6 +120,7 @@ def _create_session(email: str, password: str, settings: Settings) -> tuple[str,
 
 
 def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, object], str]:
+    """处理邮箱登录，含限流、认证、会话创建和审计记录。"""
     settings = get_settings()
     redis_client = get_redis_client()
     limiter = LoginFailureLimiter(client=redis_client, settings=settings)
@@ -162,6 +177,7 @@ def login_user(request: Request, payload: LoginRequest) -> tuple[str, dict[str, 
 
 
 def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict[str, object], str]:
+    """处理邮箱注册并创建登录会话。"""
     settings = get_settings()
     email = payload.email.lower()
     try:
@@ -186,14 +202,17 @@ def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict
 
 
 def set_session_cookie(response: Response, session_id: str, csrf_token: str) -> None:
+    """把登录会话写入响应 Cookie。"""
     issue_session_cookies(response, session_id, csrf_token)
 
 
 def clear_session_cookie(response: Response) -> None:
+    """清理登录会话 Cookie。"""
     clear_session_cookies(response)
 
 
 def get_current_session(request: Request) -> AuthSession:
+    """从请求中恢复当前邮箱会话。"""
     settings = get_settings()
     session_id = request.cookies.get(settings.session_cookie_name)
     if not session_id:
@@ -216,6 +235,7 @@ def get_current_session(request: Request) -> AuthSession:
 
 
 def update_session_password(session_id: str, password: str, settings: Settings | None = None) -> None:
+    """在不重建会话的情况下同步更新会话内保存的邮箱密码。"""
     settings = settings or get_settings()
     SessionStore(client=get_redis_client(), settings=settings).update(
         session_id,
@@ -224,6 +244,7 @@ def update_session_password(session_id: str, password: str, settings: Settings |
 
 
 def logout_user(request: Request) -> None:
+    """注销当前邮箱会话并记录审计事件。"""
     settings = get_settings()
     session_id = request.cookies.get(settings.session_cookie_name)
     if session_id:

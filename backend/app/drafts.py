@@ -1,3 +1,9 @@
+"""草稿保存、更新、读取和删除逻辑。
+
+这个模块负责把草稿数据同步到 Redis 和 IMAP 草稿箱，并提供草稿读取、
+删除和更新的统一入口。
+"""
+
 from __future__ import annotations
 
 import json
@@ -19,6 +25,7 @@ from app.mailbox import _folder_name_from_list_line, _system_folder_map
 
 
 class DraftPayload(BaseModel):
+    """草稿请求体。"""
     draft_id: str | None = None
     to: list[str] = Field(default_factory=list)
     cc: list[str] = Field(default_factory=list)
@@ -30,19 +37,23 @@ class DraftPayload(BaseModel):
 
 
 def _draft_key(email: str, draft_id: str) -> str:
+    """生成草稿数据的 Redis 键。"""
     return f"draft:{email}:{draft_id}"
 
 
 def _draft_index_key(email: str) -> str:
+    """生成用户草稿索引集合的 Redis 键。"""
     return f"drafts:{email}"
 
 
 def _resolved_drafts_folder(adapter: object) -> str:
+    """从 IMAP 文件夹列表中解析草稿箱名称。"""
     folder_map = _system_folder_map([_folder_name_from_list_line(line) for line in adapter.list_folders()])
     return folder_map.get(".Drafts", ".Drafts")
 
 
 def _draft_message(session: AuthSession, payload: DraftPayload) -> EmailMessage:
+    """把草稿请求组装为 MIME 邮件对象。"""
     message = EmailMessage()
     message["From"] = session.email
     if payload.draft_id:
@@ -61,6 +72,7 @@ def _draft_message(session: AuthSession, payload: DraftPayload) -> EmailMessage:
     else:
         message.set_content(payload.text_body or "", cte="8bit")
     for attachment_id in payload.attachment_ids:
+        # 草稿中的附件与正式发送共用临时附件缓存。
         attachment = load_temp_attachment(session, attachment_id)
         maintype, _, subtype = str(attachment["content_type"]).partition("/")
         if not subtype:
@@ -75,6 +87,7 @@ def _draft_message(session: AuthSession, payload: DraftPayload) -> EmailMessage:
 
 
 def _persist_draft(session: AuthSession, payload: DraftPayload, *, require_existing: bool) -> dict[str, Any]:
+    """保存或更新草稿，同时同步写入 Redis 和 IMAP 草稿箱。"""
     is_update = payload.draft_id is not None
     draft_id = payload.draft_id or secrets.token_urlsafe(18)
     redis = redis_client.get_redis_client()
@@ -124,15 +137,18 @@ def _persist_draft(session: AuthSession, payload: DraftPayload, *, require_exist
 
 
 def save_draft(session: AuthSession, payload: DraftPayload) -> dict[str, Any]:
+    """新建草稿。"""
     return _persist_draft(session, payload, require_existing=False)
 
 
 def update_draft(session: AuthSession, draft_id: str, payload: DraftPayload) -> dict[str, Any]:
+    """更新已有草稿。"""
     payload = payload.model_copy(update={"draft_id": draft_id})
     return _persist_draft(session, payload, require_existing=True)
 
 
 def get_draft(session: AuthSession, draft_id: str) -> dict[str, Any]:
+    """读取指定草稿。"""
     raw = redis_client.get_redis_client().hget(_draft_key(session.email, draft_id), "payload")
     if not raw:
         raise AppError("DRAFT_NOT_FOUND", "草稿不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -140,6 +156,7 @@ def get_draft(session: AuthSession, draft_id: str) -> dict[str, Any]:
 
 
 def delete_draft(session: AuthSession, draft_id: str) -> dict[str, Any]:
+    """删除指定草稿并同步清理 IMAP 草稿箱。"""
     redis = redis_client.get_redis_client()
     key = _draft_key(session.email, draft_id)
     if not redis.exists(key):

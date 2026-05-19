@@ -1,3 +1,5 @@
+"""后台管理员认证、JWT 令牌与 TOTP 辅助逻辑。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +29,8 @@ ADMIN_BEARER_PREFIX = "Bearer "
 
 
 class AdminLoginRequest(BaseModel):
+    """后台登录请求体。"""
+
     username: str | None = Field(default=None, min_length=1, max_length=100)
     email: str | None = Field(default=None, min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=256)
@@ -34,20 +38,28 @@ class AdminLoginRequest(BaseModel):
 
 
 class AdminRefreshRequest(BaseModel):
+    """刷新后台访问令牌的请求体。"""
+
     refresh_token: str = Field(min_length=10, max_length=512)
 
 
 class AdminChangePasswordRequest(BaseModel):
+    """修改后台密码的请求体。"""
+
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=8, max_length=256)
 
 
 class AdminTotpConfirmRequest(BaseModel):
+    """TOTP 确认请求体。"""
+
     code: str = Field(min_length=6, max_length=10)
 
 
 @dataclass(frozen=True)
 class TokenBundle:
+    """后台登录后签发的一组访问凭证。"""
+
     access_token: str
     refresh_token: str
     access_expires_at: datetime
@@ -55,6 +67,7 @@ class TokenBundle:
 
 
 def _password_policy(password: str) -> None:
+    """校验后台密码是否满足强度要求。"""
     has_upper = any(char.isupper() for char in password)
     has_lower = any(char.islower() for char in password)
     has_digit = any(char.isdigit() for char in password)
@@ -68,15 +81,18 @@ def _password_policy(password: str) -> None:
 
 
 def hash_password(password: str) -> str:
+    """对后台密码进行哈希。"""
     _password_policy(password)
     return pwd_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    """校验明文密码是否与哈希匹配。"""
     return pwd_context.verify(password, password_hash)
 
 
 def _encode_access_token(user: AdminUser) -> tuple[str, datetime]:
+    """为后台管理员签发访问令牌。"""
     settings = get_settings()
     expires_at = utcnow() + timedelta(minutes=settings.admin_access_token_ttl_minutes)
     payload = {
@@ -92,10 +108,12 @@ def _encode_access_token(user: AdminUser) -> tuple[str, datetime]:
 
 
 def _hash_refresh_token(token: str) -> str:
+    """对刷新令牌做不可逆哈希。"""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _issue_refresh_token(db: Session, user: AdminUser) -> tuple[str, datetime]:
+    """创建新的后台刷新令牌记录。"""
     expires_at = utcnow() + timedelta(days=get_settings().admin_refresh_token_ttl_days)
     token = secrets.token_urlsafe(48)
     db.add(
@@ -109,6 +127,7 @@ def _issue_refresh_token(db: Session, user: AdminUser) -> tuple[str, datetime]:
 
 
 def issue_token_bundle(db: Session, user: AdminUser) -> TokenBundle:
+    """为管理员生成完整的访问令牌包。"""
     cleanup_refresh_tokens(db, user_id=user.id)
     access_token, access_expires_at = _encode_access_token(user)
     refresh_token, refresh_expires_at = _issue_refresh_token(db, user)
@@ -121,6 +140,7 @@ def issue_token_bundle(db: Session, user: AdminUser) -> TokenBundle:
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
+    """解析并校验后台访问令牌。"""
     try:
         payload = jwt.decode(token, get_settings().effective_admin_jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
@@ -139,6 +159,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 
 def bootstrap_admin_user(db: Session) -> None:
+    """在开发或测试环境下按配置初始化后台管理员。"""
     settings = get_settings()
     username = settings.effective_admin_bootstrap_username
     password = settings.effective_admin_bootstrap_password
@@ -159,6 +180,7 @@ def bootstrap_admin_user(db: Session) -> None:
 
 
 def authenticate_admin(request: Request, payload: AdminLoginRequest, db: Session) -> tuple[AdminUser, TokenBundle]:
+    """执行后台管理员登录校验并签发令牌。"""
     bootstrap_admin_user(db)
     identity = (payload.username or payload.email or "").strip()
     user = db.scalar(select(AdminUser).where(AdminUser.username == identity))
@@ -205,6 +227,7 @@ def authenticate_admin(request: Request, payload: AdminLoginRequest, db: Session
 
 
 def refresh_admin_token(request: Request, payload: AdminRefreshRequest, db: Session) -> tuple[AdminUser, TokenBundle]:
+    """使用刷新令牌换取新的访问凭证。"""
     token_hash = _hash_refresh_token(payload.refresh_token)
     record = db.scalar(select(AdminRefreshToken).where(AdminRefreshToken.token_hash == token_hash))
     if record is None or record.revoked_at is not None or normalize_utc(record.expires_at) <= utcnow():
@@ -228,6 +251,7 @@ def refresh_admin_token(request: Request, payload: AdminRefreshRequest, db: Sess
 
 
 def revoke_refresh_token(db: Session, token: str) -> None:
+    """撤销指定刷新令牌。"""
     token_hash = _hash_refresh_token(token)
     record = db.scalar(select(AdminRefreshToken).where(AdminRefreshToken.token_hash == token_hash))
     if record is not None and record.revoked_at is None:
@@ -235,6 +259,7 @@ def revoke_refresh_token(db: Session, token: str) -> None:
 
 
 def build_admin_context(user: AdminUser) -> AdminContext:
+    """从管理员用户实体构建请求上下文。"""
     return AdminContext(
         user_id=user.id,
         username=user.username,
@@ -247,6 +272,7 @@ def get_current_admin(
     authorization: str | None = Header(default=None, alias="Authorization"),
     db: Session = Depends(get_db_session),
 ) -> AdminContext:
+    """FastAPI 依赖项：从 Authorization 头解析当前管理员。"""
     bootstrap_admin_user(db)
     if not authorization or not authorization.startswith(ADMIN_BEARER_PREFIX):
         raise AppError(
@@ -267,6 +293,7 @@ def get_current_admin(
 
 
 def build_auth_payload(user: AdminUser, bundle: TokenBundle) -> dict[str, Any]:
+    """把管理员实体和令牌打包成前端登录响应载荷。"""
     return {
         "user": {
             "id": str(user.id),

@@ -1,3 +1,9 @@
+"""写信与发信流程的邮件组装逻辑。
+
+这个模块负责把前端提交的写信表单整理成标准 MIME 邮件，处理附件挂载、
+SMTP 发送以及发件后归档到已发送文件夹。
+"""
+
 from __future__ import annotations
 
 from email.message import EmailMessage
@@ -17,6 +23,7 @@ from app.mailbox import _folder_name_from_list_line, _system_folder_map
 
 
 class SendMailRequest(BaseModel):
+    """写信请求体，包含收件人、正文和附件引用。"""
     to: list[EmailStr] = Field(default_factory=list)
     cc: list[EmailStr] = Field(default_factory=list)
     bcc: list[EmailStr] = Field(default_factory=list)
@@ -28,6 +35,7 @@ class SendMailRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_recipients(self) -> "SendMailRequest":
+        """确保收件人非空且不重复。"""
         recipients = [str(item).lower() for item in [*self.to, *self.cc, *self.bcc]]
         if not recipients:
             raise ValueError("至少需要一个收件人")
@@ -37,6 +45,7 @@ class SendMailRequest(BaseModel):
 
 
 def _smtp_settings(session: AuthSession) -> SmtpSettings:
+    """从当前会话和全局配置构造 SMTP 连接参数。"""
     smtp_config = session.smtp
     settings = get_settings()
     return SmtpSettings(
@@ -51,6 +60,7 @@ def _smtp_settings(session: AuthSession) -> SmtpSettings:
 
 
 def _imap_settings(session: AuthSession) -> ImapSettings:
+    """从当前会话和全局配置构造 IMAP 连接参数。"""
     imap_config = session.imap
     settings = get_settings()
     return ImapSettings(
@@ -65,6 +75,7 @@ def _imap_settings(session: AuthSession) -> ImapSettings:
 
 
 def _build_message(session: AuthSession, payload: SendMailRequest) -> EmailMessage:
+    """把写信请求组装为可发送的 MIME 邮件对象。"""
     message = EmailMessage()
     message["Message-ID"] = make_msgid(domain=session.email.split("@")[-1])
     message["Date"] = formatdate(localtime=True)
@@ -83,6 +94,7 @@ def _build_message(session: AuthSession, payload: SendMailRequest) -> EmailMessa
         message.set_content(text_body)
 
     for attachment_id in payload.attachment_ids:
+        # 附件先从临时缓存读取，再挂载到最终邮件中。
         attachment = load_temp_attachment(session, attachment_id)
         maintype, _, subtype = str(attachment["content_type"]).partition("/")
         if not subtype:
@@ -97,6 +109,7 @@ def _build_message(session: AuthSession, payload: SendMailRequest) -> EmailMessa
 
 
 def send_mail(session: AuthSession, payload: SendMailRequest) -> dict[str, Any]:
+    """发送邮件并尝试将已发邮件归档到服务器端已发送文件夹。"""
     message = _build_message(session, payload)
     smtp = mail_adapters.SmtpAdapter(_smtp_settings(session))
     imap = mail_adapters.ImapAdapter(_imap_settings(session))

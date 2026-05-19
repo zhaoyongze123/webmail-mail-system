@@ -1,3 +1,9 @@
+"""邮件账户、文件夹和消息状态同步到数据库的逻辑。
+
+这个模块负责把 IMAP 侧的账号、文件夹、消息摘要和已读状态写入数据库，
+用于前端列表、统计和状态一致性。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -17,10 +23,12 @@ logger = logging.getLogger("app.mail_state")
 
 
 def _now() -> datetime:
+    """返回当前 UTC 时间。"""
     return datetime.now(timezone.utc)
 
 
 def _folder_type(folder_name: str) -> str:
+    """根据文件夹名称推断逻辑类型。"""
     normalized = folder_name.strip().lstrip(".").lower()
     if normalized == "inbox":
         return "inbox"
@@ -38,6 +46,7 @@ def _folder_type(folder_name: str) -> str:
 
 
 def _safe_db_write(operation: str, callback) -> Any | None:
+    """安全执行数据库写入，失败时只记录日志不抛出。"""
     try:
         session_factory = get_session_factory()
         with session_factory() as db_session:
@@ -52,6 +61,7 @@ def _safe_db_write(operation: str, callback) -> Any | None:
 
 
 def ensure_mail_account(email: str, *, display_name: str | None = None) -> UUIDType | None:
+    """确保邮箱账号在本地数据库中存在并同步连接信息。"""
     settings = get_settings()
     normalized_email = email.strip().lower()
 
@@ -85,6 +95,7 @@ def ensure_mail_account(email: str, *, display_name: str | None = None) -> UUIDT
 
 
 def sync_folders(email: str, folders: list[dict[str, Any]]) -> None:
+    """同步 IMAP 文件夹列表到数据库。"""
     normalized_email = email.strip().lower()
 
     def write(db_session) -> None:
@@ -121,6 +132,7 @@ def sync_folders(email: str, folders: list[dict[str, Any]]) -> None:
 
 
 def sync_message_summaries(email: str, folder_name: str, messages: list[dict[str, Any]], *, total_count: int | None = None) -> None:
+    """同步文件夹内的消息摘要、已读状态和缓存字段。"""
     normalized_email = email.strip().lower()
 
     def write(db_session) -> None:
@@ -178,6 +190,7 @@ def sync_message_summaries(email: str, folder_name: str, messages: list[dict[str
 
 
 def persist_message_read_state(email: str, folder_name: str, uids: list[str], *, is_read: bool) -> None:
+    """持久化单批邮件的已读/未读状态变化。"""
     normalized_email = email.strip().lower()
 
     def write(db_session) -> None:

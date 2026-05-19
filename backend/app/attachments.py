@@ -1,3 +1,9 @@
+"""邮件附件临时存储与分块上传相关工具。
+
+这个模块负责把前端上传的附件先写入 Redis，支持普通上传、分块上传、
+临时读取和过期回收等流程，供写信和草稿保存链路复用。
+"""
+
 from __future__ import annotations
 
 import base64
@@ -17,16 +23,19 @@ from app.security import validate_attachment_id
 
 
 def _safe_filename(value: str) -> str:
+    """清理附件文件名，去掉路径和危险控制字符。"""
     filename = value.replace("\\", "/").split("/")[-1].strip()
     filename = re.sub(r"[\r\n\x00]+", "", filename)
     return filename or "attachment"
 
 
 def temp_attachment_key(email: str, attachment_id: str) -> str:
+    """生成附件临时缓存的 Redis 键。"""
     return f"attachment:temp:{email}:{attachment_id}"
 
 
 def temp_attachment_chunk_key(email: str, attachment_id: str) -> str:
+    """生成附件分块缓存的 Redis 键。"""
     return f"attachment:temp:chunk:{email}:{attachment_id}"
 
 
@@ -40,6 +49,7 @@ def persist_temp_attachment(
     ttl_seconds: int,
     expires_at: datetime | None = None,
 ) -> dict[str, Any]:
+    """把完整附件写入临时缓存，供写信/草稿链路短期复用。"""
     expires_at = expires_at or datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     redis = redis_client.get_redis_client()
     redis.hset(
@@ -66,6 +76,7 @@ def persist_temp_attachment(
 
 
 def _load_received_chunks(raw: dict[str, Any]) -> set[int]:
+    """解析已收到的分块序号集合。"""
     try:
         return {int(item) for item in json.loads(str(raw.get("received_chunks") or "[]"))}
     except json.JSONDecodeError:
@@ -83,6 +94,7 @@ async def store_temp_attachment_chunk(
     total_chunks: int,
     chunk: UploadFile,
 ) -> dict[str, Any]:
+    """接收单个附件分块，必要时拼装成完整附件后落入临时缓存。"""
     validate_attachment_id(attachment_id)
     if chunk_index >= total_chunks:
         raise AppError(
@@ -204,6 +216,7 @@ async def store_temp_attachment_chunk(
 
 
 def load_temp_attachment(session: AuthSession, attachment_id: str) -> dict[str, Any]:
+    """从临时缓存读取附件内容。"""
     validate_attachment_id(attachment_id)
     data = redis_client.get_redis_client().hgetall(temp_attachment_key(session.email, attachment_id))
     if not data:
@@ -220,6 +233,7 @@ def load_temp_attachment(session: AuthSession, attachment_id: str) -> dict[str, 
 
 
 async def upload_temp_attachments(session: AuthSession, files: list[UploadFile]) -> list[dict[str, Any]]:
+    """批量上传附件并写入临时缓存。"""
     settings = get_settings()
     max_mb = int(getattr(settings, "attachment_max_mb", 0) or 0)
     max_bytes = int(

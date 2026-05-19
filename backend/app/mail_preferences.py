@@ -1,3 +1,9 @@
+"""邮箱用户偏好在数据库中的读取与更新逻辑。
+
+这个模块负责把前端偏好设置映射到数据库模型，并在异常时安全回退到
+默认值，避免偏好读取影响主流程。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -20,6 +26,7 @@ logger = logging.getLogger("app.mail_preferences")
 
 
 def default_user_preferences() -> dict[str, Any]:
+    """返回系统默认的用户偏好结构。"""
     return {
         "system": {
             "page_size": DEFAULT_SETTINGS_PAGE_SIZE,
@@ -41,6 +48,7 @@ def default_user_preferences() -> dict[str, Any]:
 
 
 def _preference_model_defaults() -> dict[str, Any]:
+    """把默认偏好展开为数据库模型字段默认值。"""
     defaults = default_user_preferences()
     return {
         "page_size": defaults["system"]["page_size"],
@@ -57,10 +65,12 @@ def _preference_model_defaults() -> dict[str, Any]:
 
 
 def _normalize_email(email: str) -> str:
+    """标准化邮箱地址，统一大小写和空白。"""
     return email.strip().lower()
 
 
 def _read_preferences(preferences: MailUserPreference | None) -> dict[str, Any]:
+    """把数据库模型转换为前端使用的偏好结构。"""
     if preferences is None:
         return default_user_preferences()
     return {
@@ -84,6 +94,7 @@ def _read_preferences(preferences: MailUserPreference | None) -> dict[str, Any]:
 
 
 def get_user_preferences(email: str) -> dict[str, Any]:
+    """读取指定邮箱的偏好，失败时回退默认值。"""
     normalized_email = _normalize_email(email)
     session_factory = get_session_factory()
     try:
@@ -100,6 +111,7 @@ def get_user_preferences(email: str) -> dict[str, Any]:
 
 
 def update_user_preferences(email: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """更新指定邮箱的偏好并返回最新值。"""
     normalized_email = _normalize_email(email)
     session_factory = get_session_factory()
     with session_factory() as db_session:

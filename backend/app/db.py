@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""数据库引擎、会话工厂与元数据命名约定。"""
+
 from functools import lru_cache
 
 from sqlalchemy import MetaData, create_engine
@@ -18,15 +20,18 @@ NAMING_CONVENTION = {
 
 
 class Base(DeclarativeBase):
+    """所有 ORM 模型共享的 Declarative 基类。"""
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def get_database_url() -> str:
+    """读取当前进程应使用的数据库连接串。"""
     return get_settings().database_url
 
 
 @lru_cache(maxsize=1)
 def get_engine(database_url: str | None = None):
+    """创建或复用 SQLAlchemy 引擎实例。"""
     return create_engine(
         database_url or get_database_url(),
         pool_pre_ping=True,
@@ -34,6 +39,7 @@ def get_engine(database_url: str | None = None):
 
 
 def get_session_factory(database_url: str | None = None) -> sessionmaker[object]:
+    """创建配置好的 SQLAlchemy 会话工厂。"""
     return sessionmaker(
         bind=get_engine(database_url),
         autoflush=False,

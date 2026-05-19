@@ -1,3 +1,5 @@
+"""安全相关工具：CSRF、Cookie、附件标识与日志脱敏。"""
+
 from __future__ import annotations
 
 import json
@@ -46,10 +48,12 @@ _SENSITIVE_KEYS = {
 
 
 def new_csrf_token() -> str:
+    """生成新的 CSRF 令牌。"""
     return secrets.token_urlsafe(32)
 
 
 def set_cookie(response: Response, name: str, value: str, *, max_age: int | None = None, secure: bool | None = None) -> None:
+    """按系统安全策略写入 Cookie。"""
     settings = app_config.get_settings()
     response.set_cookie(
         name,
@@ -63,6 +67,7 @@ def set_cookie(response: Response, name: str, value: str, *, max_age: int | None
 
 
 def clear_cookie(response: Response, name: str, *, secure: bool | None = None) -> None:
+    """按系统安全策略清除 Cookie。"""
     settings = app_config.get_settings()
     response.delete_cookie(
         name,
@@ -73,18 +78,21 @@ def clear_cookie(response: Response, name: str, *, secure: bool | None = None) -
 
 
 def issue_session_cookies(response: Response, session_id: str, csrf_token: str) -> None:
+    """同时写入会话 Cookie 与 CSRF Cookie。"""
     settings = app_config.get_settings()
     set_cookie(response, settings.session_cookie_name, session_id, max_age=settings.session_ttl_seconds)
     set_cookie(response, CSRF_COOKIE_NAME, csrf_token, secure=settings.session_cookie_secure)
 
 
 def clear_session_cookies(response: Response) -> None:
+    """同时清除会话 Cookie 与 CSRF Cookie。"""
     settings = app_config.get_settings()
     clear_cookie(response, settings.session_cookie_name)
     clear_cookie(response, CSRF_COOKIE_NAME)
 
 
 def is_safe_attachment_id(attachment_id: str) -> bool:
+    """判断附件标识是否满足路径安全约束。"""
     candidate = attachment_id.strip()
     if not candidate or "\x00" in candidate or "\\" in candidate:
         return False
@@ -96,6 +104,7 @@ def is_safe_attachment_id(attachment_id: str) -> bool:
 
 
 def validate_attachment_id(attachment_id: str) -> None:
+    """校验附件标识，不合法时抛出业务异常。"""
     if not is_safe_attachment_id(attachment_id):
         raise AppError(
             "ATTACHMENT_INVALID_ID",
@@ -105,6 +114,7 @@ def validate_attachment_id(attachment_id: str) -> None:
 
 
 def _load_session_csrf_token(request: Request) -> str | None:
+    """从 Redis 会话中读取已签发的 CSRF 令牌。"""
     settings = app_config.get_settings()
     session_id = request.cookies.get(settings.session_cookie_name)
     if not session_id:
@@ -117,6 +127,7 @@ def _load_session_csrf_token(request: Request) -> str | None:
 
 
 def validate_csrf_request(request: Request) -> None:
+    """对需要保护的写请求执行 CSRF 校验。"""
     if request.method in SAFE_METHODS:
         return
     if request.url.path.startswith("/api/admin/"):
@@ -137,12 +148,14 @@ def validate_csrf_request(request: Request) -> None:
 
 
 def add_security_headers(response: Response) -> Response:
+    """为响应追加默认安全响应头。"""
     for name, value in SECURITY_HEADERS.items():
         response.headers[name] = value
     return response
 
 
 def csrf_token_from_request(request: Request) -> str | None:
+    """从请求上下文关联的会话中提取 CSRF 令牌。"""
     settings = app_config.get_settings()
     session_id = request.cookies.get(settings.session_cookie_name)
     if not session_id:
@@ -155,6 +168,7 @@ def csrf_token_from_request(request: Request) -> str | None:
 
 
 def sanitize_log_value(value: Any) -> Any:
+    """递归脱敏日志中的敏感字段。"""
     if isinstance(value, Mapping):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
@@ -174,4 +188,5 @@ def sanitize_log_value(value: Any) -> Any:
 
 
 def log_sanitized_event(message: str, **context: Any) -> None:
+    """记录已经脱敏的结构化日志。"""
     logger.info("%s %s", message, json.dumps(sanitize_log_value(context), ensure_ascii=False, sort_keys=True))
