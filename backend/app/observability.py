@@ -122,6 +122,10 @@ def record_audit_event(
     success: bool,
     metadata: dict[str, Any] | None = None,
     account_id: Any | None = None,
+    actor_type: str | None = None,
+    actor_id: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
 ) -> None:
     event_record = {
         "event_type": event_type,
@@ -152,6 +156,10 @@ def record_audit_event(
         "account_id": account_id,
         "event_type": event_type,
         "request_id": request_id,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "target_type": target_type,
+        "target_id": target_id,
         "ip": _client_ip(request),
         "user_agent": request.headers.get("user-agent") if request is not None else None,
         "success": success,

@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from sqlalchemy import UniqueConstraint
 
-from app.models import AuditLog, MailAccount, MailAttachment, MailContact, MailContactTag, MailDraft, MailFolder, MailMessage, MailSignature, MailUserPreference
+from app.models import (
+    AdminRefreshToken,
+    AdminUser,
+    AuditLog,
+    MailAccount,
+    MailAlias,
+    MailAttachment,
+    MailContact,
+    MailContactTag,
+    MailDomain,
+    MailDraft,
+    MailFolder,
+    MailMessage,
+    MailSignature,
+    MailUserPreference,
+    QuotaPolicy,
+)
 
 
 def test_table_names() -> None:
@@ -14,6 +30,11 @@ def test_table_names() -> None:
     assert MailUserPreference.__tablename__ == "mail_user_preferences"
     assert MailAttachment.__tablename__ == "mail_attachments"
     assert AuditLog.__tablename__ == "audit_logs"
+    assert MailDomain.__tablename__ == "mail_domains"
+    assert MailAlias.__tablename__ == "mail_aliases"
+    assert QuotaPolicy.__tablename__ == "quota_policies"
+    assert AdminUser.__tablename__ == "admin_users"
+    assert AdminRefreshToken.__tablename__ == "admin_refresh_tokens"
 
 
 def test_key_columns_exist() -> None:
@@ -27,8 +48,13 @@ def test_key_columns_exist() -> None:
     tag_columns = set(MailContactTag.__table__.columns.keys())
     attachment_columns = set(MailAttachment.__table__.columns.keys())
     audit_columns = set(AuditLog.__table__.columns.keys())
+    domain_columns = set(MailDomain.__table__.columns.keys())
+    alias_columns = set(MailAlias.__table__.columns.keys())
+    quota_columns = set(QuotaPolicy.__table__.columns.keys())
+    admin_user_columns = set(AdminUser.__table__.columns.keys())
+    refresh_token_columns = set(AdminRefreshToken.__table__.columns.keys())
 
-    assert {"id", "email", "imap_host", "smtp_host", "created_at", "updated_at"} <= account_columns
+    assert {"id", "email", "domain_id", "quota_mb", "status", "is_admin", "imap_host", "smtp_host", "created_at", "updated_at"} <= account_columns
     assert {"id", "account_id", "name", "type", "unread_count", "total_count"} <= folder_columns
     assert {"id", "account_id", "folder_id", "imap_uid", "to_emails", "flags", "cached_at"} <= message_columns
     assert {"id", "account_id", "subject", "attachment_refs", "status", "created_at"} <= draft_columns
@@ -69,7 +95,12 @@ def test_key_columns_exist() -> None:
     } <= contact_columns
     assert {"id", "contact_id", "name", "created_at"} <= tag_columns
     assert {"id", "account_id", "message_id", "draft_id", "storage_key", "expires_at"} <= attachment_columns
-    assert {"id", "account_id", "event_type", "metadata", "created_at"} <= audit_columns
+    assert {"id", "account_id", "event_type", "metadata", "actor_type", "actor_id", "target_type", "target_id", "created_at"} <= audit_columns
+    assert {"id", "name", "quota_limit_mb", "status", "created_at", "updated_at"} <= domain_columns
+    assert {"id", "domain_id", "source_address", "target_addresses", "is_active", "created_at", "updated_at"} <= alias_columns
+    assert {"id", "domain_id", "default_quota_mb", "warn_80_enabled", "warn_90_enabled", "warn_95_enabled"} <= quota_columns
+    assert {"id", "username", "password_hash", "role", "domain_id", "is_active", "totp_secret", "totp_enabled", "last_login_at"} <= admin_user_columns
+    assert {"id", "admin_user_id", "token_hash", "expires_at", "revoked_at", "created_at"} <= refresh_token_columns
 
 
 def test_message_unique_constraint_exists() -> None:
@@ -125,3 +156,17 @@ def test_contact_unique_constraint_and_tag_indexes_exist() -> None:
     assert any(index.name == "ix_mail_contacts_account_id_is_blacklisted" for index in MailContact.__table__.indexes)
     assert any(index.name == "ix_mail_contact_tags_contact_id" for index in MailContactTag.__table__.indexes)
     assert any(index.name == "ix_mail_contact_tags_name" for index in MailContactTag.__table__.indexes)
+
+
+def test_admin_related_constraints_exist() -> None:
+    domain_constraints = [constraint for constraint in MailDomain.__table__.constraints if isinstance(constraint, UniqueConstraint)]
+    alias_constraints = [constraint for constraint in MailAlias.__table__.constraints if isinstance(constraint, UniqueConstraint)]
+    admin_constraints = [constraint for constraint in AdminUser.__table__.constraints if isinstance(constraint, UniqueConstraint)]
+    refresh_constraints = [constraint for constraint in AdminRefreshToken.__table__.constraints if isinstance(constraint, UniqueConstraint)]
+    quota_constraints = [constraint for constraint in QuotaPolicy.__table__.constraints if isinstance(constraint, UniqueConstraint)]
+
+    assert any({column.name for column in constraint.columns} == {"name"} for constraint in domain_constraints)
+    assert any({column.name for column in constraint.columns} == {"source_address"} for constraint in alias_constraints)
+    assert any({column.name for column in constraint.columns} == {"username"} for constraint in admin_constraints)
+    assert any({column.name for column in constraint.columns} == {"token_hash"} for constraint in refresh_constraints)
+    assert any({column.name for column in constraint.columns} == {"domain_id"} for constraint in quota_constraints)

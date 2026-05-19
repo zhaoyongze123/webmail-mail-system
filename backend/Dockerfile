@@ -9,8 +9,11 @@ COPY requirements.txt .
 RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
     && pip install --no-cache-dir -r requirements.txt
 
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY app ./app
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "/app/docker-entrypoint.sh"]

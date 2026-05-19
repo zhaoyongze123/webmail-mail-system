@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.attachments import store_temp_attachment_chunk, upload_temp_attachments
+from app.admin_api import router as admin_router
 from app.auth import (
     LoginRequest,
     RegisterRequest,
@@ -83,6 +84,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(admin_router)
 app.include_router(signatures_router)
 
 

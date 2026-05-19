@@ -19,7 +19,17 @@ class MailAccount(Base):
 
     id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    domain_id: Mapped[UUIDType | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_domains.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    quota_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=500)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     imap_host: Mapped[str] = mapped_column(String(255), nullable=False)
     imap_port: Mapped[int] = mapped_column(Integer, nullable=False)
     imap_ssl: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -38,6 +48,7 @@ class MailAccount(Base):
         onupdate=func.now(),
     )
 
+    domain: Mapped["MailDomain | None"] = relationship(back_populates="accounts")
     folders: Mapped[list["MailFolder"]] = relationship(
         back_populates="account",
         cascade="all, delete-orphan",
@@ -65,6 +76,38 @@ class MailAccount(Base):
     )
     attachments: Mapped[list["MailAttachment"]] = relationship(back_populates="account")
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="account")
+
+
+class MailDomain(Base):
+    __tablename__ = "mail_domains"
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    quota_limit_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=10240)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    accounts: Mapped[list["MailAccount"]] = relationship(back_populates="domain")
+    aliases: Mapped[list["MailAlias"]] = relationship(
+        back_populates="domain",
+        cascade="all, delete-orphan",
+    )
+    quota_policy: Mapped["QuotaPolicy | None"] = relationship(
+        back_populates="domain",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    admin_users: Mapped[list["AdminUser"]] = relationship(back_populates="domain")
 
 
 class MailFolder(Base):
@@ -365,6 +408,10 @@ class AuditLog(Base):
     )
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    actor_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    actor_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     ip: Mapped[str | None] = mapped_column(INET_COMPAT, nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -376,3 +423,127 @@ class AuditLog(Base):
     )
 
     account: Mapped["MailAccount | None"] = relationship(back_populates="audit_logs")
+
+
+class MailAlias(Base):
+    __tablename__ = "mail_aliases"
+    __table_args__ = (
+        UniqueConstraint("source_address"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    domain_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_domains.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    target_addresses: Mapped[list[str]] = mapped_column(JSON_COMPAT, nullable=False, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    domain: Mapped["MailDomain"] = relationship(back_populates="aliases")
+
+
+class QuotaPolicy(Base):
+    __tablename__ = "quota_policies"
+    __table_args__ = (
+        UniqueConstraint("domain_id"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    domain_id: Mapped[UUIDType | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_domains.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    default_quota_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=500)
+    warn_80_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    warn_90_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    warn_95_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    domain: Mapped["MailDomain | None"] = relationship(back_populates="quota_policy")
+
+
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+    __table_args__ = (
+        UniqueConstraint("username"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    username: Mapped[str] = mapped_column(String(100), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="superadmin")
+    domain_id: Mapped[UUIDType | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_domains.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    domain: Mapped["MailDomain | None"] = relationship(back_populates="admin_users")
+    refresh_tokens: Mapped[list["AdminRefreshToken"]] = relationship(
+        back_populates="admin_user",
+        cascade="all, delete-orphan",
+    )
+
+
+class AdminRefreshToken(Base):
+    __tablename__ = "admin_refresh_tokens"
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    admin_user_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("admin_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    admin_user: Mapped["AdminUser"] = relationship(back_populates="refresh_tokens")

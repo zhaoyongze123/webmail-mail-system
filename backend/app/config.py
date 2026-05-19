@@ -33,12 +33,38 @@ class Settings(BaseSettings):
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
     )
+    admin_jwt_secret: str | None = Field(default=None, alias="ADMIN_JWT_SECRET")
+    admin_access_token_ttl_minutes: int = Field(default=15, alias="ADMIN_ACCESS_TOKEN_TTL_MINUTES")
+    admin_refresh_token_ttl_days: int = Field(default=7, alias="ADMIN_REFRESH_TOKEN_TTL_DAYS")
+    admin_bootstrap_username: str | None = Field(default=None, alias="ADMIN_BOOTSTRAP_USERNAME")
+    admin_bootstrap_password: str | None = Field(default=None, alias="ADMIN_BOOTSTRAP_PASSWORD")
+    admin_totp_issuer: str = Field(default="Webmail Admin", alias="ADMIN_TOTP_ISSUER")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def effective_admin_jwt_secret(self) -> str:
+        return self.admin_jwt_secret or self.app_secret_key
+
+    @property
+    def effective_admin_bootstrap_username(self) -> str | None:
+        if self.admin_bootstrap_username:
+            return self.admin_bootstrap_username.strip() or None
+        if self.app_env in {"development", "test"}:
+            return "admin"
+        return None
+
+    @property
+    def effective_admin_bootstrap_password(self) -> str | None:
+        if self.admin_bootstrap_password:
+            return self.admin_bootstrap_password
+        if self.app_env in {"development", "test"}:
+            return "Admin123456!"
+        return None
 
 
 @lru_cache

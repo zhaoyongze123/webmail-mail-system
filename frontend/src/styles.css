@@ -62,6 +62,236 @@
   background-color: var(--app-bg);
 }
 
+.admin-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  background: linear-gradient(180deg, #f4f7fb 0%, #eef3f8 100%);
+  color: var(--text-primary);
+}
+
+.admin-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px 18px;
+  border-right: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+}
+
+.admin-brand a {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.admin-brand p,
+.admin-sidebar-footer p,
+.admin-page-header p,
+.admin-auth-card p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.admin-nav {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-nav-link {
+  color: var(--text-primary);
+  text-decoration: none;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: transparent;
+}
+
+.admin-nav-link.is-active {
+  background: #e8f0fe;
+  color: #0b57d0;
+  font-weight: 600;
+}
+
+.admin-sidebar-footer {
+  margin-top: auto;
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.admin-main {
+  min-width: 0;
+  padding: 24px;
+}
+
+.admin-page {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-page-header h1,
+.admin-auth-card h1 {
+  font-size: 28px;
+  line-height: 1.2;
+  margin-bottom: 6px;
+}
+
+.admin-page-body {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.admin-stat-card,
+.admin-auth-card {
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 12px 36px var(--shadow-soft);
+}
+
+.admin-stat-card {
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.admin-stat-card span {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.admin-stat-card strong {
+  font-size: 30px;
+}
+
+.admin-auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, rgba(68, 114, 234, 0.14), transparent 34%), #edf3fb;
+}
+
+.admin-auth-card {
+  width: min(440px, 100%);
+  padding: 28px;
+  display: grid;
+  gap: 16px;
+}
+
+.admin-auth-kicker {
+  color: #0b57d0;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.admin-auth-card label {
+  display: grid;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.admin-auth-card input {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--input-bg);
+}
+
+.admin-auth-card em {
+  color: #b42318;
+  font-style: normal;
+  font-size: 12px;
+}
+
+.admin-button {
+  border: 0;
+  border-radius: 10px;
+  padding: 11px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.admin-button-primary {
+  background: linear-gradient(135deg, #0b57d0 0%, #4472ea 100%);
+  color: #fff;
+}
+
+.admin-button-secondary {
+  background: #eef3fb;
+  color: var(--text-primary);
+}
+
+.admin-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 14px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.admin-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  background: #f8fafc;
+}
+
+.admin-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 1100px) {
+  .admin-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .admin-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .admin-main {
+    padding: 16px;
+  }
+
+  .admin-stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .auth-page {
   min-height: 100vh;
   display: grid;
