@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import get_session_factory
 from app.models import MailAccount, MailUserPreference
@@ -13,6 +15,8 @@ from app.schemas import (
     DEFAULT_SETTINGS_REPLY_QUOTE_POSITION,
     DEFAULT_SETTINGS_TIMEZONE,
 )
+
+logger = logging.getLogger("app.mail_preferences")
 
 
 def default_user_preferences() -> dict[str, Any]:
@@ -82,11 +86,17 @@ def _read_preferences(preferences: MailUserPreference | None) -> dict[str, Any]:
 def get_user_preferences(email: str) -> dict[str, Any]:
     normalized_email = _normalize_email(email)
     session_factory = get_session_factory()
-    with session_factory() as db_session:
-        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
-        if account is None:
-            return default_user_preferences()
-        return _read_preferences(account.preferences)
+    try:
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is None:
+                return default_user_preferences()
+            return _read_preferences(account.preferences)
+    except SQLAlchemyError as exc:
+        logger.warning("读取用户偏好失败，回退默认值 email=%s error=%s", normalized_email, exc.__class__.__name__)
+    except Exception as exc:  # pragma: no cover - 降级保护
+        logger.warning("读取用户偏好异常，回退默认值 email=%s error=%s", normalized_email, exc.__class__.__name__)
+    return default_user_preferences()
 
 
 def update_user_preferences(email: str, payload: dict[str, Any]) -> dict[str, Any]:

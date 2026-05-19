@@ -14,3 +14,6 @@ bleach==6.3.0
 premailer==3.10.0
 tinycss2==1.4.0
 python-multipart==0.0.20
+passlib[bcrypt]==1.7.4
+PyJWT==2.10.1
+pyotp==2.9.0

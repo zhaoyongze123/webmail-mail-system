@@ -48,10 +48,8 @@ services:
   frontend:
     build:
       context: ./frontend
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://backend:8000}
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       - backend
 
