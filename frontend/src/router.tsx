@@ -4,6 +4,7 @@ import { AdminLayout, AdminPageShell } from './admin/layout';
 import { AdminAuthProvider, RequireAdminAuth, useAdminAuth } from './admin/auth';
 import { AdminLoginPage } from './admin/pages/AdminLoginPage';
 import { AdminDashboardPage } from './admin/pages/AdminDashboardPage';
+import { AdminActionHistoryPage } from './admin/pages/AdminActionHistoryPage';
 import { AdminDomainsPage } from './admin/pages/AdminDomainsPage';
 import { AdminUsersPage } from './admin/pages/AdminUsersPage';
 import { AdminAliasesPage } from './admin/pages/AdminAliasesPage';
@@ -14,6 +15,8 @@ import { AdminQueuePage } from './admin/pages/AdminQueuePage';
 import { AdminAuditLogsPage } from './admin/pages/AdminAuditLogsPage';
 import { AdminSystemHealthPage } from './admin/pages/AdminSystemHealthPage';
 import { AdminSecurityPage } from './admin/pages/AdminSecurityPage';
+import { AdminLogsPage } from './admin/pages/AdminLogsPage';
+import { AdminSystemConfigPage } from './admin/pages/AdminSystemConfigPage';
 
 function AdminIndexRedirect() {
   const { hasToken } = useAdminAuth();
@@ -47,6 +50,30 @@ export function buildRoutes(): RouteObject[] {
                   element: (
                     <AdminPageShell title="控制台" description="查看管理后台关键概览与最近运行状态。">
                       <AdminDashboardPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'action-history',
+                  element: (
+                    <AdminPageShell title="操作历史" description="查看后台关键操作历史、状态与执行细节。">
+                      <AdminActionHistoryPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'logs',
+                  element: (
+                    <AdminPageShell title="日志中心" description="按来源、级别和关键字查看后台日志，便于快速排障与追踪。">
+                      <AdminLogsPage />
+                    </AdminPageShell>
+                  ),
+                },
+                {
+                  path: 'system-config',
+                  element: (
+                    <AdminPageShell title="系统配置" description="预留主题、语言、队列和审计相关的统一配置入口。">
+                      <AdminSystemConfigPage />
                     </AdminPageShell>
                   ),
                 },

@@ -5,9 +5,11 @@ import {
   bulkAdminUsers,
   createAdminUser,
   deleteAdminUser,
+  importAdminUsersCsv,
   fetchAdminDomains,
   fetchAdminUsers,
   resetAdminUserPassword,
+  resetAdminUserPasswordRandomly,
   updateAdminUser,
   updateAdminUserQuota,
 } from '../api';
@@ -25,6 +27,19 @@ const emptyUserForm: UserFormInput = {
   is_admin: false,
 };
 
+const emptyImportForm = {
+  csv_content: '',
+  domain_id: '',
+};
+
+function formatLastLogin(value?: string | null) {
+  if (!value) {
+    return '—';
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' });
+}
+
 export function AdminUsersPage() {
   const queryClient = useQueryClient();
   const params = useAdminListSearchParams({ q: '', status: '', domain_id: '', page: 1 });
@@ -33,8 +48,11 @@ export function AdminUsersPage() {
   const [form, setForm] = useState<UserFormInput>(emptyUserForm);
   const [resetPasswordTarget, setResetPasswordTarget] = useState<AdminMailboxUser | null>(null);
   const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [generatedPassword, setGeneratedPassword] = useState('');
   const [quotaTarget, setQuotaTarget] = useState<AdminMailboxUser | null>(null);
   const [quotaValue, setQuotaValue] = useState('');
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importForm, setImportForm] = useState(emptyImportForm);
   const [deleteTarget, setDeleteTarget] = useState<AdminMailboxUser | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,12 +102,33 @@ export function AdminUsersPage() {
   });
 
   const resetPasswordMutation = useMutation({
-    mutationFn: ({ id, password }: { id: string; password: string }) => resetAdminUserPassword(id, password),
-    onSuccess: () => {
-      setResetPasswordTarget(null);
+    mutationFn: ({ id, password, generateRandom }: { id: string; password: string; generateRandom: boolean }) => generateRandom
+      ? resetAdminUserPasswordRandomly(id)
+      : resetAdminUserPassword(id, password),
+    onSuccess: async (payload) => {
       setResetPasswordValue('');
-      setSuccess('密码已重置。');
+      setGeneratedPassword(payload.generated_password || '');
+      setSuccess(payload.generated_password ? '密码已重置，已返回随机密码。' : '密码已重置。');
       setError(null);
+      await refreshLists();
+      if (!payload.generated_password) {
+        setResetPasswordTarget(null);
+      }
+    },
+    onError: (err) => {
+      setSuccess(null);
+      setError((err as Error).message);
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: importAdminUsersCsv,
+    onSuccess: async (payload) => {
+      setImportDialogOpen(false);
+      setImportForm(emptyImportForm);
+      setSuccess(`CSV 导入完成：创建 ${payload.created} 条，跳过 ${payload.skipped} 条。`);
+      setError(null);
+      await refreshLists();
     },
     onError: (err) => {
       setSuccess(null);
@@ -162,6 +201,7 @@ export function AdminUsersPage() {
     { accessorKey: 'quota_mb', header: '上限(MB)' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)', cell: (info) => info.getValue<number>() ?? 0 },
     { accessorKey: 'usage_percent', header: '使用率', cell: (info) => `${info.getValue<number>() ?? 0}%` },
+    { accessorKey: 'last_login_at', header: '最后登录', cell: (info) => formatLastLogin(info.getValue<string | null | undefined>()) },
     { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
     {
       id: 'actions',
@@ -230,7 +270,15 @@ export function AdminUsersPage() {
 
   return (
     <div className="admin-section-stack">
-      <SectionCard title={editingUser ? '编辑用户' : '新增用户'} description="后台创建用户时会真实写入本地密码哈希。">
+      <SectionCard
+        title={editingUser ? '编辑用户' : '新增用户'}
+        description="后台创建用户时会真实写入本地密码哈希。"
+        actions={(
+          <button type="button" className="admin-button admin-button-secondary" onClick={() => setImportDialogOpen(true)}>
+            CSV 导入
+          </button>
+        )}
+      >
         <form
           className="admin-form-grid admin-form-grid--two"
           onSubmit={(event) => {
@@ -368,21 +416,23 @@ export function AdminUsersPage() {
         onClose={() => {
           setResetPasswordTarget(null);
           setResetPasswordValue('');
+          setGeneratedPassword('');
         }}
         actions={(
           <button
             type="button"
             className="admin-button admin-button-primary"
-            disabled={!resetPasswordTarget || !resetPasswordValue || resetPasswordMutation.isPending}
+            disabled={!resetPasswordTarget || resetPasswordMutation.isPending}
             onClick={() => {
               if (!resetPasswordTarget) return;
-              resetPasswordMutation.mutate({ id: resetPasswordTarget.id, password: resetPasswordValue });
+              resetPasswordMutation.mutate({ id: resetPasswordTarget.id, password: resetPasswordValue, generateRandom: !resetPasswordValue });
             }}
           >
-            确认重置
+            {resetPasswordValue ? '确认重置' : '随机重置并展示'}
           </button>
         )}
       >
+        <p className="admin-help-text">不填写密码时将自动生成随机密码，并在重置后展示返回结果。</p>
         <label className="admin-dialog-field">
           <span>新密码</span>
           <input
@@ -392,6 +442,58 @@ export function AdminUsersPage() {
             onChange={(event) => setResetPasswordValue(event.target.value)}
           />
         </label>
+        {generatedPassword ? (
+          <label className="admin-dialog-field">
+            <span>返回密码</span>
+            <input readOnly value={generatedPassword} />
+          </label>
+        ) : null}
+      </AdminDialog>
+
+      <AdminDialog
+        open={importDialogOpen}
+        title="CSV 导入用户"
+        description="支持按 email,password,display_name,quota_mb,status,is_admin 的 CSV 导入。"
+        onClose={() => {
+          setImportDialogOpen(false);
+          setImportForm(emptyImportForm);
+        }}
+        actions={(
+          <button
+            type="button"
+            className="admin-button admin-button-primary"
+            disabled={!importForm.csv_content.trim() || importMutation.isPending}
+            onClick={() => {
+              importMutation.mutate({
+                csv_content: importForm.csv_content,
+                domain_id: importForm.domain_id || undefined,
+              });
+            }}
+          >
+            开始导入
+          </button>
+        )}
+      >
+        <div className="admin-form-grid">
+          <label>
+            <span>所属域</span>
+            <select value={importForm.domain_id} onChange={(event) => setImportForm((current) => ({ ...current, domain_id: event.target.value }))}>
+              <option value="">自动识别</option>
+              {(domainData?.items || []).map((domain) => (
+                <option key={domain.id} value={domain.id}>{domain.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="admin-dialog-field">
+            <span>CSV 内容</span>
+            <textarea
+              rows={10}
+              value={importForm.csv_content}
+              onChange={(event) => setImportForm((current) => ({ ...current, csv_content: event.target.value }))}
+              placeholder="email,password,display_name,quota_mb,status,is_admin"
+            />
+          </label>
+        </div>
       </AdminDialog>
 
       <AdminDialog

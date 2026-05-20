@@ -1,21 +1,31 @@
 import type {
   AdminAlias,
+  AdminActionHistoryItem,
   AdminAuditLogItem,
   AdminAuthPayload,
   AdminDomainDnsCheck,
   AdminDomain,
+  AdminDashboardTrendsSnapshot,
+  AdminLogSnapshotPage,
+  AdminMailSystemCommandResult,
+  AdminMailSystemConfigPreview,
   AdminSystemHealthSnapshot,
+  AdminSystemConfigPayload,
+  AdminSystemConfigSnapshot,
   AdminTlsSnapshot,
   AdminMailboxUser,
   AdminOverviewStats,
   AdminQueueSnapshot,
   AdminQuotaItem,
   AdminRspamdSnapshot,
+  AdminCatchAllAliasResult,
   AliasFormInput,
   AliasUpdateInput,
   DomainFormInput,
   ListQuery,
   PaginatedResult,
+  AdminUserImportResult,
+  AdminUserResetPasswordResult,
   QuotaPolicyFormInput,
   UserFormInput,
   UserUpdateInput,
@@ -187,6 +197,10 @@ export async function fetchAdminOverview(): Promise<AdminOverviewStats> {
   return requestAdminApi<AdminOverviewStats>('/api/admin/overview', { method: 'GET' });
 }
 
+export async function fetchAdminDashboardTrends(period: '24h' | '7d' | '30d' = '7d'): Promise<AdminDashboardTrendsSnapshot> {
+  return requestAdminApi<AdminDashboardTrendsSnapshot>(`/api/admin/dashboard/trends${buildQuery({ period })}`, { method: 'GET' });
+}
+
 export async function fetchAdminDomains(query: ListQuery = {}): Promise<PaginatedResult<AdminDomain>> {
   const data = await requestAdminApi<PaginatedPayload<AdminDomain>>(`/api/admin/domains${buildQuery(query)}`, { method: 'GET' });
   return normalizePaginated(data);
@@ -253,9 +267,16 @@ export async function deleteAdminUser(userId: string) {
 }
 
 export async function resetAdminUserPassword(userId: string, password: string) {
-  return requestAdminApi<{ password_reset: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+  return requestAdminApi<AdminUserResetPasswordResult>(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
     method: 'POST',
     body: JSON.stringify({ password }),
+  });
+}
+
+export async function resetAdminUserPasswordRandomly(userId: string) {
+  return requestAdminApi<AdminUserResetPasswordResult>(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+    method: 'POST',
+    body: JSON.stringify({ generate_random: true }),
   });
 }
 
@@ -273,6 +294,13 @@ export async function updateAdminUserQuota(userId: string, quota_mb: number) {
   });
 }
 
+export async function importAdminUsersCsv(payload: { csv_content: string; domain_id?: string | null }) {
+  return requestAdminApi<AdminUserImportResult>('/api/admin/users/import-csv', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function recalcAdminUserQuota(userId: string) {
   return requestAdminApi<{ result: { status: string; detail: string }; user: AdminMailboxUser }>(`/api/admin/users/${encodeURIComponent(userId)}/quota/recalc`, {
     method: 'POST',
@@ -286,6 +314,13 @@ export async function fetchAdminAliases(query: ListQuery = {}): Promise<Paginate
 
 export async function createAdminAlias(payload: AliasFormInput) {
   return requestAdminApi<{ alias: AdminAlias }>('/api/admin/aliases', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function createAdminCatchAllAlias(payload: { domain_id: string; target_address: string }) {
+  return requestAdminApi<AdminCatchAllAliasResult>('/api/admin/aliases/catch-all', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -332,12 +367,134 @@ export async function fetchAdminAuditLogs(): Promise<{ items: AdminAuditLogItem[
   return requestAdminApi<{ items: AdminAuditLogItem[] }>('/api/admin/audit-logs', { method: 'GET' });
 }
 
+export async function fetchAdminActionHistory(query: ListQuery & {
+  action_type?: string;
+  target_type?: string;
+} = {}): Promise<PaginatedResult<AdminActionHistoryItem>> {
+  const data = await requestAdminApi<PaginatedPayload<AdminActionHistoryItem>>(`/api/admin/action-history${buildQuery(query)}`, { method: 'GET' });
+  return normalizePaginated(data);
+}
+
+export async function fetchAdminAuditLogsPage(query: ListQuery & {
+  event_type?: string;
+  actor_id?: string;
+  success_only?: boolean;
+  action?: string;
+  target?: string;
+  date_from?: string;
+  date_to?: string;
+} = {}): Promise<PaginatedResult<AdminAuditLogItem>> {
+  const data = await requestAdminApi<PaginatedPayload<AdminAuditLogItem>>(
+    `/api/admin/audit-logs${buildQuery({
+      ...query,
+      success_only: query.success_only === undefined ? undefined : Number(query.success_only),
+    })}`,
+    { method: 'GET' },
+  );
+  return normalizePaginated(data);
+}
+
+export async function exportAdminAuditLogs(payload: {
+  q?: string;
+  status?: string;
+  format?: 'csv' | 'json';
+}) {
+  return requestAdminApi<{ format: string; content: string; media_type: string; filename: string }>('/api/admin/audit-logs/export', {
+    method: 'POST',
+    body: JSON.stringify({ format: 'csv', ...payload }),
+  });
+}
+
+export async function fetchAdminLogs(query: ListQuery & {
+  sender?: string;
+  recipient?: string;
+} = {}): Promise<AdminLogSnapshotPage> {
+  return requestAdminApi<AdminLogSnapshotPage>(`/api/admin/logs${buildQuery(query)}`, { method: 'GET' });
+}
+
+export async function exportAdminLogs(payload: {
+  log_key?: string;
+  q?: string;
+  status?: string;
+  sender?: string;
+  recipient?: string;
+  format?: 'csv' | 'json';
+}) {
+  return requestAdminApi<{ format: string; content: string; media_type: string; filename: string }>('/api/admin/logs/export', {
+    method: 'POST',
+    body: JSON.stringify({ format: 'csv', ...payload }),
+  });
+}
+
 export async function fetchAdminHealth(): Promise<AdminSystemHealthSnapshot> {
   return requestAdminApi<AdminSystemHealthSnapshot>('/api/admin/system-health', { method: 'GET' });
 }
 
-export async function fetchAdminQueue(): Promise<AdminQueueSnapshot> {
-  return requestAdminApi<AdminQueueSnapshot>('/api/admin/queue', { method: 'GET' });
+export async function fetchAdminSystemConfig(): Promise<AdminSystemConfigSnapshot> {
+  return requestAdminApi<AdminSystemConfigSnapshot>('/api/admin/system-config', { method: 'GET' });
+}
+
+export async function updateAdminSystemConfig(payload: AdminSystemConfigPayload) {
+  return requestAdminApi<{ config: AdminSystemConfigSnapshot; detail: string }>('/api/admin/system-config', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAdminMailSystemConfigPreview(): Promise<AdminMailSystemConfigPreview> {
+  return requestAdminApi<AdminMailSystemConfigPreview>('/api/admin/mail-system/configs', { method: 'GET' });
+}
+
+export async function backupAdminMailSystemConfig(targetPath: string): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>(`/api/admin/mail-system/backup${buildQuery({ target_path: targetPath })}`, {
+    method: 'POST',
+  });
+}
+
+export async function restoreAdminMailSystemConfig(payload: { backup_path: string; target_path: string }): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/mail-system/restore', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function postmapAdminMailSystemConfig(): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/mail-system/postmap', {
+    method: 'POST',
+  });
+}
+
+export async function postaliasAdminMailSystemConfig(): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/mail-system/postalias', {
+    method: 'POST',
+  });
+}
+
+export async function reloadAdminPostfixService(): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/mail-system/postfix/reload', {
+    method: 'POST',
+  });
+}
+
+export async function reloadAdminDovecotService(): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/mail-system/dovecot/reload', {
+    method: 'POST',
+  });
+}
+
+export async function runAdminServiceAction(payload: { service: string; action: 'start' | 'stop' | 'restart' }): Promise<AdminMailSystemCommandResult> {
+  return requestAdminApi<AdminMailSystemCommandResult>('/api/admin/system/service-action', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAdminQueue(query: ListQuery = {}): Promise<AdminQueueSnapshot> {
+  return requestAdminApi<AdminQueueSnapshot>(`/api/admin/queue${buildQuery(query)}`, { method: 'GET' });
+}
+
+export async function fetchAdminQueueItem(queueId: string) {
+  return requestAdminApi<{ status: string; detail: string; queue_id: string; content?: string; command_result?: { command?: string[]; stdout?: string; stderr?: string; exit_code?: number; duration_ms?: number; ok?: boolean } }>(`/api/admin/queue/${encodeURIComponent(queueId)}`, { method: 'GET' });
 }
 
 export async function fetchAdminRspamd(): Promise<AdminRspamdSnapshot> {
@@ -379,6 +536,27 @@ export async function deleteAdminQueueItem(queueId: string) {
   return requestAdminApi<{ queue_id: string; status: string; detail: string }>('/api/admin/queue/delete', {
     method: 'POST',
     body: JSON.stringify({ queue_id: queueId }),
+  });
+}
+
+export async function requeueAdminQueueItem(queueId: string) {
+  return requestAdminApi<{ status: string; detail: string }>('/api/admin/queue/requeue', {
+    method: 'POST',
+    body: JSON.stringify({ queue_id: queueId }),
+  });
+}
+
+export async function bulkDeleteAdminQueueItems(queueIds: string[]) {
+  return requestAdminApi<{ status: string; detail: string; deleted_count: number; deleted_ids: string[]; errors: { queue_id: string; detail: string }[] }>('/api/admin/queue/bulk-delete', {
+    method: 'POST',
+    body: JSON.stringify({ queue_ids: queueIds }),
+  });
+}
+
+export async function clearAdminQueueByStatuses(statuses: string[]) {
+  return requestAdminApi<{ status: string; detail: string; deleted_count: number; deleted_ids: string[]; errors: { queue_id: string; detail: string }[] }>('/api/admin/queue/clear', {
+    method: 'POST',
+    body: JSON.stringify({ statuses }),
   });
 }
 

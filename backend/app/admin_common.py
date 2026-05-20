@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Any
 from uuid import UUID
 
 from fastapi import Request, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
 from app.errors import AppError
-from app.models import AdminRefreshToken, AdminUser, AuditLog, MailAlias, MailDomain, MailAccount, MailMessage, QuotaPolicy
+from app.models import AdminActionHistory, AdminRefreshToken, AdminUser, AuditLog, MailAlias, MailDomain, MailAccount, MailMessage, QuotaPolicy
 from app.observability import record_audit_event
 
 
@@ -263,12 +263,23 @@ def cleanup_refresh_tokens(db: Session, *, user_id: UUID | None = None) -> None:
             token.revoked_at = utcnow()
 
 
+def cleanup_admin_logs(db: Session, *, retention_days: int) -> dict[str, int]:
+    """清理过期审计与后台历史记录。"""
+    if retention_days <= 0:
+        return {"audit_logs": 0, "action_history": 0}
+    cutoff = utcnow() - timedelta(days=retention_days)
+    audit_deleted = int(db.execute(delete(AuditLog).where(AuditLog.created_at < cutoff)).rowcount or 0)
+    action_deleted = int(db.execute(delete(AdminActionHistory).where(AdminActionHistory.created_at < cutoff)).rowcount or 0)
+    return {"audit_logs": audit_deleted, "action_history": action_deleted}
+
+
 def count_dashboard_metrics(db: Session) -> dict[str, int]:
     """统计后台仪表盘所需的核心指标。"""
     return {
         "domain_total": int(db.scalar(select(func.count()).select_from(MailDomain)) or 0),
         "user_total": int(db.scalar(select(func.count()).select_from(MailAccount)) or 0),
         "alias_total": int(db.scalar(select(func.count()).select_from(MailAlias)) or 0),
+        "active_user_total": int(db.scalar(select(func.count()).select_from(MailAccount).where(MailAccount.status == "active")) or 0),
         "active_admin_total": int(
             db.scalar(select(func.count()).select_from(AdminUser).where(AdminUser.is_active.is_(True))) or 0
         ),

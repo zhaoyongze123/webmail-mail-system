@@ -17,11 +17,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.cache import LoginFailureLimiter
 from app.admin_common import AdminContext, cleanup_refresh_tokens, ensure_active_admin, get_db_session, normalize_utc, utcnow
 from app.config import get_settings
 from app.errors import AppError
 from app.models import AdminRefreshToken, AdminUser
 from app.observability import record_audit_event
+from app.redis_client import get_redis_client
+from app.admin_system import check_admin_ip_access
 
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
@@ -183,16 +186,44 @@ def authenticate_admin(request: Request, payload: AdminLoginRequest, db: Session
     """执行后台管理员登录校验并签发令牌。"""
     bootstrap_admin_user(db)
     identity = (payload.username or payload.email or "").strip()
+    client_ip = request.client.host if request.client else "unknown"
+    ip_policy = check_admin_ip_access(client_ip)
+    if ip_policy["status"] != "ok":
+        record_audit_event(
+            request,
+            "admin.auth.login",
+            success=False,
+            metadata={"username": identity, "reason": "ip_blocked", "ip": client_ip},
+        )
+        raise AppError(
+            "ADMIN_IP_BLOCKED",
+            ip_policy["detail"],
+            http_status=status.HTTP_403_FORBIDDEN,
+        )
+    limiter = LoginFailureLimiter(client=get_redis_client(), settings=get_settings())
+    if limiter.is_limited(client_ip, identity):
+        record_audit_event(
+            request,
+            "admin.auth.login",
+            success=False,
+            metadata={"username": identity, "reason": "rate_limited", "ip": client_ip},
+        )
+        raise AppError(
+            "ADMIN_AUTH_RATE_LIMITED",
+            "登录失败次数过多，请稍后再试",
+            http_status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
     user = db.scalar(select(AdminUser).where(AdminUser.username == identity))
     user = ensure_active_admin(user)
     if not verify_password(payload.password, user.password_hash):
+        failures = limiter.record_failure(client_ip, identity)
         record_audit_event(
             request,
             "admin.auth.login",
             success=False,
             actor_type="admin_user",
             actor_id=str(user.id),
-            metadata={"username": identity, "reason": "invalid_credentials"},
+            metadata={"username": identity, "reason": "invalid_credentials", "failures": failures, "ip": client_ip},
         )
         raise AppError(
             "ADMIN_AUTH_INVALID",
@@ -213,6 +244,7 @@ def authenticate_admin(request: Request, payload: AdminLoginRequest, db: Session
                 "二次验证码错误",
                 http_status=status.HTTP_401_UNAUTHORIZED,
             )
+    limiter.clear(client_ip, identity)
     user.last_login_at = utcnow()
     bundle = issue_token_bundle(db, user)
     record_audit_event(

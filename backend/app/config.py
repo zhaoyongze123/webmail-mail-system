@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     admin_bootstrap_password: str | None = Field(default=None, alias="ADMIN_BOOTSTRAP_PASSWORD")
     admin_totp_issuer: str = Field(default="Webmail Admin", alias="ADMIN_TOTP_ISSUER")
     mail_quota_enabled: bool = Field(default=True, alias="MAIL_QUOTA_ENABLED")
+    mailbox_password_scheme: str = Field(default="SHA512-CRYPT", alias="MAILBOX_PASSWORD_SCHEME")
     rspamd_enabled: bool = Field(default=True, alias="RSPAMD_ENABLED")
     rspamd_actions_config_path: str = Field(default="/etc/rspamd/local.d/actions.conf", alias="RSPAMD_ACTIONS_CONFIG_PATH")
     rspamd_dkim_key_dir: str = Field(default="/var/lib/rspamd/dkim", alias="RSPAMD_DKIM_KEY_DIR")
@@ -52,6 +53,14 @@ class Settings(BaseSettings):
     tls_enabled: bool = Field(default=True, alias="TLS_ENABLED")
     tls_live_dir: str = Field(default="/etc/letsencrypt/live", alias="TLS_LIVE_DIR")
     tls_certbot_command: str = Field(default="certbot", alias="TLS_CERTBOT_COMMAND")
+    postfix_main_cf_path: str = Field(default="/etc/postfix/main.cf", alias="POSTFIX_MAIN_CF_PATH")
+    dovecot_config_path: str = Field(default="/etc/dovecot/dovecot.conf", alias="DOVECOT_CONFIG_PATH")
+    postfix_virtual_aliases_path: str = Field(default="/etc/postfix/virtual", alias="POSTFIX_VIRTUAL_ALIASES_PATH")
+    postfix_system_aliases_path: str = Field(default="/etc/aliases", alias="POSTFIX_SYSTEM_ALIASES_PATH")
+    admin_config_backup_dir: str = Field(default="/var/backups/webmail-admin", alias="ADMIN_CONFIG_BACKUP_DIR")
+    admin_audit_retention_days: int = Field(default=90, alias="ADMIN_AUDIT_RETENTION_DAYS")
+    admin_ip_allowlist: str = Field(default="", alias="ADMIN_IP_ALLOWLIST")
+    admin_ip_blocklist: str = Field(default="", alias="ADMIN_IP_BLOCKLIST")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -82,6 +91,16 @@ class Settings(BaseSettings):
         if self.app_env in {"development", "test"}:
             return "Admin123456!"
         return None
+
+    @property
+    def admin_ip_allowlist_values(self) -> list[str]:
+        """返回后台 IP 白名单列表。"""
+        return [item.strip() for item in self.admin_ip_allowlist.split(",") if item.strip()]
+
+    @property
+    def admin_ip_blocklist_values(self) -> list[str]:
+        """返回后台 IP 黑名单列表。"""
+        return [item.strip() for item in self.admin_ip_blocklist.split(",") if item.strip()]
 
 
 @lru_cache

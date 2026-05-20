@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { createAdminAlias, deleteAdminAlias, fetchAdminAliases, fetchAdminDomains, toggleAdminAlias, updateAdminAlias } from '../api';
+import { createAdminAlias, createAdminCatchAllAlias, deleteAdminAlias, fetchAdminAliases, fetchAdminDomains, toggleAdminAlias, updateAdminAlias } from '../api';
 import { AdminDialog, ResultMessage, SectionCard, StatusPill, useAdminListSearchParams } from '../components/AdminHelpers';
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminAlias, AliasFormInput } from '../types';
@@ -12,12 +12,19 @@ const emptyAliasForm: AliasFormInput = {
   target_addresses: [''],
 };
 
+const emptyCatchAllForm = {
+  domain_id: '',
+  target_address: '',
+};
+
 export function AdminAliasesPage() {
   const queryClient = useQueryClient();
   const params = useAdminListSearchParams({ q: '', domain_id: '', page: 1 });
   const [editingAlias, setEditingAlias] = useState<AdminAlias | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AdminAlias | null>(null);
   const [form, setForm] = useState<AliasFormInput>(emptyAliasForm);
+  const [catchAllDialogOpen, setCatchAllDialogOpen] = useState(false);
+  const [catchAllForm, setCatchAllForm] = useState(emptyCatchAllForm);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +48,21 @@ export function AdminAliasesPage() {
     onSuccess: async () => {
       setForm(emptyAliasForm);
       setSuccess('别名已创建。');
+      setError(null);
+      await refresh();
+    },
+    onError: (err) => {
+      setSuccess(null);
+      setError((err as Error).message);
+    },
+  });
+
+  const catchAllMutation = useMutation({
+    mutationFn: createAdminCatchAllAlias,
+    onSuccess: async () => {
+      setCatchAllDialogOpen(false);
+      setCatchAllForm(emptyCatchAllForm);
+      setSuccess('Catch-all 别名已创建。');
       setError(null);
       await refresh();
     },
@@ -136,7 +158,15 @@ export function AdminAliasesPage() {
 
   return (
     <div className="admin-section-stack">
-      <SectionCard title={editingAlias ? '编辑别名' : '新增别名'} description="支持多目标地址、冲突提示和启停切换。">
+      <SectionCard
+        title={editingAlias ? '编辑别名' : '新增别名'}
+        description="支持多目标地址、冲突提示和启停切换。"
+        actions={(
+          <button type="button" className="admin-button admin-button-secondary" onClick={() => setCatchAllDialogOpen(true)}>
+            Catch-all 创建
+          </button>
+        )}
+      >
         <form
           className="admin-form-grid admin-form-grid--two"
           onSubmit={(event) => {
@@ -227,6 +257,52 @@ export function AdminAliasesPage() {
         )}
         pagination={data ? { ...data, onPageChange: params.setPage } : undefined}
       />
+
+      <AdminDialog
+        open={catchAllDialogOpen}
+        title="创建 Catch-all 别名"
+        description="为域名创建 @domain 形式的 catch-all 转发。"
+        onClose={() => {
+          setCatchAllDialogOpen(false);
+          setCatchAllForm(emptyCatchAllForm);
+        }}
+        actions={(
+          <button
+            type="button"
+            className="admin-button admin-button-primary"
+            disabled={!catchAllForm.domain_id || !catchAllForm.target_address || catchAllMutation.isPending}
+            onClick={() => {
+              if (!catchAllForm.domain_id || !catchAllForm.target_address) return;
+              catchAllMutation.mutate({
+                domain_id: catchAllForm.domain_id,
+                target_address: catchAllForm.target_address,
+              });
+            }}
+          >
+            创建 catch-all
+          </button>
+        )}
+      >
+        <div className="admin-form-grid">
+          <label>
+            <span>所属域</span>
+            <select value={catchAllForm.domain_id} onChange={(event) => setCatchAllForm((current) => ({ ...current, domain_id: event.target.value }))}>
+              <option value="">请选择域名</option>
+              {(domainData?.items || []).map((domain) => (
+                <option key={domain.id} value={domain.id}>{domain.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="admin-dialog-field">
+            <span>目标地址</span>
+            <input
+              value={catchAllForm.target_address}
+              onChange={(event) => setCatchAllForm((current) => ({ ...current, target_address: event.target.value }))}
+              placeholder="接收所有未命中的邮件"
+            />
+          </label>
+        </div>
+      </AdminDialog>
 
       <AdminDialog
         open={Boolean(deleteTarget)}

@@ -21,21 +21,43 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
+import resource
 import re
 from shutil import which
 import shutil
 import subprocess
 import time
+from typing import Any
 
 from app.config import get_settings
 
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 5.0
-ALLOWED_COMMANDS = {"certbot", "df", "dig", "doveadm", "journalctl", "nslookup", "openssl", "pgrep", "postqueue", "postsuper", "systemctl"}
+ALLOWED_COMMANDS = {
+    "certbot",
+    "df",
+    "dig",
+    "doveadm",
+    "journalctl",
+    "nslookup",
+    "openssl",
+    "pgrep",
+    "postalias",
+    "postcat",
+    "postfix",
+    "postmap",
+    "postqueue",
+    "postsuper",
+    "systemctl",
+}
 DEFAULT_DKIM_SELECTOR = "default"
 DEFAULT_LOG_TAIL_LINES = 40
+DEFAULT_LOG_EXPORT_LIMIT = 500
+CONFIG_PREVIEW_LINE_LIMIT = 120
 
 SERVICE_UNITS = {
     "postfix": ["postfix", "postfix.service"],
@@ -1093,5 +1115,611 @@ def recalc_mailbox_quota_usage(email: str) -> dict[str, object]:
     return {
         "status": "ok",
         "detail": f"已触发 {email} 的配额重算",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def _normalize_queue_id(queue_id: str) -> str:
+    """标准化队列 ID，避免危险字符进入命令行。"""
+    normalized = queue_id.strip()
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9]+", normalized):
+        raise ValueError("队列 ID 不合法")
+    return normalized
+
+
+def get_mail_queue_message(queue_id: str) -> dict[str, object]:
+    """读取指定队列邮件的原始正文。"""
+    try:
+        normalized_id = _normalize_queue_id(queue_id)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "detail": str(exc),
+            "queue_id": queue_id,
+            "content": "",
+            "command_result": _build_unavailable_command_result(["postcat", "-q", queue_id], str(exc)),
+        }
+    result = run_allowed_command(["postcat", "-q", normalized_id], timeout_seconds=10.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 postcat，无法查看队列邮件正文",
+            "queue_id": normalized_id,
+            "content": "",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "读取队列邮件正文失败",
+            "queue_id": normalized_id,
+            "content": result.stdout,
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": f"已读取队列邮件 {normalized_id} 的正文",
+        "queue_id": normalized_id,
+        "content": result.stdout,
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def requeue_mail_queue_item(queue_id: str) -> dict[str, object]:
+    """重新投递指定队列邮件。"""
+    try:
+        normalized_id = _normalize_queue_id(queue_id)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "detail": str(exc),
+            "queue_id": queue_id,
+            "command_result": _build_unavailable_command_result(["postsuper", "-r", queue_id], str(exc)),
+        }
+    result = run_allowed_command(["postsuper", "-r", normalized_id], timeout_seconds=10.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 postsuper，无法重新投递队列邮件",
+            "queue_id": normalized_id,
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "重新投递队列邮件失败",
+            "queue_id": normalized_id,
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": f"已请求重新投递队列邮件 {normalized_id}",
+        "queue_id": normalized_id,
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def delete_mail_queue_items(queue_ids: list[str]) -> dict[str, object]:
+    """批量删除队列邮件。"""
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+    last_result: dict[str, object] | None = None
+    for queue_id in queue_ids:
+        result = delete_mail_queue_item(queue_id)
+        last_result = result
+        if result["status"] == "ok":
+            deleted.append(queue_id)
+        else:
+            errors.append({"queue_id": queue_id, "detail": str(result["detail"])})
+    status = "ok" if not errors else ("partial" if deleted else "error")
+    return {
+        "status": status,
+        "detail": f"已删除 {len(deleted)} 条队列邮件" if not errors else f"成功 {len(deleted)} 条，失败 {len(errors)} 条",
+        "deleted_count": len(deleted),
+        "deleted_ids": deleted,
+        "errors": errors,
+        "command_result": last_result.get("command_result") if last_result else None,
+    }
+
+
+def clear_mail_queue(*, statuses: list[str] | None = None) -> dict[str, object]:
+    """按状态过滤后清空队列。"""
+    snapshot = list_mail_queue()
+    if snapshot["status"] != "ok":
+        return {
+            "status": snapshot["status"],
+            "detail": snapshot["detail"],
+            "deleted_count": 0,
+            "deleted_ids": [],
+            "errors": [],
+            "command_result": snapshot.get("command_result"),
+        }
+    normalized_statuses = {item.strip().lower() for item in (statuses or []) if item.strip()}
+    target_ids = [
+        str(item["queue_id"])
+        for item in snapshot["items"]
+        if not normalized_statuses or str(item["status"]).lower() in normalized_statuses
+    ]
+    if not target_ids:
+        return {
+            "status": "ok",
+            "detail": "没有匹配的队列邮件需要清空",
+            "deleted_count": 0,
+            "deleted_ids": [],
+            "errors": [],
+            "command_result": snapshot.get("command_result"),
+        }
+    return delete_mail_queue_items(target_ids)
+
+
+def _queue_size_summary(items: list[dict[str, object]]) -> dict[str, int]:
+    """按队列状态聚合总大小。"""
+    size_by_status: dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "unknown")
+        size_by_status[status] = size_by_status.get(status, 0) + int(item.get("message_size") or 0)
+    return size_by_status
+
+
+def get_mail_queue_snapshot(*, status_filter: str | None = None, q: str | None = None) -> dict[str, object]:
+    """返回支持筛选和统计增强的队列快照。"""
+    snapshot = list_mail_queue()
+    if snapshot["status"] != "ok":
+        return snapshot
+    items = list(snapshot["items"])
+    if status_filter:
+        normalized_status = status_filter.strip().lower()
+        items = [item for item in items if str(item["status"]).lower() == normalized_status]
+    if q:
+        keyword = q.strip().lower()
+        items = [
+            item
+            for item in items
+            if keyword in str(item.get("queue_id", "")).lower()
+            or keyword in str(item.get("sender", "")).lower()
+            or any(keyword in str(recipient).lower() for recipient in item.get("recipients", []))
+        ]
+    summary = dict(snapshot["summary"])
+    summary["visible_total"] = len(items)
+    summary["total_size_bytes"] = sum(int(item.get("message_size") or 0) for item in items)
+    for key, value in _queue_size_summary(items).items():
+        summary[f"{key}_size_bytes"] = value
+    return {
+        **snapshot,
+        "items": items,
+        "summary": summary,
+    }
+
+
+def _line_matches_log_query(
+    line: str,
+    *,
+    query: str | None,
+    status_filter: str | None,
+    sender: str | None,
+    recipient: str | None,
+) -> bool:
+    """按关键字和常见 mail log 维度过滤单行日志。"""
+    lowered = line.lower()
+    if query and query.strip().lower() not in lowered:
+        return False
+    if status_filter:
+        normalized_status = status_filter.strip().lower()
+        status_tokens = {
+            "sent": [" status=sent ", " status=sent,", " status=sent("],
+            "deferred": [" status=deferred "],
+            "bounced": [" status=bounced "],
+            "rejected": [" reject:", " rejected", " status=rejected "],
+        }
+        tokens = status_tokens.get(normalized_status, [normalized_status])
+        if not any(token in lowered for token in tokens):
+            return False
+    if sender and sender.strip().lower() not in lowered:
+        return False
+    if recipient and recipient.strip().lower() not in lowered:
+        return False
+    return True
+
+
+def search_mail_service_logs(
+    *,
+    log_key: str | None = None,
+    query: str | None = None,
+    status_filter: str | None = None,
+    sender: str | None = None,
+    recipient: str | None = None,
+    line_limit: int = DEFAULT_LOG_EXPORT_LIMIT,
+) -> dict[str, object]:
+    """按后台常用条件检索邮件日志。"""
+    log_keys = [log_key] if log_key else list(LOG_CANDIDATE_PATHS.keys())
+    items: list[dict[str, object]] = []
+    for current_key in log_keys:
+        snapshot = read_mail_service_log(current_key, line_limit=line_limit)
+        for index, line in enumerate(snapshot.get("lines", []), start=1):
+            if not _line_matches_log_query(
+                line,
+                query=query,
+                status_filter=status_filter,
+                sender=sender,
+                recipient=recipient,
+            ):
+                continue
+            items.append(
+                {
+                    "id": f"{current_key}:{index}",
+                    "log_key": current_key,
+                    "label": snapshot.get("label"),
+                    "status": snapshot.get("status"),
+                    "source": snapshot.get("source"),
+                    "line_number": index,
+                    "summary": line[:200],
+                    "raw": line,
+                }
+            )
+    return {
+        "status": "ok",
+        "detail": f"共匹配 {len(items)} 条日志",
+        "items": items,
+    }
+
+
+def export_log_items(items: list[dict[str, object]], *, format_name: str) -> dict[str, object]:
+    """导出日志结果为 CSV 或 JSON 文本。"""
+    normalized_format = format_name.strip().lower()
+    if normalized_format == "json":
+        content = json.dumps(items, ensure_ascii=False, indent=2)
+        media_type = "application/json"
+    elif normalized_format == "csv":
+        header = "id,log_key,label,status,source,line_number,summary,raw"
+        rows = [header]
+        for item in items:
+            values = [
+                str(item.get("id", "")),
+                str(item.get("log_key", "")),
+                str(item.get("label", "")),
+                str(item.get("status", "")),
+                str(item.get("source", "")),
+                str(item.get("line_number", "")),
+                str(item.get("summary", "")).replace('"', '""'),
+                str(item.get("raw", "")).replace('"', '""'),
+            ]
+            rows.append(",".join(f'"{value}"' for value in values))
+        content = "\n".join(rows)
+        media_type = "text/csv"
+    else:
+        raise ValueError("不支持的导出格式")
+    return {
+        "format": normalized_format,
+        "content": content,
+        "media_type": media_type,
+        "filename": f"mail-logs.{normalized_format}",
+    }
+
+
+def _read_text_file_preview(path: Path, *, max_lines: int = CONFIG_PREVIEW_LINE_LIMIT) -> dict[str, object]:
+    """读取配置文件预览文本。"""
+    if not path.exists() or not path.is_file():
+        return {
+            "status": "unavailable",
+            "detail": f"未找到配置文件 {path}",
+            "path": str(path),
+            "content": "",
+        }
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "detail": f"读取配置文件失败: {exc}",
+            "path": str(path),
+            "content": "",
+        }
+    preview = "\n".join(lines[:max_lines])
+    return {
+        "status": "ok",
+        "detail": f"已读取 {path} 前 {min(len(lines), max_lines)} 行",
+        "path": str(path),
+        "content": preview,
+        "line_count": len(lines),
+    }
+
+
+def get_mail_system_configs() -> dict[str, object]:
+    """返回 Postfix 和 Dovecot 关键配置预览。"""
+    settings = get_settings()
+    postfix = _read_text_file_preview(Path(settings.postfix_main_cf_path))
+    dovecot = _read_text_file_preview(Path(settings.dovecot_config_path))
+    return {
+        "status": "ok" if postfix["status"] == "ok" or dovecot["status"] == "ok" else "unavailable",
+        "detail": "已读取邮件系统配置预览" if postfix["status"] == "ok" or dovecot["status"] == "ok" else "当前环境无法读取真实配置",
+        "postfix": postfix,
+        "dovecot": dovecot,
+    }
+
+
+def _ensure_backup_dir() -> Path:
+    """确保后台配置备份目录存在。"""
+    backup_dir = Path(get_settings().admin_config_backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
+def backup_config_file(path: Path) -> dict[str, object]:
+    """备份配置文件到后台备份目录。"""
+    if not path.exists() or not path.is_file():
+        return {
+            "status": "unavailable",
+            "detail": f"未找到配置文件 {path}",
+            "backup_path": None,
+        }
+    backup_dir = _ensure_backup_dir()
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    backup_path = backup_dir / f"{path.name}.{timestamp}.bak"
+    try:
+        shutil.copy2(path, backup_path)
+    except OSError as exc:
+        return {
+            "status": "error",
+            "detail": f"备份配置失败: {exc}",
+            "backup_path": str(backup_path),
+        }
+    return {
+        "status": "ok",
+        "detail": f"已备份 {path.name}",
+        "backup_path": str(backup_path),
+    }
+
+
+def restore_config_backup(backup_path: str, target_path: str) -> dict[str, object]:
+    """从备份恢复配置文件。"""
+    source = Path(backup_path)
+    target = Path(target_path)
+    if not source.exists() or not source.is_file():
+        return {
+            "status": "unavailable",
+            "detail": f"未找到备份文件 {source}",
+            "path": target_path,
+        }
+    try:
+        shutil.copy2(source, target)
+    except OSError as exc:
+        return {
+            "status": "error",
+            "detail": f"恢复配置失败: {exc}",
+            "path": target_path,
+        }
+    return {
+        "status": "ok",
+        "detail": f"已从 {source.name} 恢复配置",
+        "path": target_path,
+    }
+
+
+def rebuild_postfix_maps() -> dict[str, object]:
+    """重建 Postfix virtual 映射表。"""
+    settings = get_settings()
+    result = run_allowed_command(["postmap", settings.postfix_virtual_aliases_path], timeout_seconds=15.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 postmap，无法重建 Postfix 映射表",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "重建 Postfix 映射表失败",
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": "已重建 Postfix virtual 映射表",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def rebuild_system_aliases() -> dict[str, object]:
+    """重建系统 aliases 数据库。"""
+    settings = get_settings()
+    result = run_allowed_command(["postalias", settings.postfix_system_aliases_path], timeout_seconds=15.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 postalias，无法重建别名表",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "重建别名表失败",
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": "已重建系统别名表",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def reload_postfix_service() -> dict[str, object]:
+    """重载 Postfix 配置。"""
+    result = run_allowed_command(["postfix", "reload"], timeout_seconds=15.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 postfix 命令，无法重载 Postfix",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "Postfix 重载失败",
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": "已触发 Postfix reload",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def reload_dovecot_service() -> dict[str, object]:
+    """重载 Dovecot 配置。"""
+    result = run_allowed_command(["doveadm", "reload"], timeout_seconds=15.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 doveadm，无法重载 Dovecot",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "Dovecot 重载失败",
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": "已触发 Dovecot reload",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def control_mail_service(service_name: str, action: str) -> dict[str, object]:
+    """通过 systemctl 控制邮件服务启停。"""
+    normalized_service = service_name.strip().lower()
+    normalized_action = action.strip().lower()
+    if normalized_service not in SERVICE_UNITS:
+        return {
+            "status": "error",
+            "detail": "不支持的服务名称",
+            "command_result": None,
+        }
+    if normalized_action not in {"start", "stop", "restart"}:
+        return {
+            "status": "error",
+            "detail": "不支持的服务动作",
+            "command_result": None,
+        }
+    unit_name = SERVICE_UNITS[normalized_service][0]
+    result = run_allowed_command(["systemctl", normalized_action, unit_name], timeout_seconds=20.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 systemctl，无法控制服务",
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or f"{unit_name} {normalized_action} 失败",
+            "command_result": _command_result_to_dict(result),
+        }
+    return {
+        "status": "ok",
+        "detail": f"已执行 {unit_name} {normalized_action}",
+        "command_result": _command_result_to_dict(result),
+    }
+
+
+def get_admin_ip_policy() -> dict[str, object]:
+    """返回后台 IP 白名单/黑名单配置。"""
+    settings = get_settings()
+    raw_allowlist = getattr(settings, "admin_ip_allowlist_values", None)
+    raw_blocklist = getattr(settings, "admin_ip_blocklist_values", None)
+    if raw_allowlist is None:
+        raw_allowlist = [item.strip() for item in str(getattr(settings, "admin_ip_allowlist", "") or "").split(",") if item.strip()]
+    if raw_blocklist is None:
+        raw_blocklist = [item.strip() for item in str(getattr(settings, "admin_ip_blocklist", "") or "").split(",") if item.strip()]
+    return {
+        "allowlist": list(raw_allowlist),
+        "blocklist": list(raw_blocklist),
+    }
+
+
+def check_admin_ip_access(ip_address: str) -> dict[str, object]:
+    """根据配置判断后台来源 IP 是否允许访问。"""
+    normalized_ip = (ip_address or "").strip()
+    policy = get_admin_ip_policy()
+    if normalized_ip and normalized_ip in policy["blocklist"]:
+        return {
+            "status": "blocked",
+            "detail": f"IP {normalized_ip} 在后台黑名单中",
+            "ip": normalized_ip,
+        }
+    if policy["allowlist"] and normalized_ip not in policy["allowlist"]:
+        return {
+            "status": "blocked",
+            "detail": f"IP {normalized_ip or 'unknown'} 不在后台白名单中",
+            "ip": normalized_ip,
+        }
+    return {
+        "status": "ok",
+        "detail": "当前 IP 可访问后台",
+        "ip": normalized_ip,
+    }
+
+
+def get_memory_usage_snapshot() -> dict[str, object]:
+    """读取当前进程近似内存占用。"""
+    try:
+        usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        usage_mb = round(float(usage_kb) / 1024, 2)
+    except Exception as exc:  # pragma: no cover - 平台差异兜底
+        return {
+            "status": "unavailable",
+            "detail": f"无法读取内存使用量: {exc}",
+            "used_mb": None,
+        }
+    return {
+        "status": "ok",
+        "detail": f"当前进程峰值常驻内存约 {usage_mb} MB",
+        "used_mb": usage_mb,
+    }
+
+
+def get_cpu_usage_snapshot() -> dict[str, object]:
+    """读取当前主机近似负载指标。"""
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except OSError as exc:
+        return {
+            "status": "unavailable",
+            "detail": f"无法读取 CPU 负载: {exc}",
+            "load_1m": None,
+            "load_5m": None,
+            "load_15m": None,
+        }
+    return {
+        "status": "ok",
+        "detail": f"当前负载 1m={load1:.2f} / 5m={load5:.2f} / 15m={load15:.2f}",
+        "load_1m": round(load1, 2),
+        "load_5m": round(load5, 2),
+        "load_15m": round(load15, 2),
+    }
+
+
+def get_online_dovecot_users() -> dict[str, object]:
+    """读取 Dovecot 当前在线用户数。"""
+    result = run_allowed_command(["doveadm", "who"], timeout_seconds=10.0)
+    if result.exit_code == 127:
+        return {
+            "status": "unavailable",
+            "detail": "当前环境未安装 doveadm，无法读取在线用户数",
+            "online_user_count": 0,
+            "command_result": _command_result_to_dict(result),
+        }
+    if not result.ok:
+        return {
+            "status": "error",
+            "detail": result.stderr or "读取 Dovecot 在线用户失败",
+            "online_user_count": 0,
+            "command_result": _command_result_to_dict(result),
+        }
+    lines = _normalize_lines(result.stdout)
+    return {
+        "status": "ok",
+        "detail": f"当前在线用户 {len(lines)} 个",
+        "online_user_count": len(lines),
         "command_result": _command_result_to_dict(result),
     }

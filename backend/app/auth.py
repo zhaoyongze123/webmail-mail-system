@@ -11,6 +11,7 @@ import logging
 
 from fastapi import Request, Response, status
 from passlib.context import CryptContext
+from passlib.hash import bcrypt, sha512_crypt
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,7 +31,7 @@ from app.observability import record_audit_event
 
 
 logger = logging.getLogger("app.auth")
-mailbox_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+mailbox_pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt", "sha512_crypt"], deprecated="auto")
 
 
 class LoginRequest(BaseModel):
@@ -103,6 +104,11 @@ def _safe_account_snapshot(email: str) -> dict[str, object] | None:
 
 def hash_mailbox_password(password: str) -> str:
     """对后台创建的本地邮箱密码做哈希。"""
+    scheme = str(getattr(get_settings(), "mailbox_password_scheme", "SHA512-CRYPT") or "SHA512-CRYPT").strip().upper()
+    if scheme == "BLF-CRYPT":
+        return bcrypt.hash(password)
+    if scheme == "SHA512-CRYPT":
+        return sha512_crypt.hash(password)
     return mailbox_pwd_context.hash(password)
 
 

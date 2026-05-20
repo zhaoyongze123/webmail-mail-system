@@ -34,15 +34,46 @@ export type PaginatedResult<T> = PaginationMeta & {
 
 export type AdminOverviewStats = {
   active_users: number;
+  mail_users?: number;
   mail_domains: number;
   aliases: number;
   queued_jobs: number;
   summary?: Record<string, number>;
   recent_audits?: AdminAuditLogItem[];
+  online_users?: AdminOnlineUsersSnapshot;
+  queue_summary?: Record<string, number>;
   scope?: {
     role: string;
     domain_id?: string | null;
   };
+};
+
+export type AdminOnlineUsersSnapshot = {
+  status: 'ok' | 'warning' | 'critical' | 'unavailable' | 'error';
+  detail: string;
+  online_user_count: number;
+  count?: number;
+  command_result?: {
+    command?: string[];
+    stdout?: string;
+    stderr?: string;
+    exit_code?: number;
+    duration_ms?: number;
+    ok?: boolean;
+  };
+};
+
+export type AdminDashboardTrendPoint = {
+  date: string;
+  audit_count: number;
+  sent_count: number;
+  admin_action_count: number;
+};
+
+export type AdminDashboardTrendsSnapshot = {
+  period: '24h' | '7d' | '30d';
+  points: AdminDashboardTrendPoint[];
+  queue_summary?: Record<string, number>;
 };
 
 export type AdminListItem = {
@@ -138,6 +169,22 @@ export type AdminAlias = AdminListItem & {
   is_active: boolean;
 };
 
+export type AdminUserImportResult = {
+  created: number;
+  skipped: number;
+  items: AdminMailboxUser[];
+  skipped_items: { email: string; detail: string }[];
+};
+
+export type AdminUserResetPasswordResult = {
+  password_reset: boolean;
+  generated_password?: string | null;
+};
+
+export type AdminCatchAllAliasResult = {
+  alias: AdminAlias;
+};
+
 export type AdminQuotaItem = AdminListItem & {
   domain_id?: string | null;
   domain_name?: string | null;
@@ -162,6 +209,32 @@ export type AdminAuditLogItem = {
   target_type?: string | null;
   target_id?: string | null;
   created_at: string;
+};
+
+export type AdminActionHistoryItem = AdminAuditLogItem & {
+  status: 'ok' | 'warning' | 'error' | 'unavailable' | 'critical' | string;
+  detail?: string;
+  payload?: Record<string, unknown> | null;
+};
+
+export type AdminLogEntry = {
+  id: string;
+  source: string;
+  level: string;
+  message: string;
+  created_at: string;
+  actor?: string | null;
+  target?: string | null;
+};
+
+export type AdminLogSnapshotPage = {
+  items: AdminLogEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  updated_at?: string;
+  detail?: string;
 };
 
 export type AdminHealthItem = {
@@ -199,6 +272,60 @@ export type AdminSystemHealthSnapshot = {
   disks: AdminDiskUsageItem[];
   logs: AdminLogSnapshot[];
   checked_at: string;
+};
+
+export type AdminSystemConfigSnapshot = {
+  theme: 'system' | 'light' | 'dark';
+  language: 'zh-CN' | 'en-US';
+  queue_auto_refresh_seconds: number;
+  queue_max_items: number;
+  audit_default_days: number;
+  log_retention_days: number;
+  updated_at?: string;
+  detail?: string;
+};
+
+export type AdminMailSystemConfigPreview = {
+  status: 'ok' | 'warning' | 'unavailable' | 'error';
+  detail: string;
+  postfix: {
+    status: 'ok' | 'warning' | 'unavailable' | 'error';
+    detail: string;
+    path?: string;
+    content?: string;
+    line_count?: number;
+  };
+  dovecot: {
+    status: 'ok' | 'warning' | 'unavailable' | 'error';
+    detail: string;
+    path?: string;
+    content?: string;
+    line_count?: number;
+  };
+};
+
+export type AdminMailSystemCommandResult = {
+  status: 'ok' | 'warning' | 'unavailable' | 'error';
+  detail: string;
+  command_result?: {
+    command?: string[];
+    stdout?: string;
+    stderr?: string;
+    exit_code?: number;
+    duration_ms?: number;
+    ok?: boolean;
+  };
+  backup_path?: string | null;
+  path?: string;
+};
+
+export type AdminSystemConfigPayload = {
+  theme: 'system' | 'light' | 'dark';
+  language: 'zh-CN' | 'en-US';
+  queue_auto_refresh_seconds: number;
+  queue_max_items: number;
+  audit_default_days: number;
+  log_retention_days: number;
 };
 
 export type AdminRspamdThresholds = {

@@ -584,3 +584,54 @@ class AdminRefreshToken(Base):
     )
 
     admin_user: Mapped["AdminUser"] = relationship(back_populates="refresh_tokens")
+
+
+class AdminSystemSetting(Base):
+    """后台系统配置实体，保存主题、语言和运维页默认参数。"""
+
+    __tablename__ = "admin_system_settings"
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    theme: Mapped[str] = mapped_column(String(20), nullable=False, default="system")
+    language: Mapped[str] = mapped_column(String(20), nullable=False, default="zh-CN")
+    queue_auto_refresh_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    queue_max_items: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    audit_default_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class AdminActionHistory(Base):
+    """后台危险操作执行历史实体。"""
+
+    __tablename__ = "admin_action_history"
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    admin_user_id: Mapped[UUIDType | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("admin_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    action_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict | list | None] = mapped_column(JSON_COMPAT, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

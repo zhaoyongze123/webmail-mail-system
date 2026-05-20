@@ -3,10 +3,13 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { AdminAliasesPage } from './AdminAliasesPage';
+import { AdminAuditLogsPage } from './AdminAuditLogsPage';
 import { AdminDomainsPage } from './AdminDomainsPage';
 import { AdminQueuePage } from './AdminQueuePage';
 import { AdminQuotasPage } from './AdminQuotasPage';
 import { AdminRspamdPage } from './AdminRspamdPage';
+import { AdminLogsPage } from './AdminLogsPage';
+import { AdminSystemConfigPage } from './AdminSystemConfigPage';
 import { AdminSystemHealthPage } from './AdminSystemHealthPage';
 import { AdminTlsPage } from './AdminTlsPage';
 import { AdminUsersPage } from './AdminUsersPage';
@@ -128,6 +131,19 @@ function renderPage(element: React.ReactElement) {
         error: null,
       }));
     }
+    if (url.includes('/api/admin/queue/Q1')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          status: 'ok',
+          detail: '已读取队列邮件 Q1 的正文',
+          queue_id: 'Q1',
+          content: 'From: sender@example.com\nTo: target@example.com\n\nHello queue body',
+          command_result: { ok: true },
+        },
+        error: null,
+      }));
+    }
     if (url.includes('/api/admin/queue')) {
       return new Response(JSON.stringify({
         success: true,
@@ -150,6 +166,80 @@ function renderPage(element: React.ReactElement) {
           }],
           summary: { total: 1, deferred: 1 },
           command_result: { ok: true },
+        },
+        error: null,
+      }));
+    }
+    if (url.includes('/api/admin/logs/export')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          format: 'csv',
+          content: 'id,log_key,label,status,source,line_number,summary,raw\n"1","postfix","postfix","info","postfix","1","queued message accepted","queued message accepted"',
+          media_type: 'text/csv',
+          filename: 'mail-logs.csv',
+        },
+        error: null,
+      }));
+    }
+    if (url.includes('/api/admin/logs')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          items: [
+            { id: 'log-1', source: 'postfix', level: 'info', message: 'queued message accepted', created_at: '2026-05-19T00:00:00Z', actor: 'postfix', target: 'queue-1' },
+            { id: 'log-2', source: 'audit', level: 'warning', message: 'admin config updated', created_at: '2026-05-19T01:00:00Z', actor: 'admin', target: 'system-config' },
+          ],
+          total: 2,
+          page: 1,
+          page_size: 20,
+          total_pages: 1,
+          updated_at: '2026-05-19T01:00:00Z',
+          detail: '已返回 2 条日志',
+        },
+        error: null,
+      }));
+    }
+    if (url.includes('/api/admin/audit-logs/export')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          format: 'csv',
+          content: 'id,log_key,label,status,source,line_number,summary,raw\n"1","audit","audit","success","admin","0","admin.login","{}"',
+          media_type: 'text/csv',
+          filename: 'mail-logs.csv',
+        },
+        error: null,
+      }));
+    }
+    if (url.includes('/api/admin/audit-logs')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          page: 1,
+          page_size: 20,
+          total: 2,
+          total_pages: 1,
+          items: [
+            { id: 'audit-1', actor: 'admin', action: 'admin.login', target: 'session', event_type: 'auth.login', created_at: '2026-05-19T00:00:00Z' },
+            { id: 'audit-2', actor: 'admin', action: 'admin.queue.delete', target: 'Q1', event_type: 'admin.queue.delete', created_at: '2026-05-19T01:00:00Z' },
+          ],
+        },
+        error: null,
+      }));
+    }
+    if (url.includes('/api/admin/system-config')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          theme: 'system',
+          language: 'zh-CN',
+          queue_auto_refresh_seconds: 15,
+          queue_max_items: 100,
+          audit_default_days: 30,
+          log_retention_days: 14,
+          updated_at: '2026-05-19T01:00:00Z',
+          detail: '当前配置已加载',
         },
         error: null,
       }));
@@ -292,9 +382,41 @@ describe('admin stage A pages', () => {
   it('队列页渲染刷新与 flush 入口', async () => {
     renderPage(<AdminQueuePage />);
     expect(await screen.findByRole('heading', { name: '队列摘要' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '状态' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '刷新' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Flush 队列' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '批量删除' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '按状态清空' })).toBeInTheDocument();
     expect(await screen.findByText('当前检测到 1 条队列邮件')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看' }));
+    expect(await screen.findByText((_, element) => element?.tagName === 'PRE' && element.textContent?.includes('Hello queue body') === true)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '重投' }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('日志页渲染筛选与日志表格入口', async () => {
+    renderPage(<AdminLogsPage />);
+    expect(await screen.findByRole('heading', { name: '日志筛选' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '关键字' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '状态' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '发件人' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出 CSV' })).toBeInTheDocument();
+    expect(await screen.findByText('queued message accepted')).toBeInTheDocument();
+  });
+
+  it('审计页接入后端筛选与导出', async () => {
+    renderPage(<AdminAuditLogsPage />);
+    expect(await screen.findByRole('heading', { name: '审计筛选' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '关键字' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '成功状态' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出 CSV' })).toBeInTheDocument();
+    expect(await screen.findByText('admin.login')).toBeInTheDocument();
+  });
+
+  it('系统配置页渲染主题、语言与保存入口', async () => {
+    renderPage(<AdminSystemConfigPage />);
+    expect(await screen.findByRole('heading', { name: '主题与语言' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '恢复默认' })).toBeInTheDocument();
   });
 
   it('日志与监控页渲染服务、磁盘和日志区域', async () => {

@@ -1,8 +1,12 @@
-"""后台管理 API 路由：认证、域、用户、别名、配额与审计。"""
+"""后台管理 API 路由：认证、域、用户、别名、配额、审计与运维能力。"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import secrets
+import csv
+from io import StringIO
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -30,6 +34,7 @@ from app.admin_common import (
     account_to_admin_dict,
     alias_to_dict,
     audit_log_to_dict,
+    cleanup_admin_logs,
     count_dashboard_metrics,
     domain_to_dict,
     ensure_domain_scope,
@@ -44,10 +49,23 @@ from app.admin_common import (
     utcnow,
 )
 from app.admin_system import (
+    backup_config_file,
+    check_admin_ip_access,
+    clear_mail_queue,
+    control_mail_service,
+    delete_mail_queue_items,
     delete_mail_queue_item,
+    export_log_items,
     flush_mail_queue,
     get_domain_dkim_info,
     get_mailbox_quota_usage,
+    get_mail_queue_message,
+    get_mail_queue_snapshot,
+    get_mail_system_configs,
+    get_admin_ip_policy,
+    get_cpu_usage_snapshot,
+    get_memory_usage_snapshot,
+    get_online_dovecot_users,
     get_rspamd_thresholds,
     get_tls_certificates,
     list_disk_usage,
@@ -55,15 +73,23 @@ from app.admin_system import (
     list_mail_queue,
     list_service_health,
     recalc_mailbox_quota_usage,
+    rebuild_postfix_maps,
+    rebuild_system_aliases,
+    requeue_mail_queue_item,
+    reload_dovecot_service,
+    reload_postfix_service,
     renew_tls_certificates,
+    restore_config_backup,
     rotate_domain_dkim_key,
     run_domain_dns_check,
+    search_mail_service_logs,
     update_rspamd_thresholds,
 )
 from app.auth import hash_mailbox_password
 from app.config import get_settings
 from app.errors import AppError
-from app.models import AdminUser, AuditLog, MailAccount, MailAlias, MailDomain, QuotaPolicy
+from app.models import AdminActionHistory, AdminSystemSetting, AdminUser, AuditLog, MailAccount, MailAlias, MailDomain, QuotaPolicy
+from app.redis_client import get_redis_client
 from app.responses import success_response
 from app.schemas import ApiResponse
 
@@ -119,7 +145,8 @@ class AdminUserUpdateRequest(BaseModel):
 class AdminUserResetPasswordRequest(BaseModel):
     """重置邮箱账号密码的请求体。"""
 
-    password: str = Field(min_length=8, max_length=256)
+    password: str | None = Field(default=None, min_length=8, max_length=256)
+    generate_random: bool = False
 
 
 class AdminUsersBulkActionRequest(BaseModel):
@@ -135,6 +162,8 @@ class AliasCreateRequest(BaseModel):
     domain_id: str
     source_address: EmailStr
     target_addresses: list[EmailStr] = Field(default_factory=list, min_length=1)
+    is_catch_all: bool = False
+    catch_all_target: EmailStr | None = None
 
 
 class AliasUpdateRequest(BaseModel):
@@ -173,6 +202,71 @@ class QueueDeleteRequest(BaseModel):
     queue_id: str = Field(min_length=1, max_length=255)
 
 
+class QueueBulkDeleteRequest(BaseModel):
+    """批量删除或清空队列的请求体。"""
+
+    queue_ids: list[str] = Field(default_factory=list)
+    statuses: list[str] = Field(default_factory=list)
+
+
+class QueueActionRequest(BaseModel):
+    """队列单项操作请求体。"""
+
+    queue_id: str = Field(min_length=1, max_length=255)
+
+
+class LogsExportRequest(BaseModel):
+    """日志导出请求体。"""
+
+    log_key: str | None = None
+    q: str | None = None
+    status: str | None = None
+    sender: str | None = None
+    recipient: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    format: str = Field(default="csv", pattern="^(csv|json)$")
+
+
+class UserCsvImportRequest(BaseModel):
+    """用户 CSV 导入请求。"""
+
+    csv_content: str = Field(min_length=1)
+    domain_id: str | None = None
+
+
+class AliasCatchAllRequest(BaseModel):
+    """一键生成 catch-all 别名请求。"""
+
+    domain_id: str
+    target_address: EmailStr
+
+
+class ConfigRestoreRequest(BaseModel):
+    """恢复配置文件请求体。"""
+
+    backup_path: str = Field(min_length=1, max_length=1024)
+    target_path: str = Field(min_length=1, max_length=1024)
+
+
+class ServiceActionRequest(BaseModel):
+    """服务控制请求体。"""
+
+    service: str = Field(min_length=1, max_length=50)
+    action: str = Field(min_length=1, max_length=20)
+
+
+class SystemConfigUpdateRequest(BaseModel):
+    """后台系统配置更新请求体。"""
+
+    theme: str = Field(default="system", pattern="^(system|light|dark)$")
+    language: str = Field(default="zh-CN", pattern="^(zh-CN|en-US)$")
+    queue_auto_refresh_seconds: int = Field(default=15, ge=5, le=3600)
+    queue_max_items: int = Field(default=100, ge=10, le=1000)
+    audit_default_days: int = Field(default=30, ge=1, le=3650)
+    log_retention_days: int = Field(default=14, ge=1, le=3650)
+
+
 class RspamdThresholdUpdateRequest(BaseModel):
     """更新 Rspamd 垃圾分阈值的请求体。"""
 
@@ -191,6 +285,23 @@ class TlsRenewRequest(BaseModel):
     """TLS 续签请求体。"""
 
     confirm: bool = True
+
+
+class ActionHistoryQuery(BaseModel):
+    """后台历史记录查询参数占位类型。"""
+
+
+class AuditLogExportRequest(BaseModel):
+    """审计日志导出请求体。"""
+
+    q: str | None = None
+    action: str | None = None
+    actor_id: str | None = None
+    target: str | None = None
+    success_only: bool | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    format: str = Field(default="csv", pattern="^(csv|json)$")
 
 
 def _parse_uuid(value: str, *, code: str, message: str) -> UUID:
@@ -262,6 +373,68 @@ def _ensure_alias_no_direct_loop(source_address: str, target_addresses: list[str
             "别名目标地址不能包含自身",
             http_status=status.HTTP_400_BAD_REQUEST,
         )
+    direct_pairs = {(source, target) for target in normalized_targets}
+    if any(source == target for _, target in direct_pairs):
+        raise AppError(
+            "ADMIN_ALIAS_LOOP",
+            "别名目标地址不能形成直接循环",
+            http_status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+def _alias_graph(db: Session, *, domain_id: UUID | None = None) -> dict[str, list[str]]:
+    """读取当前别名图用于递归循环检测。"""
+    stmt = select(MailAlias)
+    if domain_id is not None:
+        stmt = stmt.where(MailAlias.domain_id == domain_id)
+    aliases = db.scalars(stmt).all()
+    graph: dict[str, list[str]] = {}
+    for alias in aliases:
+        graph[alias.source_address.strip().lower()] = [item.strip().lower() for item in alias.target_addresses or []]
+    return graph
+
+
+def _detect_alias_cycle(graph: dict[str, list[str]], source_address: str, target_addresses: list[str]) -> None:
+    """检测别名图里是否会形成多跳递归循环。"""
+    source = source_address.strip().lower()
+    pending = [item.strip().lower() for item in target_addresses]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == source:
+            raise AppError("ADMIN_ALIAS_LOOP", "别名目标地址形成了递归循环", http_status=status.HTTP_400_BAD_REQUEST)
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(graph.get(current, []))
+
+
+def _parse_user_csv(csv_content: str) -> list[dict[str, str]]:
+    """解析用户导入 CSV。"""
+    reader = csv.DictReader(StringIO(csv_content))
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        email = str(row.get("email") or "").strip()
+        password = str(row.get("password") or "").strip()
+        if not email or not password:
+            raise AppError("ADMIN_USER_IMPORT_INVALID", "CSV 中 email 和 password 不能为空", http_status=status.HTTP_400_BAD_REQUEST)
+        rows.append(
+            {
+                "email": email,
+                "display_name": str(row.get("display_name") or "").strip(),
+                "quota_mb": str(row.get("quota_mb") or "500").strip(),
+                "status": str(row.get("status") or "active").strip().lower(),
+                "is_admin": str(row.get("is_admin") or "false").strip().lower(),
+                "password": password,
+            }
+        )
+    if not rows:
+        raise AppError("ADMIN_USER_IMPORT_EMPTY", "CSV 中没有可导入的用户", http_status=status.HTTP_400_BAD_REQUEST)
+    return rows
+
+
+def _parse_bool_text(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _email_domain(email: str) -> str:
@@ -379,6 +552,75 @@ def _attach_live_quota_usage(db: Session, accounts: list[MailAccount]) -> dict[U
         setattr(account, "_used_quota_mb", usage_value)
         setattr(account, "_usage_source", f"fallback:{quota_result['usage_source']}")
     return usage_map
+
+
+def _get_or_create_system_setting(db: Session) -> AdminSystemSetting:
+    """获取后台系统配置；首次访问时按默认值初始化。"""
+    setting = db.scalar(select(AdminSystemSetting).limit(1))
+    if setting is None:
+        setting = AdminSystemSetting()
+        db.add(setting)
+        db.flush()
+    return setting
+
+
+def _system_setting_to_dict(setting: AdminSystemSetting) -> dict[str, Any]:
+    """将后台系统配置实体转换为接口输出。"""
+    return {
+        "theme": setting.theme,
+        "language": setting.language,
+        "queue_auto_refresh_seconds": setting.queue_auto_refresh_seconds,
+        "queue_max_items": setting.queue_max_items,
+        "audit_default_days": setting.audit_default_days,
+        "log_retention_days": setting.log_retention_days,
+        "updated_at": setting.updated_at.isoformat() if setting.updated_at else None,
+        "detail": "当前后台系统配置已加载",
+    }
+
+
+def _record_admin_action_history(
+    db: Session,
+    *,
+    admin: AdminContext,
+    action_type: str,
+    status_value: str,
+    detail: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    payload: dict[str, Any] | list[Any] | None = None,
+) -> None:
+    """记录后台危险操作执行历史。"""
+    db.add(
+        AdminActionHistory(
+            admin_user_id=admin.user_id,
+            action_type=action_type,
+            target_type=target_type,
+            target_id=target_id,
+            status=status_value,
+            detail=detail,
+            payload=payload,
+        )
+    )
+
+
+def _generate_random_password(length: int = 14) -> str:
+    """生成用于后台密码重置的随机密码。"""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _parse_date_range(
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[datetime | None, datetime | None]:
+    """将日期字符串解析为 UTC 时间范围。"""
+    start: datetime | None = None
+    end: datetime | None = None
+    if date_from:
+        start = datetime.fromisoformat(f"{date_from}T00:00:00+00:00")
+    if date_to:
+        end = datetime.fromisoformat(f"{date_to}T23:59:59.999999+00:00")
+    return start, end
 
 
 @router.post("/auth/login", response_model=ApiResponse)
@@ -690,11 +932,13 @@ def bulk_domain_status(
 @router.get("/queue", response_model=ApiResponse)
 def admin_queue_list(
     request: Request,
+    status_filter: str | None = Query(default=None, alias="status"),
+    q: str | None = None,
     admin: AdminContext = Depends(get_current_admin),
 ) -> dict[str, Any]:
     """查看 Postfix 队列当前状态。"""
     ensure_superadmin(admin)
-    result = list_mail_queue()
+    result = get_mail_queue_snapshot(status_filter=status_filter, q=q)
     record_admin_audit(
         request,
         admin,
@@ -702,6 +946,27 @@ def admin_queue_list(
         success=result["status"] != "error",
         target_type="mail_queue",
         metadata={"status": result["status"], "total": result["summary"].get("total", 0)},
+    )
+    return success_response(request, result)
+
+
+@router.get("/queue/{queue_id}", response_model=ApiResponse)
+def admin_queue_detail(
+    request: Request,
+    queue_id: str,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """查看指定队列邮件正文。"""
+    ensure_superadmin(admin)
+    result = get_mail_queue_message(queue_id)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.detail",
+        success=result["status"] == "ok",
+        target_type="mail_queue",
+        target_id=queue_id,
+        metadata={"status": result["status"]},
     )
     return success_response(request, result)
 
@@ -744,6 +1009,67 @@ def admin_queue_delete(
         metadata={"status": result["status"]},
     )
     return success_response(request, {"queue_id": payload.queue_id, **result})
+
+
+@router.post("/queue/requeue", response_model=ApiResponse)
+def admin_queue_requeue(
+    request: Request,
+    payload: QueueActionRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """重新投递指定队列邮件。"""
+    ensure_superadmin(admin)
+    result = requeue_mail_queue_item(payload.queue_id)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.requeue",
+        success=result["status"] == "ok",
+        target_type="mail_queue",
+        target_id=payload.queue_id,
+        metadata={"status": result["status"]},
+    )
+    return success_response(request, result)
+
+
+@router.post("/queue/bulk-delete", response_model=ApiResponse)
+def admin_queue_bulk_delete(
+    request: Request,
+    payload: QueueBulkDeleteRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """批量删除指定队列邮件。"""
+    ensure_superadmin(admin)
+    result = delete_mail_queue_items(payload.queue_ids)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.bulk_delete",
+        success=result["status"] in {"ok", "partial"},
+        target_type="mail_queue",
+        metadata={"status": result["status"], "count": result["deleted_count"]},
+    )
+    return success_response(request, result)
+
+
+@router.post("/queue/clear", response_model=ApiResponse)
+def admin_queue_clear(
+    request: Request,
+    payload: QueueBulkDeleteRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """按状态清空队列。"""
+    ensure_superadmin(admin)
+    result = clear_mail_queue(statuses=payload.statuses)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.queue.clear",
+        success=result["status"] in {"ok", "partial"},
+        target_type="mail_queue",
+        metadata={"status": result["status"], "count": result["deleted_count"], "statuses": payload.statuses},
+    )
+    return success_response(request, result)
 
 
 @router.get("/users", response_model=ApiResponse)
@@ -905,10 +1231,13 @@ def reset_admin_user_password(
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
-    account.password_hash = hash_mailbox_password(payload.password)
-    record_admin_audit(request, admin, "admin.users.reset_password", success=True, target_type="mail_account", target_id=user_id, metadata={"password_changed": True})
+    next_password = payload.password or (_generate_random_password() if payload.generate_random else None)
+    if not next_password:
+        raise AppError("ADMIN_PASSWORD_REQUIRED", "请提供新密码或启用随机生成", http_status=status.HTTP_400_BAD_REQUEST)
+    account.password_hash = hash_mailbox_password(next_password)
+    record_admin_audit(request, admin, "admin.users.reset_password", success=True, target_type="mail_account", target_id=user_id, metadata={"password_changed": True, "generated": payload.generate_random})
     db.commit()
-    return success_response(request, {"password_reset": True})
+    return success_response(request, {"password_reset": True, "generated_password": next_password if payload.generate_random else None})
 
 
 @router.post("/users/bulk-action", response_model=ApiResponse)
@@ -936,6 +1265,57 @@ def admin_users_bulk_action(
     record_admin_audit(request, admin, "admin.users.bulk_action", success=True, target_type="mail_account", metadata={"action": payload.action, "count": changed})
     db.commit()
     return success_response(request, {"updated": changed})
+
+
+@router.post("/users/import-csv", response_model=ApiResponse)
+def import_admin_users_csv(
+    request: Request,
+    payload: UserCsvImportRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """批量导入邮箱用户。"""
+    domain = None
+    if payload.domain_id:
+        domain = _resolve_target_domain(db, admin=admin, payload_domain_id=payload.domain_id)
+    rows = _parse_user_csv(payload.csv_content)
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        email = row["email"].lower()
+        if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == email)):
+            skipped.append({"email": email, "detail": "邮箱已存在"})
+            continue
+        target_domain = domain or _resolve_target_domain(db, admin=admin, payload_domain_id=None, email=email)
+        _ensure_email_matches_domain(email, target_domain)
+        account = MailAccount(
+            email=email,
+            display_name=row["display_name"] or None,
+            domain_id=target_domain.id if target_domain else None,
+            password_hash=hash_mailbox_password(row["password"]),
+            quota_mb=max(1, int(row["quota_mb"] or 500)),
+            status=row["status"] if row["status"] in {"active", "disabled"} else "active",
+            is_admin=_parse_bool_text(row["is_admin"]),
+            imap_host=get_settings().mail_imap_host,
+            imap_port=get_settings().mail_imap_port,
+            imap_ssl=get_settings().mail_imap_ssl,
+            smtp_host=get_settings().mail_smtp_host,
+            smtp_port=get_settings().mail_smtp_port,
+            smtp_ssl=get_settings().mail_smtp_ssl,
+        )
+        db.add(account)
+        db.flush()
+        created.append(account_to_admin_dict(account))
+    record_admin_audit(
+        request,
+        admin,
+        "admin.users.import_csv",
+        success=True,
+        target_type="mail_account",
+        metadata={"created": len(created), "skipped": len(skipped)},
+    )
+    db.commit()
+    return success_response(request, {"created": len(created), "skipped": len(skipped), "items": created, "skipped_items": skipped})
 
 
 @router.get("/aliases", response_model=ApiResponse)
@@ -980,6 +1360,7 @@ def create_alias(
     targets = _ensure_target_addresses([str(item) for item in payload.target_addresses])
     _ensure_alias_not_conflict(db, source_address=str(payload.source_address))
     _ensure_alias_no_direct_loop(str(payload.source_address), targets)
+    _detect_alias_cycle(_alias_graph(db, domain_id=domain_uuid), str(payload.source_address), targets)
     alias = MailAlias(
         domain_id=domain_uuid,
         source_address=str(payload.source_address).lower(),
@@ -1024,11 +1405,38 @@ def update_alias(
     ensure_domain_scope(admin, alias.domain_id)
     if payload.target_addresses is not None:
         targets = _ensure_target_addresses([str(item) for item in payload.target_addresses])
+        _detect_alias_cycle(_alias_graph(db, domain_id=alias.domain_id), alias.source_address, targets)
         _ensure_alias_no_direct_loop(alias.source_address, targets)
         alias.target_addresses = targets
     if payload.is_active is not None:
         alias.is_active = payload.is_active
     record_admin_audit(request, admin, "admin.aliases.update", success=True, target_type="mail_alias", target_id=str(alias.id))
+    db.commit()
+    db.refresh(alias)
+    return success_response(request, {"alias": alias_to_dict(alias)})
+
+
+@router.post("/aliases/catch-all", response_model=ApiResponse)
+def create_catch_all_alias(
+    request: Request,
+    payload: AliasCatchAllRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """一键创建 catch-all 别名。"""
+    domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
+    ensure_domain_scope(admin, domain_uuid)
+    domain = db.get(MailDomain, domain_uuid)
+    if domain is None:
+        raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
+    source_address = f"@{domain.name}"
+    targets = _ensure_target_addresses([str(payload.target_address)])
+    _ensure_alias_not_conflict(db, source_address=source_address)
+    _detect_alias_cycle(_alias_graph(db, domain_id=domain_uuid), source_address, targets)
+    alias = MailAlias(domain_id=domain_uuid, source_address=source_address, target_addresses=targets, is_active=True)
+    db.add(alias)
+    db.flush()
+    record_admin_audit(request, admin, "admin.aliases.catch_all_create", success=True, target_type="mail_alias", target_id=str(alias.id), metadata={"domain": domain.name, "target": str(payload.target_address)})
     db.commit()
     db.refresh(alias)
     return success_response(request, {"alias": alias_to_dict(alias)})
@@ -1217,22 +1625,200 @@ def list_audit_logs(
     event_type: str | None = None,
     actor_id: str | None = None,
     success_only: bool | None = None,
+    action: str | None = None,
+    target: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     admin: AdminContext = Depends(get_current_admin),
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """分页列出审计日志。"""
+    ensure_superadmin(admin)
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(AuditLog)
     if event_type:
         stmt = stmt.where(AuditLog.event_type == event_type)
+    if action:
+        stmt = stmt.where(AuditLog.event_type.contains(action))
     if actor_id:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
+    if target:
+        stmt = stmt.where(or_(func.coalesce(AuditLog.target_id, "").contains(target), func.coalesce(AuditLog.target_type, "").contains(target)))
     if success_only is not None:
         stmt = stmt.where(AuditLog.success.is_(success_only))
+    start_at, end_at = _parse_date_range(date_from, date_to)
+    if start_at is not None:
+        stmt = stmt.where(AuditLog.created_at >= start_at)
+    if end_at is not None:
+        stmt = stmt.where(AuditLog.created_at <= end_at)
     stmt = stmt.order_by(AuditLog.created_at.desc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[audit_log_to_dict(item) for item in items]))
+
+
+@router.get("/action-history", response_model=ApiResponse)
+def list_action_history(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    action_type: str | None = None,
+    target_type: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """分页列出后台操作历史。"""
+    ensure_superadmin(admin)
+    page, page_size = normalize_pagination(page, page_size)
+    stmt = select(AdminActionHistory)
+    if action_type:
+        stmt = stmt.where(AdminActionHistory.action_type.contains(action_type))
+    if target_type:
+        stmt = stmt.where(AdminActionHistory.target_type == target_type)
+    if status_filter:
+        stmt = stmt.where(AdminActionHistory.status == status_filter)
+    stmt = stmt.order_by(AdminActionHistory.created_at.desc())
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
+    return success_response(
+        request,
+        paginate(
+            page=page,
+            page_size=page_size,
+            total=total,
+            items=[
+                {
+                    "id": str(item.id),
+                    "actor": item.admin_user_id and str(item.admin_user_id) or "system",
+                    "action": item.action_type,
+                    "target": item.target_id or item.target_type or "-",
+                    "event_type": item.action_type,
+                    "actor_type": "admin_user" if item.admin_user_id else "system",
+                    "actor_id": str(item.admin_user_id) if item.admin_user_id else None,
+                    "target_type": item.target_type,
+                    "target_id": item.target_id,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "payload": item.payload,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in items
+            ],
+        ),
+    )
+
+
+@router.post("/audit-logs/export", response_model=ApiResponse)
+def export_audit_logs(
+    request: Request,
+    payload: LogsExportRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """导出当前筛选条件下的审计日志。"""
+    _ = admin
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(1000)
+    if payload.q:
+        stmt = stmt.where(AuditLog.event_type.contains(payload.q))
+    if payload.status:
+        stmt = stmt.where(AuditLog.event_type.contains(payload.status))
+    items = [audit_log_to_dict(item) for item in db.scalars(stmt).all()]
+    exported = export_log_items(
+        [
+            {
+                "id": item["id"],
+                "log_key": "audit",
+                "label": "audit",
+                "status": "success" if item.get("success", True) else "error",
+                "source": item.get("actor_type") or "admin",
+                "line_number": 0,
+                "summary": item.get("action", ""),
+                "raw": str(item),
+            }
+            for item in items
+        ],
+        format_name=payload.format,
+    )
+    record_admin_audit(
+        request,
+        admin,
+        "admin.audit_logs.export",
+        success=True,
+        target_type="audit_log",
+        metadata={"format": payload.format, "count": len(items)},
+    )
+    return success_response(request, exported)
+
+
+@router.get("/logs", response_model=ApiResponse)
+def admin_logs(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    q: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    domain_id: str | None = None,
+    sender: str | None = None,
+    recipient: str | None = None,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """搜索邮件服务日志。"""
+    ensure_superadmin(admin)
+    result = search_mail_service_logs(
+        log_key=domain_id or None,
+        query=q,
+        status_filter=status_filter,
+        sender=sender,
+        recipient=recipient,
+    )
+    page, page_size = normalize_pagination(page, page_size)
+    items = result["items"]
+    total = len(items)
+    start_index = (page - 1) * page_size
+    paged_items = items[start_index : start_index + page_size]
+    payload = paginate(page=page, page_size=page_size, total=total, items=[
+        {
+            "id": item["id"],
+            "source": item["log_key"],
+            "level": status_filter or "info",
+            "message": item["summary"],
+            "created_at": datetime.now(UTC).isoformat(),
+            "actor": item["label"],
+            "target": item["source"],
+        }
+        for item in paged_items
+    ])
+    payload["updated_at"] = datetime.now(UTC).isoformat()
+    payload["detail"] = result["detail"]
+    return success_response(request, payload)
+
+
+@router.post("/logs/export", response_model=ApiResponse)
+def admin_logs_export(
+    request: Request,
+    payload: LogsExportRequest,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """导出邮件服务日志。"""
+    ensure_superadmin(admin)
+    result = search_mail_service_logs(
+        log_key=payload.log_key,
+        query=payload.q,
+        status_filter=payload.status,
+        sender=payload.sender,
+        recipient=payload.recipient,
+    )
+    exported = export_log_items(result["items"], format_name=payload.format)
+    record_admin_audit(
+        request,
+        admin,
+        "admin.logs.export",
+        success=True,
+        target_type="system_log",
+        metadata={"format": payload.format, "count": len(result["items"])},
+    )
+    return success_response(request, exported)
 
 
 @router.get("/system-health", response_model=ApiResponse)
@@ -1246,11 +1832,19 @@ def admin_system_health(request: Request, admin: AdminContext = Depends(get_curr
         "status": "ok" if db.execute(select(1)).scalar() == 1 else "down",
         "detail": "数据库连接正常",
     }
-    redis_item = {
-        "name": "redis",
-        "status": "ok",
-        "detail": "Redis 已配置",
-    }
+    try:
+        redis_ok = bool(get_redis_client().ping())
+        redis_item = {
+            "name": "redis",
+            "status": "ok" if redis_ok else "down",
+            "detail": "Redis 连通正常" if redis_ok else "Redis 无响应",
+        }
+    except Exception as exc:
+        redis_item = {
+            "name": "redis",
+            "status": "down",
+            "detail": f"Redis 探测失败: {exc.__class__.__name__}",
+        }
     application_item = {
         "name": "application",
         "status": "ok",
@@ -1259,7 +1853,25 @@ def admin_system_health(request: Request, admin: AdminContext = Depends(get_curr
     service_items = list_service_health()
     disk_items = list_disk_usage()
     log_items = list_mail_service_logs()
-    items = [database_item, redis_item, application_item, *service_items]
+    cpu_snapshot = get_cpu_usage_snapshot()
+    memory_snapshot = get_memory_usage_snapshot()
+    online_snapshot = get_online_dovecot_users()
+    queue_snapshot = list_mail_queue()
+    queue_alert = {
+        "name": "queue_alert",
+        "status": "warning" if int(queue_snapshot.get("summary", {}).get("deferred", 0) or 0) > 0 else "ok",
+        "detail": f"deferred 队列 {queue_snapshot.get('summary', {}).get('deferred', 0)} 条",
+    }
+    cpu_item = {"name": "cpu", "status": cpu_snapshot["status"], "detail": cpu_snapshot["detail"]}
+    memory_item = {"name": "memory", "status": memory_snapshot["status"], "detail": memory_snapshot["detail"]}
+    online_item = {"name": "online_users", "status": online_snapshot["status"], "detail": online_snapshot["detail"]}
+    ip_policy = get_admin_ip_policy()
+    ip_item = {
+        "name": "admin_ip_policy",
+        "status": "ok",
+        "detail": f"白名单 {len(ip_policy['allowlist'])} 项，黑名单 {len(ip_policy['blocklist'])} 项",
+    }
+    items = [database_item, redis_item, application_item, cpu_item, memory_item, online_item, queue_alert, ip_item, *service_items]
     return success_response(
         request,
         {
@@ -1268,8 +1880,212 @@ def admin_system_health(request: Request, admin: AdminContext = Depends(get_curr
             "disks": disk_items,
             "logs": log_items,
             "checked_at": now,
+            "cpu": cpu_snapshot,
+            "memory": memory_snapshot,
+            "online_users": online_snapshot,
+            "queue": queue_snapshot,
+            "ip_policy": ip_policy,
         },
     )
+
+
+@router.get("/system-config", response_model=ApiResponse)
+def admin_system_config(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """读取后台系统配置。"""
+    ensure_superadmin(admin)
+    setting = _get_or_create_system_setting(db)
+    db.commit()
+    return success_response(request, _system_setting_to_dict(setting))
+
+
+@router.patch("/system-config", response_model=ApiResponse)
+def update_admin_system_config(
+    request: Request,
+    payload: SystemConfigUpdateRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """更新后台系统配置。"""
+    ensure_superadmin(admin)
+    setting = _get_or_create_system_setting(db)
+    setting.theme = payload.theme
+    setting.language = payload.language
+    setting.queue_auto_refresh_seconds = payload.queue_auto_refresh_seconds
+    setting.queue_max_items = payload.queue_max_items
+    setting.audit_default_days = payload.audit_default_days
+    setting.log_retention_days = payload.log_retention_days
+    setting.updated_by = admin.username
+    cleanup_stats = cleanup_admin_logs(db, retention_days=payload.log_retention_days)
+    _record_admin_action_history(
+        db,
+        admin=admin,
+        action_type="system_config.update",
+        status_value="ok",
+        detail="已更新后台系统配置",
+        target_type="admin_system_setting",
+        payload={**_system_setting_to_dict(setting), "cleanup": cleanup_stats},
+    )
+    record_admin_audit(
+        request,
+        admin,
+        "admin.system_config.update",
+        success=True,
+        target_type="admin_system_setting",
+    )
+    db.commit()
+    db.refresh(setting)
+    return success_response(request, {"config": _system_setting_to_dict(setting), "detail": "后台系统配置已保存", "cleanup": cleanup_stats})
+
+
+@router.get("/mail-system/configs", response_model=ApiResponse)
+def admin_mail_system_configs(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """读取 Postfix / Dovecot 配置预览。"""
+    ensure_superadmin(admin)
+    result = get_mail_system_configs()
+    record_admin_audit(request, admin, "admin.mail_system.configs", success=result["status"] != "error", target_type="mail_system")
+    return success_response(request, result)
+
+
+@router.post("/mail-system/backup", response_model=ApiResponse)
+def admin_mail_system_backup(
+    request: Request,
+    target_path: str,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """备份指定配置文件。"""
+    ensure_superadmin(admin)
+    result = backup_config_file(Path(target_path))
+    _record_admin_action_history(
+        db,
+        admin=admin,
+        action_type="mail_system.backup",
+        status_value=result["status"],
+        detail=str(result["detail"]),
+        target_type="config_file",
+        target_id=target_path,
+        payload=result,
+    )
+    record_admin_audit(request, admin, "admin.mail_system.backup", success=result["status"] == "ok", target_type="config_file", target_id=target_path)
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/mail-system/restore", response_model=ApiResponse)
+def admin_mail_system_restore(
+    request: Request,
+    payload: ConfigRestoreRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """从备份恢复配置。"""
+    ensure_superadmin(admin)
+    result = restore_config_backup(payload.backup_path, payload.target_path)
+    _record_admin_action_history(
+        db,
+        admin=admin,
+        action_type="mail_system.restore",
+        status_value=result["status"],
+        detail=str(result["detail"]),
+        target_type="config_file",
+        target_id=payload.target_path,
+        payload=result,
+    )
+    record_admin_audit(request, admin, "admin.mail_system.restore", success=result["status"] == "ok", target_type="config_file", target_id=payload.target_path)
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/mail-system/postmap", response_model=ApiResponse)
+def admin_mail_system_postmap(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """重建 Postfix 映射表。"""
+    ensure_superadmin(admin)
+    result = rebuild_postfix_maps()
+    _record_admin_action_history(db, admin=admin, action_type="mail_system.postmap", status_value=result["status"], detail=str(result["detail"]), target_type="mail_system", payload=result)
+    record_admin_audit(request, admin, "admin.mail_system.postmap", success=result["status"] == "ok", target_type="mail_system")
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/mail-system/postalias", response_model=ApiResponse)
+def admin_mail_system_postalias(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """重建系统别名表。"""
+    ensure_superadmin(admin)
+    result = rebuild_system_aliases()
+    _record_admin_action_history(db, admin=admin, action_type="mail_system.postalias", status_value=result["status"], detail=str(result["detail"]), target_type="mail_system", payload=result)
+    record_admin_audit(request, admin, "admin.mail_system.postalias", success=result["status"] == "ok", target_type="mail_system")
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/mail-system/postfix/reload", response_model=ApiResponse)
+def admin_mail_system_postfix_reload(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """重载 Postfix。"""
+    ensure_superadmin(admin)
+    result = reload_postfix_service()
+    _record_admin_action_history(db, admin=admin, action_type="mail_system.postfix_reload", status_value=result["status"], detail=str(result["detail"]), target_type="service", target_id="postfix", payload=result)
+    record_admin_audit(request, admin, "admin.mail_system.postfix_reload", success=result["status"] == "ok", target_type="service", target_id="postfix")
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/mail-system/dovecot/reload", response_model=ApiResponse)
+def admin_mail_system_dovecot_reload(
+    request: Request,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """重载 Dovecot。"""
+    ensure_superadmin(admin)
+    result = reload_dovecot_service()
+    _record_admin_action_history(db, admin=admin, action_type="mail_system.dovecot_reload", status_value=result["status"], detail=str(result["detail"]), target_type="service", target_id="dovecot", payload=result)
+    record_admin_audit(request, admin, "admin.mail_system.dovecot_reload", success=result["status"] == "ok", target_type="service", target_id="dovecot")
+    db.commit()
+    return success_response(request, result)
+
+
+@router.post("/system/service-action", response_model=ApiResponse)
+def admin_service_action(
+    request: Request,
+    payload: ServiceActionRequest,
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """控制邮件服务启停。"""
+    ensure_superadmin(admin)
+    result = control_mail_service(payload.service, payload.action)
+    _record_admin_action_history(
+        db,
+        admin=admin,
+        action_type=f"service.{payload.action}",
+        status_value=result["status"],
+        detail=str(result["detail"]),
+        target_type="service",
+        target_id=payload.service,
+        payload=result,
+    )
+    record_admin_audit(request, admin, "admin.system.service_action", success=result["status"] == "ok", target_type="service", target_id=payload.service, metadata={"action": payload.action})
+    db.commit()
+    return success_response(request, result)
 
 
 @router.get("/rspamd", response_model=ApiResponse)
@@ -1403,29 +2219,55 @@ def dashboard_overview(
     metrics = count_dashboard_metrics(db)
     queue_snapshot = list_mail_queue()
     recent_logs = db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(8)).all()
+    online_users = get_online_dovecot_users()
     return success_response(
         request,
         {
             "active_users": metrics["active_admin_total"],
+            "mail_users": metrics["user_total"],
             "mail_domains": metrics["domain_total"],
             "aliases": metrics["alias_total"],
             "queued_jobs": queue_snapshot["summary"].get("total", 0),
             "summary": metrics,
             "recent_audits": [audit_log_to_dict(item) for item in recent_logs],
+            "online_users": online_users,
+            "queue_summary": queue_snapshot.get("summary", {}),
             "scope": {"role": admin.role, "domain_id": str(admin.domain_id) if admin.domain_id else None},
         },
     )
 
 
 @router.get("/dashboard/trends", response_model=ApiResponse)
-def dashboard_trends(request: Request, admin: AdminContext = Depends(get_current_admin), db: Session = Depends(get_db_session)) -> dict[str, Any]:
-    """返回最近 7 天审计趋势数据。"""
+def dashboard_trends(
+    request: Request,
+    period: str = Query(default="7d", pattern="^(24h|7d|30d)$"),
+    admin: AdminContext = Depends(get_current_admin),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """返回最近一段时间的审计与系统趋势数据。"""
     _ = admin
     today = utcnow().date()
+    lookback_days = 1 if period == "24h" else (7 if period == "7d" else 30)
     points: list[dict[str, Any]] = []
-    for offset in range(6, -1, -1):
+    for offset in range(lookback_days - 1, -1, -1):
         day = today.fromordinal(today.toordinal() - offset)
         next_day = day.fromordinal(day.toordinal() + 1)
+        sent_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(AuditLog.event_type == "compose.send_mail", AuditLog.created_at >= day, AuditLog.created_at < next_day)
+            )
+            or 0
+        )
+        admin_action_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(AuditLog.actor_type == "admin_user", AuditLog.created_at >= day, AuditLog.created_at < next_day)
+            )
+            or 0
+        )
         count = int(
             db.scalar(
                 select(func.count())
@@ -1434,5 +2276,6 @@ def dashboard_trends(request: Request, admin: AdminContext = Depends(get_current
             )
             or 0
         )
-        points.append({"date": day.isoformat(), "audit_count": count})
-    return success_response(request, {"points": points})
+        points.append({"date": day.isoformat(), "audit_count": count, "sent_count": sent_count, "admin_action_count": admin_action_count})
+    queue_snapshot = list_mail_queue()
+    return success_response(request, {"period": period, "points": points, "queue_summary": queue_snapshot.get("summary", {})})

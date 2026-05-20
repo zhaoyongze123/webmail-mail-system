@@ -123,6 +123,42 @@
   border-top: 1px solid var(--border-color);
 }
 
+.admin-sidebar-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-sidebar-control {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-sidebar-control span,
+.admin-filter-field span,
+.admin-toolbar-grid span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.admin-sidebar-control select,
+.admin-filter-field input,
+.admin-filter-field select,
+.admin-toolbar-grid input,
+.admin-toolbar-grid select {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--input-bg);
+}
+
+.admin-sidebar-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .admin-main {
   min-width: 0;
   padding: 24px;
@@ -143,6 +179,13 @@
 .admin-page-body {
   display: grid;
   gap: 16px;
+}
+
+.admin-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .admin-section-stack {
@@ -244,6 +287,11 @@
   gap: 10px;
 }
 
+.admin-filter-field {
+  display: grid;
+  gap: 6px;
+}
+
 .admin-button-danger {
   background: #fef3f2;
   color: #b42318;
@@ -303,6 +351,10 @@
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.admin-queue-detail {
+  background: var(--panel-soft-bg);
 }
 
 .admin-status-pill {
@@ -456,6 +508,27 @@
   gap: 12px;
 }
 
+.admin-toolbar-grid--audit,
+.admin-toolbar-grid--logs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.admin-toolbar-grid--logs {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.admin-text-preview {
+  margin-top: 12px;
+}
+
+.admin-text-preview pre {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
 .admin-table {
   width: 100%;
   border-collapse: collapse;
@@ -550,6 +623,12 @@
   .admin-toolbar-grid,
   .admin-form-grid--two,
   .admin-info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-toolbar-grid,
+  .admin-toolbar-grid--audit,
+  .admin-toolbar-grid--logs {
     grid-template-columns: 1fr;
   }
 }

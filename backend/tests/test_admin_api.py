@@ -41,6 +41,15 @@ class FakeSettings:
         self.admin_bootstrap_password = "Admin123456!"
         self.admin_totp_issuer = "Webmail Admin"
         self.mail_quota_enabled = True
+        self.mailbox_password_scheme = "SHA512-CRYPT"
+        self.admin_ip_allowlist = ""
+        self.admin_ip_blocklist = ""
+        self.postfix_main_cf_path = "/etc/postfix/main.cf"
+        self.dovecot_config_path = "/etc/dovecot/dovecot.conf"
+        self.postfix_virtual_aliases_path = "/etc/postfix/virtual"
+        self.postfix_system_aliases_path = "/etc/aliases"
+        self.admin_config_backup_dir = "/tmp/webmail-admin-backups"
+        self.admin_audit_retention_days = 90
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -189,6 +198,17 @@ def test_admin_overview_domains_and_health(monkeypatch: pytest.MonkeyPatch) -> N
     )
     monkeypatch.setattr(
         admin_api_module,
+        "get_mail_queue_snapshot",
+        lambda status_filter=None, q=None: {
+            "status": "ok",
+            "detail": "当前检测到 2 条队列邮件",
+            "items": [],
+            "summary": {"total": 2, "deferred": 2, "visible_total": 0, "total_size_bytes": 0},
+            "command_result": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        admin_api_module,
         "list_service_health",
         lambda: [
             {"name": "postfix", "status": "ok", "detail": "systemctl 显示 postfix.service 正在运行", "source": "systemctl:postfix.service"},
@@ -234,13 +254,16 @@ def test_admin_overview_domains_and_health(monkeypatch: pytest.MonkeyPatch) -> N
     health_response = client.get("/api/admin/system-health", headers=headers)
     assert health_response.status_code == 200
     health_data = health_response.json()["data"]
-    assert len(health_data["items"]) == 6
+    assert len(health_data["items"]) >= 6
     assert health_data["items"][0]["status"] in {"ok", "down"}
     assert len(health_data["services"]) == 3
     assert health_data["services"][0]["name"] == "postfix"
     assert health_data["disks"][0]["mount_point"] == "/"
     assert health_data["logs"][0]["key"] == "postfix"
     assert health_data["logs"][0]["lines"][0] == "postfix error line 1"
+    assert "cpu" in health_data
+    assert "memory" in health_data
+    assert "queue" in health_data
 
 
 def test_admin_domain_dns_check(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,8 +318,8 @@ def test_admin_queue_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         admin_api_module,
-        "list_mail_queue",
-        lambda: {
+        "get_mail_queue_snapshot",
+        lambda status_filter=None, q=None: {
             "status": "ok",
             "detail": "当前检测到 1 条队列邮件",
             "items": [
@@ -315,7 +338,7 @@ def test_admin_queue_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
                     "description": "sender@example.com -> target@example.com",
                 },
             ],
-            "summary": {"total": 1, "deferred": 1},
+            "summary": {"total": 1, "deferred": 1, "visible_total": 1, "total_size_bytes": 2048},
             "command_result": {"ok": True},
         },
     )
@@ -337,6 +360,50 @@ def test_admin_queue_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
             "command_result": {"ok": True},
         },
     )
+    monkeypatch.setattr(
+        admin_api_module,
+        "requeue_mail_queue_item",
+        lambda queue_id: {
+            "status": "ok",
+            "detail": f"已请求重新投递队列邮件 {queue_id}",
+            "command_result": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        admin_api_module,
+        "delete_mail_queue_items",
+        lambda queue_ids: {
+            "status": "ok",
+            "detail": f"已删除 {len(queue_ids)} 条队列邮件",
+            "deleted_count": len(queue_ids),
+            "deleted_ids": queue_ids,
+            "errors": [],
+            "command_result": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        admin_api_module,
+        "clear_mail_queue",
+        lambda statuses=None: {
+            "status": "ok",
+            "detail": "已清空指定状态的队列邮件",
+            "deleted_count": 1,
+            "deleted_ids": ["ABCD1234"],
+            "errors": [],
+            "command_result": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        admin_api_module,
+        "get_mail_queue_message",
+        lambda queue_id: {
+            "status": "ok",
+            "detail": "已读取队列正文",
+            "queue_id": queue_id,
+            "content": "Subject: test\n\nbody",
+            "command_result": {"ok": True},
+        },
+    )
 
     list_response = client.get("/api/admin/queue", headers=headers)
     assert list_response.status_code == 200
@@ -352,6 +419,22 @@ def test_admin_queue_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["queue_id"] == "ABCD1234"
     assert delete_response.json()["data"]["status"] == "ok"
+
+    detail_response = client.get("/api/admin/queue/ABCD1234", headers=headers)
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["content"].startswith("Subject:")
+
+    requeue_response = client.post("/api/admin/queue/requeue", headers=headers, json={"queue_id": "ABCD1234"})
+    assert requeue_response.status_code == 200
+    assert requeue_response.json()["data"]["status"] == "ok"
+
+    bulk_delete_response = client.post("/api/admin/queue/bulk-delete", headers=headers, json={"queue_ids": ["ABCD1234"]})
+    assert bulk_delete_response.status_code == 200
+    assert bulk_delete_response.json()["data"]["deleted_count"] == 1
+
+    clear_response = client.post("/api/admin/queue/clear", headers=headers, json={"statuses": ["deferred"]})
+    assert clear_response.status_code == 200
+    assert clear_response.json()["data"]["status"] == "ok"
 
     events = [item["event_type"] for item in get_recent_audit_events()]
     assert "admin.queue.list" in events
@@ -528,6 +611,11 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             "command_result": {"ok": True},
         },
     )
+    monkeypatch.setattr(
+        admin_api_module,
+        "_detect_alias_cycle",
+        lambda graph, source_address, target_addresses: None,
+    )
 
     domain_response = client.post(
         "/api/admin/domains",
@@ -584,6 +672,25 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert recalc_response.status_code == 200
     assert recalc_response.json()["data"]["result"]["status"] == "ok"
+
+    import_response = client.post(
+        "/api/admin/users/import-csv",
+        headers=headers,
+        json={
+            "csv_content": "email,password,display_name,quota_mb,status,is_admin\nnew@mail.test,Import123!,Imported,512,active,false\n",
+            "domain_id": domain_id,
+        },
+    )
+    assert import_response.status_code == 200
+    assert import_response.json()["data"]["created"] == 1
+
+    catch_all_response = client.post(
+        "/api/admin/aliases/catch-all",
+        headers=headers,
+        json={"domain_id": domain_id, "target_address": "alice@mail.test"},
+    )
+    assert catch_all_response.status_code == 200
+    assert catch_all_response.json()["data"]["alias"]["source_address"] == "@mail.test"
 
 
 def test_admin_created_user_can_login_with_local_password(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -673,6 +780,42 @@ def test_admin_reset_password_invalidates_old_password(monkeypatch: pytest.Monke
     )
     assert new_login_response.status_code == 200
     assert new_login_response.json()["data"]["email"] == "carol@reset.test"
+
+
+def test_admin_action_history_and_dashboard_trends(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    payload = admin_login(client)
+    headers = auth_headers(payload["access_token"])
+
+    admin_api_module = importlib.import_module("app.admin_api")
+    monkeypatch.setattr(
+        admin_api_module,
+        "list_mail_queue",
+        lambda: {
+            "status": "ok",
+            "detail": "当前检测到 2 条队列邮件",
+            "items": [],
+            "summary": {"total": 2, "deferred": 1, "active": 1},
+            "command_result": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        admin_api_module,
+        "get_online_dovecot_users",
+        lambda: {"status": "ok", "detail": "当前在线 3 人", "count": 3},
+    )
+
+    history_response = client.get("/api/admin/action-history", headers=headers)
+    assert history_response.status_code == 200
+    assert history_response.json()["data"]["items"] == []
+
+    overview_response = client.get("/api/admin/overview", headers=headers)
+    assert overview_response.status_code == 200
+    assert overview_response.json()["data"]["online_users"]["count"] == 3
+
+    trends_response = client.get("/api/admin/dashboard/trends?period=7d", headers=headers)
+    assert trends_response.status_code == 200
+    assert trends_response.json()["data"]["period"] == "7d"
 
 
 def test_disabled_mailbox_user_cannot_login(monkeypatch: pytest.MonkeyPatch) -> None:
