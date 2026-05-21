@@ -527,6 +527,10 @@
 | 2026-05-19 | 已完成 | 阶段 C 体验补丁：根据浏览器冒烟结果补齐后台密码表单 `autocomplete` 与用户名辅助字段，消除新增后台页面的主要密码表单可访问性告警 |
 | 2026-05-19 | 已完成 | 阶段 C 真实缺陷修复：定位并修复后台数据库会话依赖未关闭导致的连接池耗尽问题，`get_db_session()` 已改为 `yield + close`，重启后端后连续 12 次管理员登录全部成功 |
 | 2026-05-20 | 已完成 | 阶段 C 最终收口：补齐用户 CSV 导入入口、随机重置密码、最后登录时间、别名 catch-all、Dashboard 趋势与最近审计、操作历史页面、系统配置与邮件系统运维入口，并完成前后端回归 |
+| 2026-05-21 | 已完成 | 阶段 B4 第二轮真源收口：`sqlite_vmail` 模式下后台用户配额已改为直接读写 `vmail.db.accounts.quota_mb`，不再只落 PostgreSQL shadow；`doveadm quota get` 解析单位已修正为 KiB -> MB |
+| 2026-05-21 | 已完成 | 服务器 `14.103.117.188` 已真实启用 Dovecot quota：`/etc/dovecot/dovecot.conf` 增加 `mail_plugins = quota` 与 `plugin { quota = count:User quota }`，`/etc/dovecot/dovecot-sql.conf` 的 `user_query` 已返回 `quota_rule`，`doveadm quota get/recalc -u test@mdaemon.cc` 验证通过 |
+| 2026-05-21 | 已完成 | 阶段 C 回归补洞：修复普通邮箱认证在非 `sqlite_vmail` 模式下错误回退访问 `vmail.db` 的问题，并补齐用户偏好读取的异常保护范围，避免数据库/测试环境缺字段时把已登录接口打成 500 |
+| 2026-05-21 | 已完成 | 本轮全量回归通过：后端 `PYTHONPATH=backend ./.venv/bin/python -m pytest backend/tests -q` 为 `148 passed`，后台相关前端测试 `12 passed`，`npm run build --prefix frontend` 成功 |
 
 ### 8.4 阶段 A 已完成项
 
@@ -548,6 +552,7 @@
 - 模块 B2：已完成 DNS 检测接口、域名详情入口与结果展示
 - 模块 B3：已完成 Postfix 队列列表、flush、删除指定邮件的最小前后端闭环
 - 模块 B4：已完成首轮 Dovecot 配额能力接入，支持 `doveadm quota get` 优先读取、失败回退缓存，以及单用户 `quota recalc`
+- 模块 B4：已完成第二轮真实配额真源收口，后台用户配额写操作已同步到 `vmail.db`，服务器 Dovecot quota 插件已真实启用并通过 `doveadm quota get/recalc` 验证
 - 模块 B5：已完成 Rspamd 最小闭环，支持全局垃圾分阈值读取/更新、域级 SPF/DMARC/DKIM 聚合展示与 DKIM 轮换
 - 模块 B6：已完成 TLS 最小闭环，支持证书状态读取、域名覆盖展示与 certbot 续签触发入口
 - 模块 B7：已完成日志与监控最小闭环，支持 Postfix/Dovecot 日志读取、Postfix/Dovecot/Rspamd 服务状态、磁盘用量与前端监控页展示
@@ -562,12 +567,16 @@
 - 模块 C5：已完成后台列表分页组件统一和 URL 查询参数同步
 - 模块 C6：已完成角色权限与后台认证相关回归，未登录访问 `/admin/dashboard` 会跳回 `/admin/login`
 - 模块 C7：已完成后端全量测试回归，结果为 `144 passed`
+- 模块 C7：已完成第二轮后端全量测试回归，当前结果为 `148 passed`
 - 模块 C8：已完成前端页面与后台相关测试回归，并在真实浏览器中完成页面级联调检查
 - 模块 C9：已完成前端构建回归
 - 模块 C10：已完成后台关键接口烟测与主路径浏览器冒烟
 - 模块 C11：已完成计划文档同步，当前文档状态已与代码和运行态一致
 
 ### 8.8 当前剩余风险与 P2 边界
+
+- 本轮“后台一期 quota 真启用”相关最小回归已通过：后端 `backend/tests/test_admin_api.py` 为 `15 passed`，前端 `AdminStageAPages.test.tsx` 为 `12 passed`，`npm run build --prefix frontend` 成功
+- 宿主机当前直接跑 `PYTHONPATH=backend ./.venv/bin/python -m pytest backend/tests -q` 仍会命中一批既有登录环境依赖失败，统一表现为 `MAIL_DIRECTORY_UNAVAILABLE`；这不是本轮 quota 改动的单点失败，需要后续单独整理全量测试基座与 fixture 假设
 
 - 当前开发环境不具备真实 `postqueue`、`certbot`、Rspamd 配置文件、Let’s Encrypt 证书目录、`journalctl`、`pgrep` 等 mailserver 依赖，因此队列、TLS、服务状态、日志、反垃圾能力目前验证的是“真实降级路径”，不是生产 mailserver 实际命令结果
 - 若进入生产或预发 mailserver 联调，还需要在具备 Postfix/Dovecot/Rspamd/Certbot 的环境中再次验证命令权限、文件路径与审计行为

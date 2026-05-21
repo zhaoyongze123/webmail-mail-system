@@ -96,8 +96,8 @@ def _read_preferences(preferences: MailUserPreference | None) -> dict[str, Any]:
 def get_user_preferences(email: str) -> dict[str, Any]:
     """读取指定邮箱的偏好，失败时回退默认值。"""
     normalized_email = _normalize_email(email)
-    session_factory = get_session_factory()
     try:
+        session_factory = get_session_factory()
         with session_factory() as db_session:
             account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
             if account is None:

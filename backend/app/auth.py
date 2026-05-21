@@ -84,7 +84,8 @@ def _imap_settings(email: str, password: str, settings: Settings) -> ImapSetting
 def _safe_account_snapshot(email: str) -> dict[str, object] | None:
     """尽力读取本地账号摘要；数据库不可用时返回空结果而不是打断登录。"""
     normalized_email = email.strip().lower()
-    if use_sqlite_mail_directory():
+    sqlite_directory_enabled = use_sqlite_mail_directory()
+    if sqlite_directory_enabled:
         directory_account = get_directory_account(normalized_email)
         if directory_account is not None:
             return {
@@ -109,14 +110,15 @@ def _safe_account_snapshot(email: str) -> dict[str, object] | None:
         logger.warning("读取本地邮箱账号失败 email=%s error=%s", normalized_email, exc.__class__.__name__)
     except Exception as exc:  # pragma: no cover - 兜底保护登录主流程
         logger.warning("读取本地邮箱账号异常 email=%s error=%s", normalized_email, exc.__class__.__name__)
-    directory_account = get_directory_account(normalized_email)
-    if directory_account is not None:
-        return {
-            "id": normalized_email,
-            "email": directory_account.email,
-            "status": "active",
-            "password_hash": directory_account.password,
-        }
+    if sqlite_directory_enabled:
+        directory_account = get_directory_account(normalized_email)
+        if directory_account is not None:
+            return {
+                "id": normalized_email,
+                "email": directory_account.email,
+                "status": "active",
+                "password_hash": directory_account.password,
+            }
     return None
 
 

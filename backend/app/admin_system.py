@@ -1030,8 +1030,8 @@ def delete_mail_queue_item(queue_id: str) -> dict[str, object]:
     }
 
 
-def _parse_quota_bytes(text: str) -> int | None:
-    """从 doveadm quota 输出中提取字节值。"""
+def _parse_quota_kib(text: str) -> int | None:
+    """从 `doveadm quota get` 输出中提取 KiB 值。"""
     for line in text.splitlines():
         if "storage" not in line.lower():
             continue
@@ -1042,6 +1042,12 @@ def _parse_quota_bytes(text: str) -> int | None:
     if generic:
         return int(generic.group(1))
     return None
+
+
+def _quota_unavailable_detail(result_stdout: str, result_stderr: str) -> bool:
+    """判断 doveadm quota 是否属于能力未启用而非普通执行错误。"""
+    text = f"{result_stdout}\n{result_stderr}".lower()
+    return "unknown command 'quota'" in text or "plugin quota exists" in text or "try to set mail_plugins=quota" in text
 
 
 def get_mailbox_quota_usage(email: str) -> dict[str, object]:
@@ -1064,6 +1070,14 @@ def get_mailbox_quota_usage(email: str) -> dict[str, object]:
             "usage_source": "unavailable",
             "command_result": _command_result_to_dict(result),
         }
+    if _quota_unavailable_detail(result.stdout, result.stderr):
+        return {
+            "status": "unavailable",
+            "detail": result.stderr or "当前 Dovecot 未启用 quota 命令",
+            "used_quota_mb": None,
+            "usage_source": "unavailable",
+            "command_result": _command_result_to_dict(result),
+        }
     if not result.ok:
         return {
             "status": "error",
@@ -1072,8 +1086,8 @@ def get_mailbox_quota_usage(email: str) -> dict[str, object]:
             "usage_source": "error",
             "command_result": _command_result_to_dict(result),
         }
-    used_bytes = _parse_quota_bytes(result.stdout)
-    if used_bytes is None:
+    used_kib = _parse_quota_kib(result.stdout)
+    if used_kib is None:
         return {
             "status": "error",
             "detail": "无法解析 doveadm quota get 输出",
@@ -1084,7 +1098,7 @@ def get_mailbox_quota_usage(email: str) -> dict[str, object]:
     return {
         "status": "ok",
         "detail": "已读取 Dovecot 配额使用量",
-        "used_quota_mb": round(used_bytes / (1024 * 1024), 2),
+        "used_quota_mb": round(used_kib / 1024, 2),
         "usage_source": "doveadm",
         "command_result": _command_result_to_dict(result),
     }
@@ -1104,6 +1118,12 @@ def recalc_mailbox_quota_usage(email: str) -> dict[str, object]:
         return {
             "status": "unavailable",
             "detail": "当前环境未安装 doveadm，无法重算真实配额",
+            "command_result": _command_result_to_dict(result),
+        }
+    if _quota_unavailable_detail(result.stdout, result.stderr):
+        return {
+            "status": "unavailable",
+            "detail": result.stderr or "当前 Dovecot 未启用 quota 命令",
             "command_result": _command_result_to_dict(result),
         }
     if not result.ok:

@@ -155,6 +155,9 @@ def build_sqlite_vmail_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Test
     with importlib.import_module("sqlite3").connect(settings.mail_directory_sqlite_path) as connection:
         connection.execute("CREATE TABLE domains (domain TEXT PRIMARY KEY)")
         connection.execute("CREATE TABLE accounts (username TEXT NOT NULL, domain TEXT NOT NULL, password TEXT, PRIMARY KEY (username, domain))")
+        connection.execute(
+            "CREATE TABLE aliases (source TEXT PRIMARY KEY, destination TEXT NOT NULL, active INTEGER DEFAULT 1, domain TEXT)"
+        )
         connection.execute("INSERT INTO domains(domain) VALUES (?)", ("example.com",))
         connection.execute(
             "INSERT INTO accounts(username, domain, password) VALUES (?, ?, ?)",
@@ -971,3 +974,40 @@ def test_sqlite_vmail_directory_create_and_delete_user(monkeypatch: pytest.Monke
         json={"email": "bob@example.com", "password": "Bob123456!", "remember": False},
     )
     assert deleted_login_response.status_code == 401
+
+
+def test_sqlite_vmail_directory_quota_sync(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+    payload = admin_login(client)
+    headers = auth_headers(payload["access_token"])
+
+    sqlite3_module = importlib.import_module("sqlite3")
+    settings = importlib.import_module("app.config").get_settings()
+    with sqlite3_module.connect(settings.mail_directory_sqlite_path) as connection:
+        connection.execute("ALTER TABLE accounts ADD COLUMN quota_mb INTEGER NOT NULL DEFAULT 500")
+        connection.execute(
+            "UPDATE accounts SET quota_mb = ? WHERE username = ? AND domain = ?",
+            (640, "alice", "example.com"),
+        )
+        connection.commit()
+
+    users_response = client.get("/api/admin/users", headers=headers)
+    assert users_response.status_code == 200
+    user = users_response.json()["data"]["items"][0]
+    assert user["quota_mb"] == 640
+
+    update_response = client.patch(
+        f"/api/admin/users/{user['id']}/quota",
+        headers=headers,
+        json={"quota_mb": 768},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["user"]["quota_mb"] == 768
+
+    with sqlite3_module.connect(settings.mail_directory_sqlite_path) as connection:
+        row = connection.execute(
+            "SELECT quota_mb FROM accounts WHERE username = ? AND domain = ?",
+            ("alice", "example.com"),
+        ).fetchone()
+    assert row is not None
+    assert int(row[0]) == 768

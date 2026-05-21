@@ -36,6 +36,9 @@ export function AdminQuotasPage() {
     queryKey: ['admin-quotas', params.domain_id, params.q],
     queryFn: () => fetchAdminQuotas({ q: params.q, domain_id: params.domain_id || undefined }),
   });
+  const quotaCapability = data?.capability;
+  const quotaWritable = quotaCapability?.writable !== false;
+  const quotaRealtimeAvailable = quotaCapability?.status === 'ok';
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-quotas'] });
@@ -140,6 +143,7 @@ export function AdminQuotasPage() {
           <button
             type="button"
             className="admin-button admin-button-secondary"
+            disabled={!quotaWritable}
             onClick={() => {
               setQuotaTarget(row.original);
               setQuotaValue(String(row.original.quota_mb));
@@ -150,6 +154,7 @@ export function AdminQuotasPage() {
           <button
             type="button"
             className="admin-button admin-button-secondary"
+            disabled={!quotaRealtimeAvailable}
             onClick={() => setRecalcTarget(row.original)}
           >
             重算使用量
@@ -161,17 +166,24 @@ export function AdminQuotasPage() {
 
   return (
     <div className="admin-section-stack">
-      <SectionCard title="域级配额策略" description="优先读取 Dovecot `doveadm quota get`，不可用时自动回退到本地缓存聚合。">
+      <SectionCard title="域级配额策略" description={quotaCapability?.detail || '优先读取 Dovecot `doveadm quota get`，不可用时自动回退到本地缓存聚合。'}>
+        {quotaCapability ? (
+          <div className="admin-inline-actions">
+            <StatusPill status={quotaCapability.status} />
+            <span className="admin-page-meta">{quotaCapability.detail}</span>
+          </div>
+        ) : null}
         <form
           className="admin-form-grid admin-form-grid--two"
           onSubmit={(event) => {
             event.preventDefault();
+            if (!quotaWritable) return;
             policyMutation.mutate(policyForm);
           }}
         >
           <label>
             <span>作用域域名</span>
-            <select value={policyForm.domain_id || ''} onChange={(event) => setPolicyForm((current) => ({ ...current, domain_id: event.target.value || null }))}>
+            <select value={policyForm.domain_id || ''} disabled={!quotaWritable} onChange={(event) => setPolicyForm((current) => ({ ...current, domain_id: event.target.value || null }))}>
               <option value="">全局默认</option>
               {(domainData?.items || []).map((domain) => (
                 <option key={domain.id} value={domain.id}>{domain.name}</option>
@@ -180,22 +192,22 @@ export function AdminQuotasPage() {
           </label>
           <label>
             <span>默认配额(MB)</span>
-            <input inputMode="numeric" value={String(policyForm.default_quota_mb)} onChange={(event) => setPolicyForm((current) => ({ ...current, default_quota_mb: Number(event.target.value || 0) }))} />
+            <input inputMode="numeric" disabled={!quotaWritable} value={String(policyForm.default_quota_mb)} onChange={(event) => setPolicyForm((current) => ({ ...current, default_quota_mb: Number(event.target.value || 0) }))} />
           </label>
           <label className="admin-check-field">
-            <input type="checkbox" checked={policyForm.warn_80_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_80_enabled: event.target.checked }))} />
+            <input type="checkbox" disabled={!quotaWritable} checked={policyForm.warn_80_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_80_enabled: event.target.checked }))} />
             <span>启用 80% 预警</span>
           </label>
           <label className="admin-check-field">
-            <input type="checkbox" checked={policyForm.warn_90_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_90_enabled: event.target.checked }))} />
+            <input type="checkbox" disabled={!quotaWritable} checked={policyForm.warn_90_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_90_enabled: event.target.checked }))} />
             <span>启用 90% 预警</span>
           </label>
           <label className="admin-check-field">
-            <input type="checkbox" checked={policyForm.warn_95_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_95_enabled: event.target.checked }))} />
+            <input type="checkbox" disabled={!quotaWritable} checked={policyForm.warn_95_enabled} onChange={(event) => setPolicyForm((current) => ({ ...current, warn_95_enabled: event.target.checked }))} />
             <span>启用 95% 预警</span>
           </label>
           <div className="admin-inline-actions">
-            <button type="submit" className="admin-button admin-button-primary" disabled={policyMutation.isPending}>保存策略</button>
+            <button type="submit" className="admin-button admin-button-primary" disabled={!quotaWritable || policyMutation.isPending}>保存策略</button>
           </div>
         </form>
         <ResultMessage error={error} success={success} />
@@ -228,7 +240,7 @@ export function AdminQuotasPage() {
               <button
                 type="button"
                 className="admin-button admin-button-secondary"
-                disabled={selectedUserIds.length === 0}
+                disabled={!quotaWritable || selectedUserIds.length === 0}
                 onClick={() => {
                   setBulkQuotaValue('');
                   setBulkQuotaDialogOpen(true);
@@ -253,11 +265,12 @@ export function AdminQuotasPage() {
           <button
             type="button"
             className="admin-button admin-button-primary"
-            disabled={!quotaTarget || !quotaValue || quotaMutation.isPending}
+            disabled={!quotaWritable || !quotaTarget || !quotaValue || quotaMutation.isPending}
             onClick={() => {
               if (!quotaTarget) return;
               const parsed = Number(quotaValue);
               if (!Number.isFinite(parsed) || parsed <= 0) return;
+              if (!quotaWritable) return;
               quotaMutation.mutate({ id: quotaTarget.id, quota_mb: parsed });
             }}
           >
@@ -267,7 +280,7 @@ export function AdminQuotasPage() {
       >
         <label className="admin-dialog-field">
           <span>配额(MB)</span>
-          <input inputMode="numeric" value={quotaValue} onChange={(event) => setQuotaValue(event.target.value)} />
+          <input inputMode="numeric" disabled={!quotaWritable} value={quotaValue} onChange={(event) => setQuotaValue(event.target.value)} />
         </label>
       </AdminDialog>
 
@@ -283,10 +296,11 @@ export function AdminQuotasPage() {
           <button
             type="button"
             className="admin-button admin-button-primary"
-            disabled={!bulkQuotaValue || bulkMutation.isPending}
+            disabled={!quotaWritable || !bulkQuotaValue || bulkMutation.isPending}
             onClick={() => {
               const parsed = Number(bulkQuotaValue);
               if (!Number.isFinite(parsed) || parsed <= 0) return;
+              if (!quotaWritable) return;
               bulkMutation.mutate({ ids: selectedUserIds, quota_mb: parsed });
             }}
           >
@@ -296,7 +310,7 @@ export function AdminQuotasPage() {
       >
         <label className="admin-dialog-field">
           <span>统一配额(MB)</span>
-          <input inputMode="numeric" value={bulkQuotaValue} onChange={(event) => setBulkQuotaValue(event.target.value)} />
+          <input inputMode="numeric" disabled={!quotaWritable} value={bulkQuotaValue} onChange={(event) => setBulkQuotaValue(event.target.value)} />
         </label>
       </AdminDialog>
 
@@ -313,7 +327,7 @@ export function AdminQuotasPage() {
             <button
               type="button"
               className="admin-button admin-button-primary"
-              disabled={!recalcTarget || recalcMutation.isPending}
+              disabled={!quotaRealtimeAvailable || !recalcTarget || recalcMutation.isPending}
               onClick={() => {
                 if (!recalcTarget) return;
                 recalcMutation.mutate(recalcTarget.id);

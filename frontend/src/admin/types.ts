@@ -32,6 +32,14 @@ export type PaginatedResult<T> = PaginationMeta & {
   items: T[];
 };
 
+export type AdminCapability = {
+  status: 'ok' | 'warning' | 'unavailable' | 'error' | 'critical' | string;
+  detail: string;
+  writable?: boolean;
+  backend?: string;
+  usage_source?: string;
+};
+
 export type AdminOverviewStats = {
   active_users: number;
   mail_users?: number;
@@ -196,6 +204,16 @@ export type AdminQuotaItem = AdminListItem & {
   warn_80_enabled: boolean;
   warn_90_enabled: boolean;
   warn_95_enabled: boolean;
+};
+
+export type AdminAliasesPageResult = PaginatedResult<AdminAlias> & {
+  capability?: AdminCapability;
+};
+
+export type AdminQuotasPageResult = {
+  items: AdminQuotaItem[];
+  user_items: AdminMailboxUser[];
+  capability?: AdminCapability;
 };
 
 export type AdminAuditLogItem = {

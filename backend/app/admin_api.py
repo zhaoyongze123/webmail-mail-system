@@ -89,20 +89,29 @@ from app.auth import hash_mailbox_password
 from app.config import get_settings
 from app.errors import AppError
 from app.mail_directory import (
+    alias_directory_capability,
     create_directory_account,
+    create_directory_alias,
     create_directory_domain,
     delete_directory_account,
+    delete_directory_alias,
     delete_directory_domain,
+    delete_shadow_alias,
     delete_shadow_account,
     delete_shadow_domain,
     ensure_shadow_account,
+    ensure_shadow_alias,
     ensure_shadow_domain,
     get_directory_account,
+    get_directory_alias,
     list_directory_accounts,
+    list_directory_aliases,
     list_directory_domains,
     rename_directory_domain,
     sync_directory_shadow,
     update_directory_account_password,
+    update_directory_account_quota,
+    update_directory_alias,
     use_sqlite_mail_directory,
 )
 from app.models import AdminActionHistory, AdminSystemSetting, AdminUser, AuditLog, MailAccount, MailAlias, MailDomain, QuotaPolicy
@@ -1235,10 +1244,14 @@ def create_admin_user_account(
         existing_directory = get_directory_account(str(payload.email))
         if existing_directory is not None:
             raise AppError("ADMIN_USER_EXISTS", "邮箱账号已存在", http_status=status.HTTP_400_BAD_REQUEST)
-        directory_account = create_directory_account(str(payload.email), payload.password)
-        shadow_account = ensure_shadow_account(db, directory_account.email, password_present=True)
+        directory_account = create_directory_account(str(payload.email), payload.password, quota_mb=payload.quota_mb)
+        shadow_account = ensure_shadow_account(
+            db,
+            directory_account.email,
+            password_present=True,
+            quota_mb=directory_account.quota_mb,
+        )
         shadow_account.display_name = payload.display_name
-        shadow_account.quota_mb = payload.quota_mb
         shadow_account.status = payload.status
         shadow_account.is_admin = payload.is_admin
         record_admin_audit(request, admin, "admin.users.create", success=True, target_type="mail_account", target_id=str(shadow_account.id), metadata={"email": shadow_account.email})
@@ -1322,6 +1335,8 @@ def update_admin_user_account(
     if payload.display_name is not None:
         account.display_name = payload.display_name
     if payload.quota_mb is not None:
+        if use_sqlite_mail_directory():
+            update_directory_account_quota(account.email, payload.quota_mb)
         account.quota_mb = payload.quota_mb
     if payload.status is not None:
         account.status = payload.status
@@ -1447,10 +1462,18 @@ def import_admin_users_csv(
         target_domain = domain or _resolve_target_domain(db, admin=admin, payload_domain_id=None, email=email)
         _ensure_email_matches_domain(email, target_domain)
         if use_sqlite_mail_directory():
-            directory_account = create_directory_account(email, row["password"])
-            account = ensure_shadow_account(db, directory_account.email, password_present=True)
+            directory_account = create_directory_account(
+                email,
+                row["password"],
+                quota_mb=max(1, int(row["quota_mb"] or 500)),
+            )
+            account = ensure_shadow_account(
+                db,
+                directory_account.email,
+                password_present=True,
+                quota_mb=directory_account.quota_mb,
+            )
             account.display_name = row["display_name"] or None
-            account.quota_mb = max(1, int(row["quota_mb"] or 500))
             account.status = row["status"] if row["status"] in {"active", "disabled"} else "active"
             account.is_admin = _parse_bool_text(row["is_admin"])
             created.append(account_to_admin_dict(account))
@@ -1496,6 +1519,9 @@ def list_aliases(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """分页列出邮件别名。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
+    capability = alias_directory_capability()
     page, page_size = normalize_pagination(page, page_size)
     stmt = select(MailAlias).options(selectinload(MailAlias.domain))
     if admin.role == "domain_admin" and admin.domain_id:
@@ -1508,7 +1534,9 @@ def list_aliases(
     stmt = stmt.order_by(MailAlias.created_at.desc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[alias_to_dict(item) for item in items]))
+    payload = paginate(page=page, page_size=page_size, total=total, items=[alias_to_dict(item) for item in items])
+    payload["capability"] = capability
+    return success_response(request, payload)
 
 
 @router.post("/aliases", response_model=ApiResponse)
@@ -1519,6 +1547,8 @@ def create_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """创建邮件别名。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
     ensure_domain_scope(admin, domain_uuid)
     domain = db.get(MailDomain, domain_uuid)
@@ -1528,6 +1558,31 @@ def create_alias(
     _ensure_alias_not_conflict(db, source_address=str(payload.source_address))
     _ensure_alias_no_direct_loop(str(payload.source_address), targets)
     _detect_alias_cycle(_alias_graph(db, domain_id=domain_uuid), str(payload.source_address), targets)
+    if use_sqlite_mail_directory():
+        directory_alias = create_directory_alias(
+            str(payload.source_address),
+            targets,
+            domain_name=domain.name,
+            is_active=True,
+        )
+        ensure_shadow_alias(
+            db,
+            directory_alias.source_address,
+            directory_alias.domain,
+            directory_alias.target_addresses,
+            is_active=directory_alias.is_active,
+        )
+        alias = db.scalar(
+            select(MailAlias)
+            .where(MailAlias.source_address == directory_alias.source_address)
+            .options(selectinload(MailAlias.domain))
+        )
+        if alias is None:
+            raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
+        record_admin_audit(request, admin, "admin.aliases.create", success=True, target_type="mail_alias", target_id=str(alias.id))
+        db.commit()
+        db.refresh(alias)
+        return success_response(request, {"alias": alias_to_dict(alias)})
     alias = MailAlias(
         domain_id=domain_uuid,
         source_address=str(payload.source_address).lower(),
@@ -1550,6 +1605,8 @@ def get_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """获取单个邮件别名详情。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -1566,6 +1623,8 @@ def update_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """更新邮件别名。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -1574,8 +1633,12 @@ def update_alias(
         targets = _ensure_target_addresses([str(item) for item in payload.target_addresses])
         _detect_alias_cycle(_alias_graph(db, domain_id=alias.domain_id), alias.source_address, targets)
         _ensure_alias_no_direct_loop(alias.source_address, targets)
+        if use_sqlite_mail_directory():
+            update_directory_alias(alias.source_address, targets)
         alias.target_addresses = targets
     if payload.is_active is not None:
+        if use_sqlite_mail_directory():
+            update_directory_alias(alias.source_address, None, is_active=payload.is_active)
         alias.is_active = payload.is_active
     record_admin_audit(request, admin, "admin.aliases.update", success=True, target_type="mail_alias", target_id=str(alias.id))
     db.commit()
@@ -1591,6 +1654,8 @@ def create_catch_all_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """一键创建 catch-all 别名。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain_uuid = _parse_uuid(payload.domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效")
     ensure_domain_scope(admin, domain_uuid)
     domain = db.get(MailDomain, domain_uuid)
@@ -1600,6 +1665,31 @@ def create_catch_all_alias(
     targets = _ensure_target_addresses([str(payload.target_address)])
     _ensure_alias_not_conflict(db, source_address=source_address)
     _detect_alias_cycle(_alias_graph(db, domain_id=domain_uuid), source_address, targets)
+    if use_sqlite_mail_directory():
+        directory_alias = create_directory_alias(
+            source_address,
+            targets,
+            domain_name=domain.name,
+            is_active=True,
+        )
+        ensure_shadow_alias(
+            db,
+            directory_alias.source_address,
+            directory_alias.domain,
+            directory_alias.target_addresses,
+            is_active=directory_alias.is_active,
+        )
+        alias = db.scalar(
+            select(MailAlias)
+            .where(MailAlias.source_address == directory_alias.source_address)
+            .options(selectinload(MailAlias.domain))
+        )
+        if alias is None:
+            raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
+        record_admin_audit(request, admin, "admin.aliases.catch_all_create", success=True, target_type="mail_alias", target_id=str(alias.id), metadata={"domain": domain.name, "target": str(payload.target_address)})
+        db.commit()
+        db.refresh(alias)
+        return success_response(request, {"alias": alias_to_dict(alias)})
     alias = MailAlias(domain_id=domain_uuid, source_address=source_address, target_addresses=targets, is_active=True)
     db.add(alias)
     db.flush()
@@ -1617,11 +1707,17 @@ def delete_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """删除邮件别名。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, alias.domain_id)
-    db.delete(alias)
+    if use_sqlite_mail_directory():
+        delete_directory_alias(alias.source_address)
+        delete_shadow_alias(db, alias.source_address)
+    else:
+        db.delete(alias)
     record_admin_audit(request, admin, "admin.aliases.delete", success=True, target_type="mail_alias", target_id=alias_id)
     db.commit()
     return success_response(request, {"deleted": True})
@@ -1635,10 +1731,14 @@ def toggle_alias(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """切换邮件别名启用状态。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     alias = db.get(MailAlias, _parse_uuid(alias_id, code="ADMIN_ALIAS_INVALID_ID", message="别名 ID 无效"))
     if alias is None:
         raise AppError("ADMIN_ALIAS_NOT_FOUND", "别名不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, alias.domain_id)
+    if use_sqlite_mail_directory():
+        update_directory_alias(alias.source_address, None, is_active=not alias.is_active)
     alias.is_active = not alias.is_active
     record_admin_audit(request, admin, "admin.aliases.toggle", success=True, target_type="mail_alias", target_id=str(alias.id), metadata={"is_active": alias.is_active})
     db.commit()
@@ -1655,6 +1755,8 @@ def list_quotas(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """列出域配额使用情况。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domains = db.scalars(select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.quota_policy))).all()
     if admin.role == "domain_admin" and admin.domain_id:
         domains = [item for item in domains if item.id == admin.domain_id]
@@ -1682,7 +1784,26 @@ def list_quotas(
         for account in all_accounts
         if not q or q.strip().lower() in account.email.lower() or q.strip().lower() in (account.display_name or "").lower()
     ]
-    return success_response(request, {"items": items, "user_items": user_items})
+    quota_capability = get_mailbox_quota_usage(all_accounts[0].email) if all_accounts else {
+        "status": "unavailable",
+        "detail": "当前没有可检测的邮箱账号",
+        "used_quota_mb": None,
+        "usage_source": "empty",
+        "command_result": None,
+    }
+    return success_response(
+        request,
+        {
+            "items": items,
+            "user_items": user_items,
+            "capability": {
+                "status": quota_capability.get("status", "unavailable"),
+                "detail": quota_capability.get("detail", "当前环境无法读取真实配额"),
+                "usage_source": quota_capability.get("usage_source", "unknown"),
+                "writable": bool(getattr(get_settings(), "mail_quota_enabled", True)),
+            },
+        },
+    )
 
 
 @router.patch("/quotas/policy", response_model=ApiResponse)
@@ -1725,6 +1846,8 @@ def update_user_quota(
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
+    if use_sqlite_mail_directory():
+        update_directory_account_quota(account.email, payload.quota_mb)
     account.quota_mb = payload.quota_mb
     record_admin_audit(request, admin, "admin.quotas.update_user", success=True, target_type="mail_account", target_id=str(account.id), metadata={"quota_mb": payload.quota_mb})
     db.commit()
@@ -1777,6 +1900,8 @@ def bulk_update_quotas(
     changed = 0
     for account in accounts:
         ensure_domain_scope(admin, account.domain_id)
+        if use_sqlite_mail_directory():
+            update_directory_account_quota(account.email, payload.quota_mb)
         account.quota_mb = payload.quota_mb
         changed += 1
     record_admin_audit(request, admin, "admin.quotas.bulk_update", success=True, target_type="mail_account", metadata={"count": changed, "quota_mb": payload.quota_mb})

@@ -37,6 +37,8 @@ export function AdminAliasesPage() {
     queryKey: ['admin-aliases', params.page, params.q, params.domain_id],
     queryFn: () => fetchAdminAliases({ page: params.page, page_size: 10, q: params.q, domain_id: params.domain_id || undefined }),
   });
+  const aliasCapability = data?.capability;
+  const aliasWritable = aliasCapability?.writable !== false;
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-aliases'] });
@@ -126,6 +128,7 @@ export function AdminAliasesPage() {
           <button
             type="button"
             className="admin-button admin-button-secondary"
+            disabled={!aliasWritable}
             onClick={() => {
               setEditingAlias(row.original);
               setForm({
@@ -140,6 +143,7 @@ export function AdminAliasesPage() {
           <button
             type="button"
             className="admin-button admin-button-secondary"
+            disabled={!aliasWritable}
             onClick={() => toggleMutation.mutate(row.original.id)}
           >
             {row.original.is_active ? '停用' : '启用'}
@@ -147,6 +151,7 @@ export function AdminAliasesPage() {
           <button
             type="button"
             className="admin-button admin-button-danger"
+            disabled={!aliasWritable}
             onClick={() => setDeleteTarget(row.original)}
           >
             删除
@@ -160,13 +165,19 @@ export function AdminAliasesPage() {
     <div className="admin-section-stack">
       <SectionCard
         title={editingAlias ? '编辑别名' : '新增别名'}
-        description="支持多目标地址、冲突提示和启停切换。"
+        description={aliasCapability?.detail || '支持多目标地址、冲突提示和启停切换。'}
         actions={(
-          <button type="button" className="admin-button admin-button-secondary" onClick={() => setCatchAllDialogOpen(true)}>
+          <button type="button" className="admin-button admin-button-secondary" disabled={!aliasWritable} onClick={() => setCatchAllDialogOpen(true)}>
             Catch-all 创建
           </button>
         )}
       >
+        {aliasCapability ? (
+          <div className="admin-inline-actions">
+            <StatusPill status={aliasCapability.status} />
+            <span className="admin-page-meta">{aliasCapability.detail}</span>
+          </div>
+        ) : null}
         <form
           className="admin-form-grid admin-form-grid--two"
           onSubmit={(event) => {
@@ -176,15 +187,17 @@ export function AdminAliasesPage() {
               target_addresses: form.target_addresses.map((item) => item.trim()).filter(Boolean),
             };
             if (editingAlias) {
+              if (!aliasWritable) return;
               updateMutation.mutate({ id: editingAlias.id, payload: { target_addresses: payload.target_addresses } });
               return;
             }
+            if (!aliasWritable) return;
             createMutation.mutate(payload);
           }}
         >
           <label>
             <span>所属域</span>
-            <select value={form.domain_id} onChange={(event) => setForm((current) => ({ ...current, domain_id: event.target.value }))}>
+            <select value={form.domain_id} disabled={!aliasWritable} onChange={(event) => setForm((current) => ({ ...current, domain_id: event.target.value }))}>
               <option value="">请选择域名</option>
               {(domainData?.items || []).map((domain) => (
                 <option key={domain.id} value={domain.id}>{domain.name}</option>
@@ -193,7 +206,7 @@ export function AdminAliasesPage() {
           </label>
           <label>
             <span>源地址</span>
-            <input value={form.source_address} disabled={Boolean(editingAlias)} onChange={(event) => setForm((current) => ({ ...current, source_address: event.target.value }))} />
+            <input value={form.source_address} disabled={Boolean(editingAlias) || !aliasWritable} onChange={(event) => setForm((current) => ({ ...current, source_address: event.target.value }))} />
           </label>
           <div className="admin-multi-value">
             <span>目标地址</span>
@@ -201,6 +214,7 @@ export function AdminAliasesPage() {
               <div key={`${index}-${target}`} className="admin-inline-actions">
                 <input
                   value={target}
+                  disabled={!aliasWritable}
                   onChange={(event) => setForm((current) => ({
                     ...current,
                     target_addresses: current.target_addresses.map((item, itemIndex) => (itemIndex === index ? event.target.value : item)),
@@ -209,6 +223,7 @@ export function AdminAliasesPage() {
                 <button
                   type="button"
                   className="admin-button admin-button-secondary"
+                  disabled={!aliasWritable}
                   onClick={() => setForm((current) => ({
                     ...current,
                     target_addresses: current.target_addresses.length === 1 ? [''] : current.target_addresses.filter((_, itemIndex) => itemIndex !== index),
@@ -221,13 +236,14 @@ export function AdminAliasesPage() {
             <button
               type="button"
               className="admin-button admin-button-secondary"
+              disabled={!aliasWritable}
               onClick={() => setForm((current) => ({ ...current, target_addresses: [...current.target_addresses, ''] }))}
             >
               添加目标地址
             </button>
           </div>
           <div className="admin-inline-actions">
-            <button type="submit" className="admin-button admin-button-primary" disabled={createMutation.isPending || updateMutation.isPending}>
+            <button type="submit" className="admin-button admin-button-primary" disabled={!aliasWritable || createMutation.isPending || updateMutation.isPending}>
               {editingAlias ? '保存修改' : '创建别名'}
             </button>
             {editingAlias ? (
@@ -273,6 +289,7 @@ export function AdminAliasesPage() {
             disabled={!catchAllForm.domain_id || !catchAllForm.target_address || catchAllMutation.isPending}
             onClick={() => {
               if (!catchAllForm.domain_id || !catchAllForm.target_address) return;
+              if (!aliasWritable) return;
               catchAllMutation.mutate({
                 domain_id: catchAllForm.domain_id,
                 target_address: catchAllForm.target_address,
@@ -286,7 +303,7 @@ export function AdminAliasesPage() {
         <div className="admin-form-grid">
           <label>
             <span>所属域</span>
-            <select value={catchAllForm.domain_id} onChange={(event) => setCatchAllForm((current) => ({ ...current, domain_id: event.target.value }))}>
+            <select value={catchAllForm.domain_id} disabled={!aliasWritable} onChange={(event) => setCatchAllForm((current) => ({ ...current, domain_id: event.target.value }))}>
               <option value="">请选择域名</option>
               {(domainData?.items || []).map((domain) => (
                 <option key={domain.id} value={domain.id}>{domain.name}</option>
@@ -297,6 +314,7 @@ export function AdminAliasesPage() {
             <span>目标地址</span>
             <input
               value={catchAllForm.target_address}
+              disabled={!aliasWritable}
               onChange={(event) => setCatchAllForm((current) => ({ ...current, target_address: event.target.value }))}
               placeholder="接收所有未命中的邮件"
             />

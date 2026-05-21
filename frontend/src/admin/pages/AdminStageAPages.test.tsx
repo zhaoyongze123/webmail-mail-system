@@ -90,7 +90,19 @@ function renderPage(element: React.ReactElement) {
     if (url.includes('/api/admin/aliases')) {
       return new Response(JSON.stringify({
         success: true,
-        data: { page: 1, page_size: 10, total: 0, total_pages: 0, items: [] },
+        data: {
+          page: 1,
+          page_size: 10,
+          total: 0,
+          total_pages: 0,
+          items: [],
+          capability: {
+            status: 'ok',
+            detail: '当前 vmail.db 已启用 aliases 表',
+            writable: true,
+            backend: 'sqlite_vmail',
+          },
+        },
         error: null,
       }));
     }
@@ -127,6 +139,12 @@ function renderPage(element: React.ReactElement) {
             quota_status: 'healthy',
             is_admin: false,
           }],
+          capability: {
+            status: 'unavailable',
+            detail: '当前 Dovecot 未启用 quota 命令',
+            writable: true,
+            usage_source: 'unavailable',
+          },
         },
         error: null,
       }));

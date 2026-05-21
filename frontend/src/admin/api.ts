@@ -1,5 +1,6 @@
 import type {
   AdminAlias,
+  AdminAliasesPageResult,
   AdminActionHistoryItem,
   AdminAuditLogItem,
   AdminAuthPayload,
@@ -17,6 +18,7 @@ import type {
   AdminOverviewStats,
   AdminQueueSnapshot,
   AdminQuotaItem,
+  AdminQuotasPageResult,
   AdminRspamdSnapshot,
   AdminCatchAllAliasResult,
   AliasFormInput,
@@ -307,9 +309,9 @@ export async function recalcAdminUserQuota(userId: string) {
   });
 }
 
-export async function fetchAdminAliases(query: ListQuery = {}): Promise<PaginatedResult<AdminAlias>> {
-  const data = await requestAdminApi<PaginatedPayload<AdminAlias>>(`/api/admin/aliases${buildQuery(query)}`, { method: 'GET' });
-  return normalizePaginated(data);
+export async function fetchAdminAliases(query: ListQuery = {}): Promise<AdminAliasesPageResult> {
+  const data = await requestAdminApi<AdminAliasesPageResult>(`/api/admin/aliases${buildQuery(query)}`, { method: 'GET' });
+  return data;
 }
 
 export async function createAdminAlias(payload: AliasFormInput) {
@@ -345,8 +347,8 @@ export async function toggleAdminAlias(aliasId: string) {
   });
 }
 
-export async function fetchAdminQuotas(query: ListQuery = {}): Promise<{ items: AdminQuotaItem[]; user_items: AdminMailboxUser[] }> {
-  return requestAdminApi<{ items: AdminQuotaItem[]; user_items: AdminMailboxUser[] }>(`/api/admin/quotas${buildQuery(query)}`, { method: 'GET' });
+export async function fetchAdminQuotas(query: ListQuery = {}): Promise<AdminQuotasPageResult> {
+  return requestAdminApi<AdminQuotasPageResult>(`/api/admin/quotas${buildQuery(query)}`, { method: 'GET' });
 }
 
 export async function updateQuotaPolicy(payload: QuotaPolicyFormInput) {
