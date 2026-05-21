@@ -39,10 +39,12 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          if [ -n "${ACR_REGISTRY}" ] && [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
+          registry="$(printf '%s' "${ACR_REGISTRY}" | tr -d '\r\n' | sed -E 's#^https?://##; s#/*$##')"
+          if [ -n "${registry}" ] && [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "backend_image=${ACR_REGISTRY}/webmail-mail-system/backend" >> "$GITHUB_OUTPUT"
-            echo "frontend_image=${ACR_REGISTRY}/webmail-mail-system/frontend" >> "$GITHUB_OUTPUT"
+            echo "registry=${registry}" >> "$GITHUB_OUTPUT"
+            echo "backend_image=${registry}/webmail-mail-system/backend" >> "$GITHUB_OUTPUT"
+            echo "frontend_image=${registry}/webmail-mail-system/frontend" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
@@ -51,7 +53,7 @@ jobs:
         if: steps.acr-check.outputs.enabled == 'true'
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.ACR_REGISTRY }}
+          registry: ${{ steps.acr-check.outputs.registry }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
