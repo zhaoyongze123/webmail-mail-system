@@ -39,7 +39,7 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          registry="$(printf '%s' "${ACR_REGISTRY}" | tr -d '\r\n' | sed -E 's#^https?://##; s#/*$##')"
+          registry="$(printf '%s' "${ACR_REGISTRY}" | tr -d '\r\n' | sed -E 's#^https?://##' | cut -d/ -f1)"
           if [ -n "${registry}" ] && [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "registry=${registry}" >> "$GITHUB_OUTPUT"
