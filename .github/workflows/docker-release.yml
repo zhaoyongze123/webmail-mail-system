@@ -1,0 +1,87 @@
+name: docker-release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  GHCR_NAMESPACE: ghcr.io/${{ github.repository_owner }}/webmail-mail-system
+  ACR_NAMESPACE: ${{ secrets.ACR_REGISTRY }}/webmail-mail-system
+
+jobs:
+  build-and-push:
+    name: Build and push backend/frontend images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 生成 backend 镜像元数据
+        id: backend-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.GHCR_NAMESPACE }}/backend
+            ${{ env.ACR_NAMESPACE }}/backend
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: 生成 frontend 镜像元数据
+        id: frontend-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.GHCR_NAMESPACE }}/frontend
+            ${{ env.ACR_NAMESPACE }}/frontend
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: 构建并推送 backend 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.backend-meta.outputs.tags }}
+          labels: ${{ steps.backend-meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: 构建并推送 frontend 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.frontend-meta.outputs.tags }}
+          labels: ${{ steps.frontend-meta.outputs.labels }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
