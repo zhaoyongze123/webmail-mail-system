@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     admin_totp_issuer: str = Field(default="Webmail Admin", alias="ADMIN_TOTP_ISSUER")
     mail_quota_enabled: bool = Field(default=True, alias="MAIL_QUOTA_ENABLED")
     mailbox_password_scheme: str = Field(default="SHA512-CRYPT", alias="MAILBOX_PASSWORD_SCHEME")
+    mail_directory_backend: str = Field(default="postgres", alias="MAIL_DIRECTORY_BACKEND")
+    mail_directory_sqlite_path: str = Field(default="/var/vmail/vmail.db", alias="MAIL_DIRECTORY_SQLITE_PATH")
+    mail_directory_password_mode: str = Field(default="plain", alias="MAIL_DIRECTORY_PASSWORD_MODE")
     rspamd_enabled: bool = Field(default=True, alias="RSPAMD_ENABLED")
     rspamd_actions_config_path: str = Field(default="/etc/rspamd/local.d/actions.conf", alias="RSPAMD_ACTIONS_CONFIG_PATH")
     rspamd_dkim_key_dir: str = Field(default="/var/lib/rspamd/dkim", alias="RSPAMD_DKIM_KEY_DIR")
@@ -101,6 +104,11 @@ class Settings(BaseSettings):
     def admin_ip_blocklist_values(self) -> list[str]:
         """返回后台 IP 黑名单列表。"""
         return [item.strip() for item in self.admin_ip_blocklist.split(",") if item.strip()]
+
+    @property
+    def use_sqlite_mail_directory(self) -> bool:
+        """返回当前是否启用基于 vmail.db 的邮件目录真源。"""
+        return self.mail_directory_backend.strip().lower() == "sqlite_vmail"
 
 
 @lru_cache

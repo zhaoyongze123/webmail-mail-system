@@ -35,6 +35,9 @@ class FakeSettings:
         self.mail_smtp_port = 25
         self.mail_smtp_ssl = False
         self.mail_smtp_starttls = False
+        self.mail_directory_backend = "postgres"
+        self.mail_directory_sqlite_path = "/tmp/test-vmail.db"
+        self.mail_directory_password_mode = "plain"
         self.admin_access_token_ttl_minutes = 15
         self.admin_refresh_token_ttl_days = 7
         self.admin_bootstrap_username = "admin@example.com"
@@ -66,6 +69,10 @@ class FakeSettings:
     @property
     def effective_admin_bootstrap_password(self) -> str | None:
         return self.admin_bootstrap_password
+
+    @property
+    def use_sqlite_mail_directory(self) -> bool:
+        return self.mail_directory_backend == "sqlite_vmail"
 
 
 def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -137,6 +144,24 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(main_module, "get_settings", lambda: settings, raising=False)
     importlib.import_module("app.observability").reset_observability_state()
     return TestClient(main_module.app, raise_server_exceptions=False)
+
+
+def build_sqlite_vmail_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
+    client = build_client(monkeypatch)
+    settings = importlib.import_module("app.config").get_settings()
+    settings.mail_directory_backend = "sqlite_vmail"
+    settings.mail_directory_sqlite_path = str(tmp_path / "vmail.db")
+    settings.mail_directory_password_mode = "plain"
+    with importlib.import_module("sqlite3").connect(settings.mail_directory_sqlite_path) as connection:
+        connection.execute("CREATE TABLE domains (domain TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE accounts (username TEXT NOT NULL, domain TEXT NOT NULL, password TEXT, PRIMARY KEY (username, domain))")
+        connection.execute("INSERT INTO domains(domain) VALUES (?)", ("example.com",))
+        connection.execute(
+            "INSERT INTO accounts(username, domain, password) VALUES (?, ?, ?)",
+            ("alice", "example.com", "Secret123!"),
+        )
+        connection.commit()
+    return client
 
 
 def admin_login(client: TestClient) -> dict[str, str]:
@@ -861,3 +886,88 @@ def test_disabled_mailbox_user_cannot_login(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert login_response.status_code == 403
     assert login_response.json()["error"]["code"] == "AUTH_ACCOUNT_DISABLED"
+
+
+def test_sqlite_vmail_directory_sync_and_login(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+
+    payload = admin_login(client)
+    headers = auth_headers(payload["access_token"])
+
+    domains_response = client.get("/api/admin/domains", headers=headers)
+    assert domains_response.status_code == 200
+    domains = domains_response.json()["data"]["items"]
+    assert domains[0]["name"] == "example.com"
+    assert domains[0]["user_count"] == 1
+
+    users_response = client.get("/api/admin/users", headers=headers)
+    assert users_response.status_code == 200
+    users = users_response.json()["data"]["items"]
+    assert users[0]["email"] == "alice@example.com"
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "alice@example.com", "password": "Secret123!", "remember": False},
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["data"]["email"] == "alice@example.com"
+
+    reset_response = client.post(
+        f"/api/admin/users/{users[0]['id']}/reset-password",
+        headers=headers,
+        json={"password": "NewSecret123!"},
+    )
+    assert reset_response.status_code == 200
+
+    old_login = client.post(
+        "/api/auth/login",
+        json={"email": "alice@example.com", "password": "Secret123!", "remember": False},
+    )
+    assert old_login.status_code == 401
+
+    new_login = client.post(
+        "/api/auth/login",
+        json={"email": "alice@example.com", "password": "NewSecret123!", "remember": False},
+    )
+    assert new_login.status_code == 200
+
+
+def test_sqlite_vmail_directory_create_and_delete_user(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+    payload = admin_login(client)
+    headers = auth_headers(payload["access_token"])
+
+    domains_response = client.get("/api/admin/domains", headers=headers)
+    assert domains_response.status_code == 200
+    domain_id = domains_response.json()["data"]["items"][0]["id"]
+
+    create_response = client.post(
+        "/api/admin/users",
+        headers=headers,
+        json={
+            "email": "bob@example.com",
+            "display_name": "Bob",
+            "domain_id": domain_id,
+            "password": "Bob123456!",
+            "quota_mb": 256,
+            "status": "active",
+            "is_admin": False,
+        },
+    )
+    assert create_response.status_code == 200
+    user_id = create_response.json()["data"]["user"]["id"]
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "bob@example.com", "password": "Bob123456!", "remember": False},
+    )
+    assert login_response.status_code == 200
+
+    delete_response = client.delete(f"/api/admin/users/{user_id}", headers=headers)
+    assert delete_response.status_code == 200
+
+    deleted_login_response = client.post(
+        "/api/auth/login",
+        json={"email": "bob@example.com", "password": "Bob123456!", "remember": False},
+    )
+    assert deleted_login_response.status_code == 401

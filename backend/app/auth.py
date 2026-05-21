@@ -22,6 +22,7 @@ from app.crypto import decrypt_text, encrypt_text
 from app.db import get_session_factory
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
+from app.mail_directory import get_directory_account, update_directory_account_password, use_sqlite_mail_directory
 from app.mail_preferences import get_user_preferences
 from app.mail_state import ensure_mail_account
 from app.models import MailAccount
@@ -83,6 +84,15 @@ def _imap_settings(email: str, password: str, settings: Settings) -> ImapSetting
 def _safe_account_snapshot(email: str) -> dict[str, object] | None:
     """尽力读取本地账号摘要；数据库不可用时返回空结果而不是打断登录。"""
     normalized_email = email.strip().lower()
+    if use_sqlite_mail_directory():
+        directory_account = get_directory_account(normalized_email)
+        if directory_account is not None:
+            return {
+                "id": normalized_email,
+                "email": directory_account.email,
+                "status": "active",
+                "password_hash": directory_account.password,
+            }
     try:
         session_factory = get_session_factory()
         with session_factory() as db_session:
@@ -99,6 +109,14 @@ def _safe_account_snapshot(email: str) -> dict[str, object] | None:
         logger.warning("读取本地邮箱账号失败 email=%s error=%s", normalized_email, exc.__class__.__name__)
     except Exception as exc:  # pragma: no cover - 兜底保护登录主流程
         logger.warning("读取本地邮箱账号异常 email=%s error=%s", normalized_email, exc.__class__.__name__)
+    directory_account = get_directory_account(normalized_email)
+    if directory_account is not None:
+        return {
+            "id": normalized_email,
+            "email": directory_account.email,
+            "status": "active",
+            "password_hash": directory_account.password,
+        }
     return None
 
 
@@ -114,6 +132,10 @@ def hash_mailbox_password(password: str) -> str:
 
 def _verify_local_mailbox_password(password: str, password_hash: str) -> bool:
     """校验本地邮箱密码是否匹配。"""
+    if use_sqlite_mail_directory():
+        password_mode = str(getattr(get_settings(), "mail_directory_password_mode", "plain") or "plain").strip().lower()
+        if password_mode == "plain":
+            return password == password_hash
     return mailbox_pwd_context.verify(password, password_hash)
 
 
@@ -126,6 +148,22 @@ def has_local_mailbox_password(email: str) -> bool:
 def update_local_mailbox_password(email: str, new_password: str) -> None:
     """更新本地邮箱账号密码哈希。"""
     normalized_email = email.strip().lower()
+    if use_sqlite_mail_directory():
+        try:
+            update_directory_account_password(normalized_email, new_password)
+        except AppError:
+            raise AppError(
+                "AUTH_ACCOUNT_NOT_FOUND",
+                "邮箱账号不存在",
+                http_status=status.HTTP_404_NOT_FOUND,
+            )
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is not None:
+                account.password_hash = None
+                db_session.commit()
+        return
     session_factory = get_session_factory()
     with session_factory() as db_session:
         account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))

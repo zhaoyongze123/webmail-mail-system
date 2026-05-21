@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
 from app.errors import AppError
+from app.mail_directory import sync_directory_shadow, use_sqlite_mail_directory
 from app.models import AdminActionHistory, AdminRefreshToken, AdminUser, AuditLog, MailAlias, MailDomain, MailAccount, MailMessage, QuotaPolicy
 from app.observability import record_audit_event
 
@@ -275,6 +276,8 @@ def cleanup_admin_logs(db: Session, *, retention_days: int) -> dict[str, int]:
 
 def count_dashboard_metrics(db: Session) -> dict[str, int]:
     """统计后台仪表盘所需的核心指标。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     return {
         "domain_total": int(db.scalar(select(func.count()).select_from(MailDomain)) or 0),
         "user_total": int(db.scalar(select(func.count()).select_from(MailAccount)) or 0),

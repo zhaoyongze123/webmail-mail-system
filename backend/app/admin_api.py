@@ -88,6 +88,23 @@ from app.admin_system import (
 from app.auth import hash_mailbox_password
 from app.config import get_settings
 from app.errors import AppError
+from app.mail_directory import (
+    create_directory_account,
+    create_directory_domain,
+    delete_directory_account,
+    delete_directory_domain,
+    delete_shadow_account,
+    delete_shadow_domain,
+    ensure_shadow_account,
+    ensure_shadow_domain,
+    get_directory_account,
+    list_directory_accounts,
+    list_directory_domains,
+    rename_directory_domain,
+    sync_directory_shadow,
+    update_directory_account_password,
+    use_sqlite_mail_directory,
+)
 from app.models import AdminActionHistory, AdminSystemSetting, AdminUser, AuditLog, MailAccount, MailAlias, MailDomain, QuotaPolicy
 from app.redis_client import get_redis_client
 from app.responses import success_response
@@ -450,6 +467,8 @@ def _resolve_target_domain(
     email: str | None = None,
 ) -> MailDomain | None:
     """根据管理员权限、显式域 ID 或邮箱后缀推导目标域。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     if admin.role == "domain_admin":
         if admin.domain_id is None:
             raise AppError("ADMIN_FORBIDDEN", "当前管理员未绑定域", http_status=status.HTTP_403_FORBIDDEN)
@@ -471,6 +490,8 @@ def _resolve_target_domain(
 
 def _load_rspamd_domains(admin: AdminContext, db: Session) -> list[MailDomain]:
     """按当前管理员权限加载可见域名列表。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     stmt = select(MailDomain).order_by(MailDomain.name.asc())
     domains = db.scalars(stmt).all()
     if admin.role == "domain_admin" and admin.domain_id:
@@ -775,6 +796,36 @@ def list_domains(
     """分页列出可管理的域列表。"""
     ensure_superadmin(admin)
     page, page_size = normalize_pagination(page, page_size)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
+        items: list[dict[str, Any]] = []
+        directory_domains = list_directory_domains()
+        domain_names = [item.name for item in directory_domains]
+        shadow_domains = db.scalars(
+            select(MailDomain).where(MailDomain.name.in_(domain_names)).options(selectinload(MailDomain.accounts), selectinload(MailDomain.aliases))
+        ).all() if domain_names else []
+        shadow_map = {item.name: item for item in shadow_domains}
+        for item in directory_domains:
+            if q and q.strip().lower() not in item.name.lower():
+                continue
+            shadow_domain = shadow_map.get(item.name) or ensure_shadow_domain(db, item.name)
+            if status_filter and shadow_domain.status != status_filter:
+                continue
+            _attach_account_usage(db, list(shadow_domain.accounts or []))
+            domain_payload = domain_to_dict(shadow_domain)
+            domain_payload["user_count"] = item.account_count
+            domain_payload["description"] = f"用户 {item.account_count} / 别名 {domain_payload['alias_count']} / 已用 {domain_payload['used_quota_mb']} MB"
+            items.append(domain_payload)
+        if sort == "-created_at":
+            items.sort(key=lambda value: value.get("created_at") or "", reverse=True)
+        elif sort == "created_at":
+            items.sort(key=lambda value: value.get("created_at") or "")
+        else:
+            items.sort(key=lambda value: str(value.get("name") or ""))
+        total = len(items)
+        paged_items = items[(page - 1) * page_size : page * page_size]
+        db.commit()
+        return success_response(request, paginate(page=page, page_size=page_size, total=total, items=paged_items))
     stmt = select(MailDomain).options(selectinload(MailDomain.accounts), selectinload(MailDomain.aliases))
     if q:
         stmt = stmt.where(func.lower(MailDomain.name).contains(q.strip().lower()))
@@ -802,6 +853,15 @@ def create_domain(
     """创建新域。"""
     ensure_superadmin(admin)
     normalized = _normalize_domain_name(payload.name)
+    if use_sqlite_mail_directory():
+        directory_domain = create_directory_domain(normalized)
+        domain = ensure_shadow_domain(db, directory_domain.name)
+        domain.quota_limit_mb = payload.quota_limit_mb
+        domain.status = payload.status
+        record_admin_audit(request, admin, "admin.domains.create", success=True, target_type="domain", target_id=str(domain.id), metadata={"name": normalized})
+        db.commit()
+        db.refresh(domain)
+        return success_response(request, {"domain": domain_to_dict(domain)})
     if db.scalar(select(MailDomain).where(MailDomain.name == normalized)):
         raise AppError("ADMIN_DOMAIN_EXISTS", "域名已存在", http_status=status.HTTP_400_BAD_REQUEST)
     domain = MailDomain(name=normalized, quota_limit_mb=payload.quota_limit_mb, status=payload.status)
@@ -822,6 +882,8 @@ def get_domain(
 ) -> dict[str, Any]:
     """获取单个域详情。"""
     ensure_superadmin(admin)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain = db.scalar(
         select(MailDomain)
         .where(MailDomain.id == _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
@@ -842,6 +904,8 @@ def check_domain_dns(
 ) -> dict[str, Any]:
     """检测域名的 MX / SPF / DMARC / DKIM 基础 DNS 配置。"""
     ensure_superadmin(admin)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -869,15 +933,21 @@ def update_domain(
 ) -> dict[str, Any]:
     """更新域配置。"""
     ensure_superadmin(admin)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain = db.get(MailDomain, _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
     if payload.name is not None:
         normalized_name = _normalize_domain_name(payload.name)
-        existing = db.scalar(select(MailDomain).where(MailDomain.name == normalized_name, MailDomain.id != domain.id))
-        if existing is not None:
-            raise AppError("ADMIN_DOMAIN_EXISTS", "域名已存在", http_status=status.HTTP_400_BAD_REQUEST)
-        domain.name = normalized_name
+        if use_sqlite_mail_directory():
+            renamed = rename_directory_domain(domain.name, normalized_name)
+            domain.name = renamed.name
+        else:
+            existing = db.scalar(select(MailDomain).where(MailDomain.name == normalized_name, MailDomain.id != domain.id))
+            if existing is not None:
+                raise AppError("ADMIN_DOMAIN_EXISTS", "域名已存在", http_status=status.HTTP_400_BAD_REQUEST)
+            domain.name = normalized_name
     if payload.quota_limit_mb is not None:
         domain.quota_limit_mb = payload.quota_limit_mb
     if payload.status is not None:
@@ -897,6 +967,8 @@ def delete_domain(
 ) -> dict[str, Any]:
     """删除域并返回影响信息。"""
     ensure_superadmin(admin)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     domain = db.scalar(
         select(MailDomain)
         .where(MailDomain.id == _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"))
@@ -905,7 +977,12 @@ def delete_domain(
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
     impact = {"user_count": len(domain.accounts or []), "alias_count": len(domain.aliases or [])}
-    db.delete(domain)
+    if use_sqlite_mail_directory():
+        directory_impact = delete_directory_domain(domain.name)
+        impact["user_count"] = directory_impact["account_count"]
+        delete_shadow_domain(db, domain.name)
+    else:
+        db.delete(domain)
     record_admin_audit(request, admin, "admin.domains.delete", success=True, target_type="domain", target_id=domain_id, metadata=impact)
     db.commit()
     return success_response(request, {"deleted": True, "impact": impact})
@@ -920,6 +997,8 @@ def bulk_domain_status(
 ) -> dict[str, Any]:
     """批量更新域状态。"""
     ensure_superadmin(admin)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     uuids = [_parse_uuid(item, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效") for item in payload.ids]
     domains = db.scalars(select(MailDomain).where(MailDomain.id.in_(uuids))).all()
     for domain in domains:
@@ -1086,6 +1165,40 @@ def list_admin_users(
 ) -> dict[str, Any]:
     """分页列出邮箱账号。"""
     page, page_size = normalize_pagination(page, page_size)
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
+        directory_accounts = list_directory_accounts()
+        shadow_accounts = db.scalars(select(MailAccount).options(selectinload(MailAccount.domain))).all()
+        shadow_map = {item.email.lower(): item for item in shadow_accounts}
+        visible_accounts: list[MailAccount] = []
+        for directory_account in directory_accounts:
+            shadow_account = shadow_map.get(directory_account.email.lower()) or ensure_shadow_account(
+                db,
+                directory_account.email,
+                password_present=directory_account.password is not None,
+            )
+            if admin.role == "domain_admin" and admin.domain_id and shadow_account.domain_id != admin.domain_id:
+                continue
+            if domain_id and shadow_account.domain_id != _parse_uuid(domain_id, code="ADMIN_DOMAIN_INVALID_ID", message="域 ID 无效"):
+                continue
+            if q:
+                keyword = q.strip().lower()
+                if keyword not in shadow_account.email.lower() and keyword not in (shadow_account.display_name or "").lower():
+                    continue
+            if status_filter and shadow_account.status != status_filter:
+                continue
+            visible_accounts.append(shadow_account)
+        if sort == "-created_at":
+            visible_accounts.sort(key=lambda item: item.created_at, reverse=True)
+        elif sort == "created_at":
+            visible_accounts.sort(key=lambda item: item.created_at)
+        else:
+            visible_accounts.sort(key=lambda item: item.email.lower())
+        total = len(visible_accounts)
+        items = visible_accounts[(page - 1) * page_size : page * page_size]
+        _attach_account_usage(db, items)
+        db.commit()
+        return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[account_to_admin_dict(item) for item in items]))
     stmt = select(MailAccount).options(selectinload(MailAccount.domain))
     if admin.role == "domain_admin" and admin.domain_id:
         stmt = stmt.where(MailAccount.domain_id == admin.domain_id)
@@ -1116,6 +1229,25 @@ def create_admin_user_account(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """创建邮箱账号。"""
+    if use_sqlite_mail_directory():
+        domain = _resolve_target_domain(db, admin=admin, payload_domain_id=payload.domain_id, email=str(payload.email))
+        _ensure_email_matches_domain(str(payload.email), domain)
+        existing_directory = get_directory_account(str(payload.email))
+        if existing_directory is not None:
+            raise AppError("ADMIN_USER_EXISTS", "邮箱账号已存在", http_status=status.HTTP_400_BAD_REQUEST)
+        directory_account = create_directory_account(str(payload.email), payload.password)
+        shadow_account = ensure_shadow_account(db, directory_account.email, password_present=True)
+        shadow_account.display_name = payload.display_name
+        shadow_account.quota_mb = payload.quota_mb
+        shadow_account.status = payload.status
+        shadow_account.is_admin = payload.is_admin
+        record_admin_audit(request, admin, "admin.users.create", success=True, target_type="mail_account", target_id=str(shadow_account.id), metadata={"email": shadow_account.email})
+        db.commit()
+        shadow_account = db.scalar(select(MailAccount).where(MailAccount.id == shadow_account.id).options(selectinload(MailAccount.domain)))
+        if shadow_account is None:
+            raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
+        _attach_account_usage(db, [shadow_account])
+        return success_response(request, {"user": account_to_admin_dict(shadow_account)})
     if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == payload.email.lower())):
         raise AppError("ADMIN_USER_EXISTS", "邮箱账号已存在", http_status=status.HTTP_400_BAD_REQUEST)
     domain = _resolve_target_domain(db, admin=admin, payload_domain_id=payload.domain_id, email=str(payload.email))
@@ -1154,6 +1286,8 @@ def get_admin_user_account(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """获取单个邮箱账号详情。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -1174,6 +1308,8 @@ def update_admin_user_account(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """更新邮箱账号信息。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -1208,11 +1344,17 @@ def delete_admin_user_account(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """删除邮箱账号。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
     ensure_domain_scope(admin, account.domain_id)
-    db.delete(account)
+    if use_sqlite_mail_directory():
+        delete_directory_account(account.email)
+        delete_shadow_account(db, account.email)
+    else:
+        db.delete(account)
     record_admin_audit(request, admin, "admin.users.delete", success=True, target_type="mail_account", target_id=user_id)
     db.commit()
     return success_response(request, {"deleted": True})
@@ -1227,6 +1369,8 @@ def reset_admin_user_password(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """重置邮箱账号密码。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     account = db.get(MailAccount, _parse_uuid(user_id, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效"))
     if account is None:
         raise AppError("ADMIN_USER_NOT_FOUND", "邮箱账号不存在", http_status=status.HTTP_404_NOT_FOUND)
@@ -1234,7 +1378,11 @@ def reset_admin_user_password(
     next_password = payload.password or (_generate_random_password() if payload.generate_random else None)
     if not next_password:
         raise AppError("ADMIN_PASSWORD_REQUIRED", "请提供新密码或启用随机生成", http_status=status.HTTP_400_BAD_REQUEST)
-    account.password_hash = hash_mailbox_password(next_password)
+    if use_sqlite_mail_directory():
+        update_directory_account_password(account.email, next_password)
+        account.password_hash = None
+    else:
+        account.password_hash = hash_mailbox_password(next_password)
     record_admin_audit(request, admin, "admin.users.reset_password", success=True, target_type="mail_account", target_id=user_id, metadata={"password_changed": True, "generated": payload.generate_random})
     db.commit()
     return success_response(request, {"password_reset": True, "generated_password": next_password if payload.generate_random else None})
@@ -1248,6 +1396,8 @@ def admin_users_bulk_action(
     db: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
     """对邮箱账号执行批量状态或删除操作。"""
+    if use_sqlite_mail_directory():
+        sync_directory_shadow(db)
     uuids = [_parse_uuid(item, code="ADMIN_USER_INVALID_ID", message="用户 ID 无效") for item in payload.ids]
     accounts = db.scalars(select(MailAccount).where(MailAccount.id.in_(uuids))).all()
     changed = 0
@@ -1260,7 +1410,11 @@ def admin_users_bulk_action(
             account.status = "disabled"
             changed += 1
         elif payload.action == "delete":
-            db.delete(account)
+            if use_sqlite_mail_directory():
+                delete_directory_account(account.email)
+                delete_shadow_account(db, account.email)
+            else:
+                db.delete(account)
             changed += 1
     record_admin_audit(request, admin, "admin.users.bulk_action", success=True, target_type="mail_account", metadata={"action": payload.action, "count": changed})
     db.commit()
@@ -1283,29 +1437,42 @@ def import_admin_users_csv(
     skipped: list[dict[str, Any]] = []
     for row in rows:
         email = row["email"].lower()
-        if db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == email)):
+        if use_sqlite_mail_directory():
+            if get_directory_account(email) is not None:
+                skipped.append({"email": email, "detail": "邮箱已存在"})
+                continue
+        elif db.scalar(select(MailAccount).where(func.lower(MailAccount.email) == email)):
             skipped.append({"email": email, "detail": "邮箱已存在"})
             continue
         target_domain = domain or _resolve_target_domain(db, admin=admin, payload_domain_id=None, email=email)
         _ensure_email_matches_domain(email, target_domain)
-        account = MailAccount(
-            email=email,
-            display_name=row["display_name"] or None,
-            domain_id=target_domain.id if target_domain else None,
-            password_hash=hash_mailbox_password(row["password"]),
-            quota_mb=max(1, int(row["quota_mb"] or 500)),
-            status=row["status"] if row["status"] in {"active", "disabled"} else "active",
-            is_admin=_parse_bool_text(row["is_admin"]),
-            imap_host=get_settings().mail_imap_host,
-            imap_port=get_settings().mail_imap_port,
-            imap_ssl=get_settings().mail_imap_ssl,
-            smtp_host=get_settings().mail_smtp_host,
-            smtp_port=get_settings().mail_smtp_port,
-            smtp_ssl=get_settings().mail_smtp_ssl,
-        )
-        db.add(account)
-        db.flush()
-        created.append(account_to_admin_dict(account))
+        if use_sqlite_mail_directory():
+            directory_account = create_directory_account(email, row["password"])
+            account = ensure_shadow_account(db, directory_account.email, password_present=True)
+            account.display_name = row["display_name"] or None
+            account.quota_mb = max(1, int(row["quota_mb"] or 500))
+            account.status = row["status"] if row["status"] in {"active", "disabled"} else "active"
+            account.is_admin = _parse_bool_text(row["is_admin"])
+            created.append(account_to_admin_dict(account))
+        else:
+            account = MailAccount(
+                email=email,
+                display_name=row["display_name"] or None,
+                domain_id=target_domain.id if target_domain else None,
+                password_hash=hash_mailbox_password(row["password"]),
+                quota_mb=max(1, int(row["quota_mb"] or 500)),
+                status=row["status"] if row["status"] in {"active", "disabled"} else "active",
+                is_admin=_parse_bool_text(row["is_admin"]),
+                imap_host=get_settings().mail_imap_host,
+                imap_port=get_settings().mail_imap_port,
+                imap_ssl=get_settings().mail_imap_ssl,
+                smtp_host=get_settings().mail_smtp_host,
+                smtp_port=get_settings().mail_smtp_port,
+                smtp_ssl=get_settings().mail_smtp_ssl,
+            )
+            db.add(account)
+            db.flush()
+            created.append(account_to_admin_dict(account))
     record_admin_audit(
         request,
         admin,
