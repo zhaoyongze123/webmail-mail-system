@@ -101,4 +101,14 @@ systemctl enable "$SYSTEMD_UNIT_NAME"
 systemctl restart "$SYSTEMD_UNIT_NAME"
 systemctl --no-pager --full status "$SYSTEMD_UNIT_NAME"
 
-curl -fsS "http://${BACKEND_HOST:-127.0.0.1}:${BACKEND_PORT:-8000}/api/health"
+HEALTH_URL="http://${BACKEND_HOST:-127.0.0.1}:${BACKEND_PORT:-8000}/api/health"
+for _ in $(seq 1 30); do
+  if curl -fsS "$HEALTH_URL" >/dev/null; then
+    curl -fsS "$HEALTH_URL"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "后端健康检查超时: $HEALTH_URL" >&2
+exit 1
