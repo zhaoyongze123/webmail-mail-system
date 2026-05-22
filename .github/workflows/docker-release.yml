@@ -79,7 +79,6 @@ jobs:
     name: Build and push backend/frontend images to ACR
     runs-on: ubuntu-latest
     needs: build-and-push-ghcr
-    if: ${{ vars.ACR_REGISTRY != '' && secrets.ACR_USERNAME != '' && secrets.ACR_PASSWORD != '' }}
     permissions:
       contents: read
       packages: write
@@ -91,8 +90,22 @@ jobs:
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: 检查是否启用 ACR 发布
+        id: acr-enabled
+        env:
+          ACR_REGISTRY: ${{ env.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [ -n "${ACR_REGISTRY}" ] && [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 规范化 ACR registry
         id: acr-check
+        if: steps.acr-enabled.outputs.enabled == 'true'
         env:
           ACR_REGISTRY: ${{ env.ACR_REGISTRY }}
         run: |
@@ -107,6 +120,7 @@ jobs:
           echo "frontend_image=${registry}/webmail-mail-system/frontend" >> "$GITHUB_OUTPUT"
 
       - name: 登录阿里云 ACR
+        if: steps.acr-enabled.outputs.enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ steps.acr-check.outputs.registry }}
@@ -115,6 +129,7 @@ jobs:
 
       - name: 生成 backend ACR 镜像元数据
         id: backend-acr-meta
+        if: steps.acr-enabled.outputs.enabled == 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.acr-check.outputs.backend_image }}
@@ -124,6 +139,7 @@ jobs:
 
       - name: 生成 frontend ACR 镜像元数据
         id: frontend-acr-meta
+        if: steps.acr-enabled.outputs.enabled == 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.acr-check.outputs.frontend_image }}
@@ -132,6 +148,7 @@ jobs:
             type=sha,format=short
 
       - name: 构建并推送 backend 镜像到 ACR
+        if: steps.acr-enabled.outputs.enabled == 'true'
         uses: docker/build-push-action@v6
         with:
           context: ./backend
@@ -144,6 +161,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=backend
 
       - name: 构建并推送 frontend 镜像到 ACR
+        if: steps.acr-enabled.outputs.enabled == 'true'
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
