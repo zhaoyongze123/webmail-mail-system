@@ -9,6 +9,7 @@ on:
 env:
   GHCR_BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/webmail-mail-system/backend
   GHCR_FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/webmail-mail-system/frontend
+  ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
 
 jobs:
   build-and-push:
@@ -35,12 +36,13 @@ jobs:
       - name: 检查 ACR secrets 是否齐全
         id: acr-check
         env:
-          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_REGISTRY: ${{ env.ACR_REGISTRY }}
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
           registry="$(printf '%s' "${ACR_REGISTRY}" | tr -d '\r\n' | sed -E 's#^https?://##' | cut -d/ -f1)"
           if [ -n "${registry}" ] && [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
+            echo "使用 ACR registry: ${registry}"
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "registry=${registry}" >> "$GITHUB_OUTPUT"
             echo "backend_image=${registry}/webmail-mail-system/backend" >> "$GITHUB_OUTPUT"
