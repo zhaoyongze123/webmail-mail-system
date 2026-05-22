@@ -4,7 +4,7 @@ import importlib
 import re
 import sys
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 from types import ModuleType, SimpleNamespace
@@ -18,6 +18,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from app.mail_adapters import MailAdapterError
+
+
+UTC = timezone.utc
 
 
 class FakeSettings:

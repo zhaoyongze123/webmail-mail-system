@@ -283,8 +283,10 @@ jobs:
           test -n "${DEPLOY_HOST}" && test -n "${DEPLOY_USER}" && test -n "${DEPLOY_PASSWORD}" && test -n "${DEPLOY_PATH}"
           sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p '${DEPLOY_PATH}'"
           tar czf - \
+            backend \
             docker-compose.prod.yml \
             deploy \
+            scripts/deploy_backend_host.sh \
           | sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "tar xzf - -C '${DEPLOY_PATH}'"
 
       - name: 写入生产环境变量文件
@@ -309,7 +311,8 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "printf '%s' '${ACR_PASSWORD}' | docker login --username='${ACR_USERNAME}' --password-stdin '${ACR_REGISTRY}' && cd '${DEPLOY_PATH}' && chmod +x deploy/deploy_prod.sh && ./deploy/deploy_prod.sh"
+          test -n "${ACR_REGISTRY}" && test -n "${ACR_USERNAME}" && test -n "${ACR_PASSWORD}"
+          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "set -euo pipefail && printf '%s' '${ACR_PASSWORD}' | docker login --username='${ACR_USERNAME}' --password-stdin '${ACR_REGISTRY}' && cd '${DEPLOY_PATH}' && chmod +x deploy/deploy_prod.sh scripts/deploy_backend_host.sh && ./scripts/deploy_backend_host.sh && ./deploy/deploy_prod.sh"
 
       - name: 最小部署验收
         env:
@@ -318,4 +321,4 @@ jobs:
           DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "cd '${DEPLOY_PATH}' && docker compose --project-name webmail-mail-system --env-file .env.prod -f docker-compose.prod.yml ps"
+          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "set -euo pipefail && cd '${DEPLOY_PATH}' && cmp -s .env.prod /opt/webmail/backend/.env.prod && test -f /var/vmail/vmail.db && docker volume inspect webmail-mail-system_postgres_data >/dev/null && docker volume inspect webmail-mail-system_redis_data >/dev/null && systemctl is-active webmail-backend.service postfix dovecot rspamd >/dev/null && docker compose --project-name webmail-mail-system --env-file .env.prod -f docker-compose.prod.yml ps && curl -fsS http://127.0.0.1:8000/api/health >/dev/null"

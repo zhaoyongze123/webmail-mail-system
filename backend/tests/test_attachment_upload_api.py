@@ -4,7 +4,7 @@ import base64
 import importlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from types import ModuleType
 
 import fakeredis
@@ -13,6 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.mail_adapters import MailAdapterError
+
+
+UTC = timezone.utc
 
 
 class FakeSettings:

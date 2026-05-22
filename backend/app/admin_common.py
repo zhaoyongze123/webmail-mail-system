@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import Any
 from uuid import UUID
@@ -22,6 +22,7 @@ from app.observability import record_audit_event
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+UTC = timezone.utc
 
 
 @dataclass(frozen=True)

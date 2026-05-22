@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +28,7 @@ from app.admin_system import check_admin_ip_access
 
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+UTC = timezone.utc
 ADMIN_BEARER_PREFIX = "Bearer "
 
 

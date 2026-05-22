@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from types import ModuleType
@@ -20,6 +20,9 @@ from app.errors import AppError
 from app.mail_adapters import MailAdapterError
 from app.responses import error_response, success_response
 from app.schemas import ApiResponse
+
+
+UTC = timezone.utc
 
 
 class FakeSettings:

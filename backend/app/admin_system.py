@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -37,6 +37,7 @@ from app.config import get_settings
 
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 5.0
+UTC = timezone.utc
 ALLOWED_COMMANDS = {
     "certbot",
     "df",
@@ -423,7 +424,13 @@ def _check_service_with_systemctl(service_key: str) -> dict[str, object] | None:
                 "source": f"systemctl:{unit_name}",
                 "command_result": _command_result_to_dict(result),
             }
-        if "could not be found" in output or "not been booted" in output:
+        if (
+            "could not be found" in output
+            or "not been booted" in output
+            or "failed to connect to bus" in output
+            or "host is down" in output
+            or "system has not been booted" in output
+        ):
             continue
         if output:
             return {

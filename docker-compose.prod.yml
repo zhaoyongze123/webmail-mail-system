@@ -2,7 +2,7 @@ name: webmail-mail-system
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: docker.1ms.run/library/postgres:16-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: docker.1ms.run/library/redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -32,46 +32,10 @@ services:
       retries: 20
     restart: unless-stopped
 
-  backend:
-    image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
-      APP_ENV: ${APP_ENV:-production}
-      APP_NAME: ${APP_NAME:-webmail-mvp}
-      APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY is required}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
-      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-}
-      MAIL_DIRECTORY_BACKEND: ${MAIL_DIRECTORY_BACKEND:-sqlite_vmail}
-      MAIL_DIRECTORY_SQLITE_PATH: ${MAIL_DIRECTORY_SQLITE_PATH:-/var/vmail/vmail.db}
-      MAIL_DIRECTORY_PASSWORD_MODE: ${MAIL_DIRECTORY_PASSWORD_MODE:-plain}
-      MAIL_QUOTA_ENABLED: ${MAIL_QUOTA_ENABLED:-true}
-      MAIL_IMAP_HOST: ${MAIL_IMAP_HOST:?MAIL_IMAP_HOST is required}
-      MAIL_IMAP_PORT: ${MAIL_IMAP_PORT:-143}
-      MAIL_IMAP_SSL: ${MAIL_IMAP_SSL:-false}
-      MAIL_IMAP_STARTTLS: ${MAIL_IMAP_STARTTLS:-false}
-      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:?MAIL_SMTP_HOST is required}
-      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-25}
-      MAIL_SMTP_SSL: ${MAIL_SMTP_SSL:-false}
-      MAIL_SMTP_STARTTLS: ${MAIL_SMTP_STARTTLS:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
-      ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-}
-      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
   frontend:
     image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is required}
     ports:
       - "${FRONTEND_PORT:-5173}:80"
-    depends_on:
-      - backend
     restart: unless-stopped
 
 volumes:

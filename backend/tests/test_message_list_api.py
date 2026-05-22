@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
 from types import ModuleType
@@ -13,6 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.mail_adapters import MailAdapterError
+
+
+UTC = timezone.utc
 
 
 class FakeSettings:

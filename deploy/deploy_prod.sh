@@ -21,7 +21,7 @@ docker compose \
   --project-name "$PROJECT_NAME" \
   --env-file "$ENV_FILE" \
   -f "$COMPOSE_FILE" \
-  up -d --remove-orphans
+  up -d --remove-orphans postgres redis frontend
 
 docker compose \
   --project-name "$PROJECT_NAME" \

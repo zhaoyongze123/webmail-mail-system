@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import secrets
 import csv
 from io import StringIO
@@ -121,6 +121,7 @@ from app.schemas import ApiResponse
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], responses={401: {"description": "未授权"}})
+UTC = timezone.utc
 
 
 class BulkStatusRequest(BaseModel):

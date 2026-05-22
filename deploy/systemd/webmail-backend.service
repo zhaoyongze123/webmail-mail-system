@@ -1,0 +1,16 @@
+[Unit]
+Description=Webmail Backend
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/webmail/backend
+EnvironmentFile=/opt/webmail/backend/.env.prod
+ExecStart=/bin/sh -lc 'cd /opt/webmail/backend && exec ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

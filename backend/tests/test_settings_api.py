@@ -5,7 +5,7 @@ import sys
 from email.message import EmailMessage
 from email.utils import format_datetime
 from types import ModuleType
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import fakeredis
 import pydantic.networks as pydantic_networks
@@ -16,6 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from app.mail_adapters import MailAdapterError
+
+
+UTC = timezone.utc
 
 
 class FakeSettings:

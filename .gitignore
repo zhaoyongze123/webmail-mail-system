@@ -17,6 +17,7 @@ dist/
 .env.prod
 .env.prod.local
 .DS_Store
+._*
 
 # Coverage and reports
 coverage/
