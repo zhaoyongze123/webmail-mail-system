@@ -115,7 +115,7 @@ jobs:
       - frontend-tests
       - compose-check
       - whitespace-check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
       packages: write
@@ -265,7 +265,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - publish-images
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
