@@ -116,8 +116,8 @@ jobs:
           fi
           echo "使用 ACR registry: ${registry}"
           echo "registry=${registry}" >> "$GITHUB_OUTPUT"
-          echo "backend_image=${registry}/webmail-mail-system/backend" >> "$GITHUB_OUTPUT"
-          echo "frontend_image=${registry}/webmail-mail-system/frontend" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${registry}/yuncan/webmail-mail-system-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${registry}/yuncan/webmail-mail-system-frontend" >> "$GITHUB_OUTPUT"
 
       - name: 登录阿里云 ACR
         if: steps.acr-enabled.outputs.enabled == 'true'
