@@ -305,8 +305,11 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "cd '${DEPLOY_PATH}' && chmod +x deploy/deploy_prod.sh && ./deploy/deploy_prod.sh"
+          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=no "${DEPLOY_USER}@${DEPLOY_HOST}" "printf '%s' '${ACR_PASSWORD}' | docker login --username='${ACR_USERNAME}' --password-stdin '${ACR_REGISTRY}' && cd '${DEPLOY_PATH}' && chmod +x deploy/deploy_prod.sh && ./deploy/deploy_prod.sh"
 
       - name: 最小部署验收
         env:
