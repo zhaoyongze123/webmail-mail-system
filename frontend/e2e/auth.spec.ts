@@ -13,6 +13,32 @@ async function mockMailApi(page: Page) {
   let inboxMessageRead = false;
   let inboxUnreadCount = 1;
 
+  await page.route('**/api/signatures/default', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          signature: null,
+        },
+        error: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/signatures?**', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          signatures: [],
+        },
+        error: null,
+      }),
+    });
+  });
+
   await page.route('**/api/folders', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
@@ -391,7 +417,8 @@ test('工作台支持搜索、读信标记和设置保存', async ({ page }) => 
   await expect(page.getByText('报价见附件')).toBeVisible();
   await expect.poll(() => mailApi.getOperationRequests()).toBeGreaterThan(0);
 
-  await page.getByText('系统设置').click();
+  await page.getByRole('button', { name: '打开设置' }).click();
+  await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '系统设置' })).toBeVisible();
   await page.getByLabel('每页显示邮件数').selectOption('50');
   await page.getByRole('button', { name: '保存' }).click();
