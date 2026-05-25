@@ -2377,9 +2377,9 @@ export default function ComposePanel({
             </span>
           </div>
           <div className="footer-right" aria-label="更多操作">
-            <label className="icon-btn compose-footer-upload" aria-label="快捷添加附件" data-tooltip="添加附件">
+            <label className="icon-btn compose-footer-upload" aria-label="快捷附件入口" data-tooltip="添加附件">
               📎
-              <input type="file" multiple onChange={handleUpload} aria-label="快捷添加附件" />
+              <input type="file" multiple onChange={handleUpload} aria-label="快捷附件上传" />
             </label>
             <button type="button" className="icon-btn" aria-label="插入链接" data-tooltip="插入链接" onClick={handleLinkInsert}>
               🔗

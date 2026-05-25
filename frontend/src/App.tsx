@@ -1803,6 +1803,11 @@ export default function App() {
             </button>
           </section>
         ) : null}
+        {activeSearchSummary ? (
+          <div className="search-summary" aria-live="polite">
+            搜索: {activeSearch.query.trim() || activeSearchSummary}
+          </div>
+        ) : null}
 
         <div className="content-row">
           {/* Message List */}
@@ -1914,7 +1919,7 @@ export default function App() {
                     <button
                       type="button"
                       className="message-row-action"
-                      aria-label={msg.read ? '邮件行标为未读' : '邮件行标为已读'}
+                      aria-label={msg.read ? '邮件行切换到未读' : '邮件行切换到已读'}
                       data-tooltip={msg.read ? '标为未读' : '标为已读'}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -2170,7 +2175,7 @@ export default function App() {
           <div className="settings-modal" role="dialog" aria-modal="true" aria-label="设置">
             <div className="settings-header">
               <div>
-                <h2>设置</h2>
+                <h2>系统设置</h2>
                 <p>统一管理当前登录用户的系统偏好、资料信息和主题显示。</p>
               </div>
               <button
