@@ -10,6 +10,7 @@ import html
 import io
 import re
 import zipfile
+from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email import message_from_bytes
@@ -19,6 +20,7 @@ from email.policy import default
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
 from xml.etree import ElementTree
+import quopri
 
 import bleach
 import tinycss2
@@ -646,6 +648,27 @@ def _attachment_id(index: int) -> str:
     return f"att_{index}"
 
 
+def _attachment_size_bytes(part: Message) -> int:
+    """尽量在不解码完整附件内容的前提下估算附件大小。"""
+    raw_payload = part.get_payload(decode=False)
+    if raw_payload is None:
+        return 0
+    if isinstance(raw_payload, list):
+        return 0
+    if isinstance(raw_payload, bytes):
+        raw_text = raw_payload.decode("utf-8", errors="ignore")
+    else:
+        raw_text = str(raw_payload)
+    encoding = str(part.get("Content-Transfer-Encoding") or "").strip().lower()
+    if encoding == "base64":
+        compact = re.sub(r"\s+", "", raw_text)
+        padding = compact.count("=")
+        return max(0, (len(compact) * 3) // 4 - padding)
+    if encoding == "quoted-printable":
+        return len(quopri.decodestring(raw_text.encode("utf-8", errors="ignore")))
+    return len(raw_text.encode("utf-8"))
+
+
 def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str, str, list[dict[str, Any]]]:
     """提取邮件 HTML、纯文本正文以及附件列表。"""
     html_body = ""
@@ -656,13 +679,13 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
         content_disposition = (part.get_content_disposition() or "").lower()
         content_type = part.get_content_type()
         filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
         if filename or content_disposition == "attachment":
+            payload = (part.get_payload(decode=True) or b"") if include_content else b""
             item = {
                 "attachment_id": _attachment_id(len(attachments)),
                 "filename": _safe_filename(_decode_header_value(filename or "未命名附件")),
                 "content_type": content_type,
-                "size_bytes": len(payload),
+                "size_bytes": len(payload) if include_content else _attachment_size_bytes(part),
             }
             if include_content:
                 item["content"] = payload
@@ -670,6 +693,7 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
             continue
         if content_type not in {"text/html", "text/plain"}:
             continue
+        payload = part.get_payload(decode=True) or b""
         charset = part.get_content_charset() or "utf-8"
         try:
             decoded = payload.decode(charset, errors="replace")
@@ -843,7 +867,7 @@ def _message_detail(uid: str, raw: bytes) -> dict[str, Any]:
         "date": sent_at.isoformat() if sent_at else None,
         "html_body": safe_html,
         "text_body": text_body,
-        "read": True,
+        "read": _read_flag(message),
         "attachments": attachments,
     }
 
@@ -909,6 +933,92 @@ def _message_detail_cache_key(email: str, folder: str, uid: str) -> str:
     return f"mail:detail:{email.strip().lower()}:{folder}:{uid}"
 
 
+def _message_attachment_cache_key(email: str, folder: str, uid: str, attachment_id: str) -> str:
+    """生成单个附件内容缓存键。"""
+    return f"mail:attachment:{email.strip().lower()}:{folder}:{uid}:{attachment_id}"
+
+
+def _cached_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str, Any] | None:
+    """读取缓存中的完整邮件详情。"""
+    detail_cache = JsonCache(redis_client.get_redis_client())
+    cached = detail_cache.get(_message_detail_cache_key(session.email, folder, uid))
+    if not isinstance(cached, dict):
+        return None
+    attachments = cached.get("attachments")
+    if not isinstance(attachments, list):
+        attachments = []
+    return {
+        "uid": str(cached.get("uid") or uid),
+        "message_id": cached.get("message_id"),
+        "subject": str(cached.get("subject") or "(无主题)"),
+        "from": cached.get("from") if isinstance(cached.get("from"), list) else [],
+        "to": cached.get("to") if isinstance(cached.get("to"), list) else [],
+        "cc": cached.get("cc") if isinstance(cached.get("cc"), list) else [],
+        "date": cached.get("date"),
+        "html_body": str(cached.get("html_body") or ""),
+        "text_body": str(cached.get("text_body") or ""),
+        "read": bool(cached.get("read")),
+        "attachments": [item for item in attachments if isinstance(item, dict)],
+    }
+
+
+def _load_cached_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any] | None:
+    """优先读取已缓存的单附件内容。"""
+    attachment_cache = JsonCache(redis_client.get_redis_client())
+    cached = attachment_cache.get(_message_attachment_cache_key(session.email, folder, uid, attachment_id))
+    if not isinstance(cached, dict):
+        return None
+    content_b64 = cached.get("content_b64")
+    if not isinstance(content_b64, str):
+        return None
+    try:
+        content = b64decode(content_b64.encode("ascii"))
+    except Exception:
+        return None
+    return {
+        "attachment_id": attachment_id,
+        "filename": str(cached.get("filename") or "attachment"),
+        "content_type": str(cached.get("content_type") or "application/octet-stream"),
+        "size_bytes": int(cached.get("size_bytes") or len(content)),
+        "content": content,
+    }
+
+
+def _load_cached_message_raw(session: AuthSession, folder: str, uid: str) -> bytes | None:
+    """读取详情缓存里附带的原始 RFC822 内容。"""
+    detail_cache = JsonCache(redis_client.get_redis_client())
+    cached = detail_cache.get(_message_detail_cache_key(session.email, folder, uid))
+    if not isinstance(cached, dict):
+        return None
+    raw_b64 = cached.get("raw_b64")
+    if not isinstance(raw_b64, str) or not raw_b64:
+        return None
+    try:
+        return b64decode(raw_b64.encode("ascii"))
+    except Exception:
+        return None
+
+
+def _cache_attachment_contents(session: AuthSession, folder: str, uid: str, attachments: list[dict[str, Any]]) -> None:
+    """把解析后的附件二进制内容按单附件缓存，避免重复全量 MIME 解析。"""
+    attachment_cache = JsonCache(redis_client.get_redis_client())
+    for item in attachments:
+        attachment_id = str(item.get("attachment_id") or "")
+        content = item.get("content")
+        if not attachment_id or not isinstance(content, (bytes, bytearray)):
+            continue
+        attachment_cache.set(
+            _message_attachment_cache_key(session.email, folder, uid, attachment_id),
+            {
+                "filename": str(item.get("filename") or "attachment"),
+                "content_type": str(item.get("content_type") or "application/octet-stream"),
+                "size_bytes": int(item.get("size_bytes") or len(content)),
+                "content_b64": b64encode(bytes(content)).decode("ascii"),
+            },
+            ttl_seconds=3600,
+        )
+
+
 def _invalidate_message_cache(email: str, folders: list[str]) -> None:
     """清理受影响文件夹的列表、搜索和详情缓存。"""
     normalized_email = email.strip().lower()
@@ -923,6 +1033,7 @@ def _invalidate_message_cache(email: str, folders: list[str]) -> None:
             keys.extend(str(key) for key in client.scan_iter(match=f"mail:list:{normalized_email}:{folder}:*"))
             keys.extend(str(key) for key in client.scan_iter(match=f"mail:search:{normalized_email}:{folder}:*"))
             keys.extend(str(key) for key in client.scan_iter(match=f"mail:detail:{normalized_email}:{folder}:*"))
+            keys.extend(str(key) for key in client.scan_iter(match=f"mail:attachment:{normalized_email}:{folder}:*"))
         if keys:
             client.delete(*keys)
     except Exception:
@@ -1040,7 +1151,14 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
     return rows
 
 
-def _persist_message_cache(session: AuthSession, folder: str, summary: dict[str, Any], detail: dict[str, Any]) -> None:
+def _persist_message_cache(
+    session: AuthSession,
+    folder: str,
+    summary: dict[str, Any],
+    detail: dict[str, Any],
+    *,
+    raw_message: bytes | None = None,
+) -> None:
     """把邮件摘要和详情分别落到数据库与 Redis 缓存。"""
     normalized_email = session.email.strip().lower()
     settings = get_settings()
@@ -1108,9 +1226,19 @@ def _persist_message_cache(session: AuthSession, folder: str, summary: dict[str,
     detail_cache.set(
         _message_detail_cache_key(session.email, folder, uid_text),
         {
+            "uid": uid_text,
+            "message_id": summary.get("message_id"),
+            "subject": str(summary.get("subject") or "(无主题)"),
+            "from": detail.get("from") if isinstance(detail.get("from"), list) else [],
+            "to": detail.get("to") if isinstance(detail.get("to"), list) else [],
+            "cc": detail.get("cc") if isinstance(detail.get("cc"), list) else [],
+            "date": detail.get("date"),
             "html_body": html_body,
             "text_body": text_body,
+            "read": bool(detail.get("read")),
+            "attachments": detail.get("attachments") if isinstance(detail.get("attachments"), list) else [],
             "search_text": re.sub(r"\s+", " ", f"{text_body} {re.sub(r'<[^>]+>', ' ', html_body)}").strip(),
+            "raw_b64": b64encode(raw_message).decode("ascii") if isinstance(raw_message, (bytes, bytearray)) else "",
         },
         ttl_seconds=3600,
     )
@@ -1267,6 +1395,9 @@ def search_messages(
 
 def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str, Any]:
     """读取单封邮件详情，并按设置自动标记已读。"""
+    cached_detail = _cached_message_detail(session, folder, uid)
+    if cached_detail is not None:
+        return cached_detail
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
@@ -1284,7 +1415,7 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
             _sync_folder_snapshot(session.email, adapter)
             _invalidate_message_cache(session.email, [folder])
             detail["read"] = True
-        _persist_message_cache(session, folder, summary, detail)
+        _persist_message_cache(session, folder, summary, detail, raw_message=raw)
         return detail
     except MailAdapterError as exc:
         raise AppError(
@@ -1300,12 +1431,24 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
 def get_message_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
     """读取单个附件的元数据和二进制内容。"""
     validate_attachment_id(attachment_id)
+    cached_attachment = _load_cached_attachment(session, folder, uid, attachment_id)
+    if cached_attachment is not None:
+        return cached_attachment
+    cached_raw = _load_cached_message_raw(session, folder, uid)
+    if cached_raw is not None:
+        message = message_from_bytes(cached_raw, policy=default)
+        _, _, attachments = _body_parts(message, include_content=True)
+        _cache_attachment_contents(session, folder, uid, attachments)
+        for attachment in attachments:
+            if attachment["attachment_id"] == attachment_id:
+                return attachment
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
         raw = _uid_fetch_message_bytes(adapter, uid)
         message = message_from_bytes(raw, policy=default)
         _, _, attachments = _body_parts(message, include_content=True)
+        _cache_attachment_contents(session, folder, uid, attachments)
         for attachment in attachments:
             if attachment["attachment_id"] == attachment_id:
                 return attachment

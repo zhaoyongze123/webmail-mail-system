@@ -64,6 +64,7 @@ class FakeImapAdapter:
     mailboxes: dict[tuple[str, str, str], FakeMailboxMessage] = {}
     login_calls: list[tuple[str, str]] = []
     selected_folders: list[tuple[str, str]] = []
+    fetch_calls: list[tuple[str, str, str]] = []
     last_instance: "FakeImapAdapter | None" = None
 
     def __init__(self, settings) -> None:
@@ -80,6 +81,7 @@ class FakeImapAdapter:
         cls.mailboxes = {}
         cls.login_calls = []
         cls.selected_folders = []
+        cls.fetch_calls = []
         cls.last_instance = None
 
     @classmethod
@@ -118,6 +120,7 @@ class FakeImapAdapter:
         uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
         if self.account_email is None or self.selected_folder is None:
             raise MailAdapterError("未选择文件夹", operation="fetch_message_bytes")
+        FakeImapAdapter.fetch_calls.append((self.account_email, self.selected_folder, uid_str))
         message = self.mailboxes.get((self.account_email, self.selected_folder, uid_str))
         if message is None:
             raise MailAdapterError("IMAP 邮件内容为空", operation="fetch_message_bytes")
@@ -527,6 +530,40 @@ def test_attachment_preview_returns_docx_html_preview(monkeypatch: pytest.Monkey
     assert "proposal.docx" in text
     assert "聚类算法实验报告" in text
     assert "第二段正文" in text
+    assert candidate
+
+
+def test_attachment_download_reuses_cached_attachment_after_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = build_app(monkeypatch)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = b"%PDF-1.4 cached attachment\n"
+    raw_bytes = _make_message_bytes(
+        subject="缓存附件邮件",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="先开详情再下载附件",
+        html_body="<p>先开详情再下载附件</p>",
+        attachments=[("cached.pdf", "application/pdf", attachment_bytes)],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "106", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/106")
+    assert detail_response.status_code == 200
+    payload = _extract_detail_payload(detail_response.json())
+    attachments = _extract_attachment_list(payload)
+    assert len(attachments) == 1
+
+    candidate, download_response = _download_attachment(client, "INBOX", "106", attachments[0], 0)
+
+    assert download_response.status_code == 200
+    assert download_response.content == attachment_bytes
+    assert FakeImapAdapter.fetch_calls.count(("user@example.com", "INBOX", "106")) == 1
     assert candidate
 
 

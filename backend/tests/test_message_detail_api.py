@@ -61,6 +61,7 @@ class FakeImapAdapter:
     login_calls: list[tuple[str, str]] = []
     store_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
     selected_folders: list[str] = []
+    fetch_calls: list[tuple[str, str]] = []
     last_instance: "FakeImapAdapter | None" = None
 
     def __init__(self, settings) -> None:
@@ -78,6 +79,7 @@ class FakeImapAdapter:
         cls.login_calls = []
         cls.store_calls = []
         cls.selected_folders = []
+        cls.fetch_calls = []
         cls.last_instance = None
 
     @classmethod
@@ -114,6 +116,7 @@ class FakeImapAdapter:
         self.last_fetch_uid = uid_str
         if self.selected_folder is None:
             raise MailAdapterError("未选择文件夹", operation="fetch_message_bytes")
+        FakeImapAdapter.fetch_calls.append((self.selected_folder, uid_str))
         message = self.mailboxes.get((self.selected_folder, uid_str))
         if message is None:
             raise MailAdapterError("IMAP 邮件内容为空", operation="fetch_message_bytes")
@@ -584,3 +587,29 @@ def test_message_detail_exposes_attachment_metadata_without_payload(monkeypatch:
     assert "content" not in first_attachment
     assert "data" not in first_attachment
     assert "raw" not in first_attachment
+
+
+def test_message_detail_uses_cached_detail_on_second_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    raw_bytes = _make_message_bytes(
+        subject="缓存详情邮件",
+        sender_name="Cache Sender",
+        sender_email="cache@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="第一次读取后应命中缓存",
+        html_body="<p>第一次读取后应命中缓存</p>",
+        attachments=[("report.pdf", "application/pdf", b"%PDF-1.4 fake attachment")],
+    )
+    FakeImapAdapter.seed_message("INBOX", "105", raw_bytes)
+
+    first_response = client.get("/api/folders/INBOX/messages/105")
+    second_response = client.get("/api/folders/INBOX/messages/105")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert FakeImapAdapter.fetch_calls.count(("INBOX", "105")) == 1
