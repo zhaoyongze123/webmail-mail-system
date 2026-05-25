@@ -679,6 +679,26 @@ describe('App 邮件工作台', () => {
     expect(within(panel).getByLabelText('正文').innerHTML).toContain('报价正文内容');
   });
 
+  it('右键菜单只展示已有邮件功能并支持移动子菜单', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const messageRow = await screen.findByText('客户报价确认');
+    fireEvent.contextMenu(messageRow.closest('.message-row') as HTMLElement);
+
+    expect(await screen.findByRole('button', { name: '回复并引用' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '标为已读' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '移动到' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '删除' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '彻底删除' })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: '归档' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '回复全部' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '转发' })).toBeNull();
+
+    await user.hover(screen.getByRole('button', { name: '移动到' }));
+    expect(await screen.findByRole('button', { name: '已发送' })).not.toBeNull();
+  });
+
   it('回复引用方式默认使用底部引用，切换后使用顶部引用', async () => {
     const user = userEvent.setup();
     render(<App />);

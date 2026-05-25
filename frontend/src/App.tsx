@@ -378,7 +378,7 @@ export default function App() {
   const [isComposing, setIsComposing] = useState(false);
   const [composeInitialValues, setComposeInitialValues] = useState<ComposeValues | null>(null);
   const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: MailMessageSummary } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: MailMessageSummary; submenu: 'move' | null } | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
   const [hoveredMessageUid, setHoveredMessageUid] = useState<string | null>(null);
   const suppressAutoMarkReadRef = useRef<string | null>(null);
@@ -870,6 +870,30 @@ export default function App() {
   }, [showContacts, hasAccountContext, accountEmail]);
 
   useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+
+    const closeMenu = () => setContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener('pointerdown', closeMenu);
+    window.addEventListener('resize', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu);
+      window.removeEventListener('resize', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
     if (!hasAccountContext || !accountEmail) {
       return;
     }
@@ -1080,6 +1104,7 @@ export default function App() {
     action: MessageOperationAction | 'hard_delete',
   ) => {
     try {
+      setContextMenu(null);
       if (action === 'hard_delete') {
         await deleteMessages(currentFolder, [message.uid]);
       } else {
@@ -1117,6 +1142,21 @@ export default function App() {
       setSelectedMessage(null);
     } catch(e) {
       console.error(e);
+    }
+  };
+
+  const handleContextMenuMove = async (message: MailMessageSummary, targetFolder: string) => {
+    if (!targetFolder || targetFolder === currentFolder) return;
+    try {
+      setContextMenu(null);
+      await moveMessages(currentFolder, [message.uid], targetFolder);
+      setMessages((current) => current.filter((item) => item.uid !== message.uid));
+      setMessageTotal((current) => Math.max(0, current - 1));
+      setSelectedMessage((current) => (current?.uid === message.uid ? null : current));
+      setSelectedMessageUids((current) => current.filter((uid) => uid !== message.uid));
+      await refreshFolders();
+    } catch (error) {
+      console.error(error);
     }
   };
 
@@ -1903,7 +1943,7 @@ export default function App() {
                   onMouseLeave={() => setHoveredMessageUid((current) => (current === msg.uid ? null : current))}
                   onContextMenu={(event) => {
                     event.preventDefault();
-                    setContextMenu({ x: event.clientX, y: event.clientY, message: msg });
+                    setContextMenu({ x: event.clientX, y: event.clientY, message: msg, submenu: null });
                   }}
                 >
                   <label
@@ -2752,8 +2792,86 @@ export default function App() {
 
 
       {contextMenu ? (
-        <div className="message-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onMouseLeave={() => setContextMenu(null)}>
-          <button type="button" onClick={() => replyWithQuote(contextMenu.message)}>回复并引用</button>
+        <div
+          className="message-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <div className="message-context-menu__group">
+            <button
+              type="button"
+              className="message-context-menu__item"
+              aria-label="回复并引用"
+              onClick={() => replyWithQuote(contextMenu.message)}
+            >
+              <span className="message-context-menu__icon">↩</span>
+              <span>回复并引用</span>
+            </button>
+          </div>
+
+          <div className="message-context-menu__divider" />
+
+          <div className="message-context-menu__group">
+            <button
+              type="button"
+              className="message-context-menu__item"
+              aria-label={contextMenu.message.read ? '标为未读' : '标为已读'}
+              onClick={() => void handleMessageRowAction(contextMenu.message, contextMenu.message.read ? 'mark_unread' : 'mark_read')}
+            >
+              <span className="message-context-menu__icon">{contextMenu.message.read ? '✉' : '✓'}</span>
+              <span>{contextMenu.message.read ? '标为未读' : '标为已读'}</span>
+            </button>
+            <div
+              className="message-context-menu__submenu-anchor"
+              onMouseEnter={() => setContextMenu((current) => (current ? { ...current, submenu: 'move' } : current))}
+              onMouseLeave={() => setContextMenu((current) => (current ? { ...current, submenu: null } : current))}
+            >
+              <button type="button" className="message-context-menu__item" aria-label="移动到">
+                <span className="message-context-menu__icon">⤴</span>
+                <span>移动到</span>
+                <span className="message-context-menu__chevron">›</span>
+              </button>
+              {contextMenu.submenu === 'move' ? (
+                <div className="message-context-menu message-context-menu--submenu">
+                  {folders.filter((folder) => folder.name !== currentFolder).map((folder) => (
+                    <button
+                      key={folder.name}
+                      type="button"
+                      className="message-context-menu__item"
+                      aria-label={folder.display_name}
+                      onClick={() => void handleContextMenuMove(contextMenu.message, folder.name)}
+                    >
+                      <span className="message-context-menu__icon">📁</span>
+                      <span>{folder.display_name}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="message-context-menu__divider" />
+
+          <div className="message-context-menu__group">
+            <button
+              type="button"
+              className="message-context-menu__item"
+              aria-label="删除"
+              onClick={() => void handleMessageRowAction(contextMenu.message, 'delete')}
+            >
+              <span className="message-context-menu__icon">🗑</span>
+              <span>删除</span>
+            </button>
+            <button
+              type="button"
+              className="message-context-menu__item message-context-menu__item--danger"
+              aria-label="彻底删除"
+              onClick={() => void handleMessageRowAction(contextMenu.message, 'hard_delete')}
+            >
+              <span className="message-context-menu__icon">⨯</span>
+              <span>彻底删除</span>
+            </button>
+          </div>
         </div>
       ) : null}
 

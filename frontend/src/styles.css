@@ -3345,27 +3345,76 @@
 .message-context-menu {
   position: fixed;
   z-index: 2200;
-  min-width: 136px;
+  min-width: 232px;
   background: var(--panel-bg);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  box-shadow: 0 10px 28px var(--shadow-strong);
-  padding: 6px;
+  border-radius: 18px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
+  padding: 8px;
 }
 
-.message-context-menu button {
+.message-context-menu__group {
+  display: grid;
+  gap: 2px;
+}
+
+.message-context-menu__divider {
+  height: 1px;
+  margin: 8px 4px;
+  background: var(--border-color);
+}
+
+.message-context-menu__item {
   width: 100%;
+  min-height: 44px;
   border: 0;
   background: transparent;
-  border-radius: 4px;
+  border-radius: 12px;
   color: var(--text-primary);
   cursor: pointer;
-  padding: 8px 10px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
   text-align: left;
+  font-size: 15px;
 }
 
-.message-context-menu button:hover {
+.message-context-menu__item:hover {
   background: var(--panel-soft-bg);
+}
+
+.message-context-menu__item--danger {
+  color: #c5221f;
+}
+
+.message-context-menu__icon {
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex: 0 0 20px;
+}
+
+.message-context-menu__item--danger .message-context-menu__icon {
+  color: inherit;
+}
+
+.message-context-menu__submenu-anchor {
+  position: relative;
+}
+
+.message-context-menu__chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+
+.message-context-menu--submenu {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 10px);
+  min-width: 220px;
 }
 
 .settings-field {
