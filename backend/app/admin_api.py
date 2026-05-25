@@ -826,7 +826,7 @@ def list_domains(
             shadow_domain = shadow_map.get(item.name) or ensure_shadow_domain(db, item.name)
             if status_filter and shadow_domain.status != status_filter:
                 continue
-            _attach_account_usage(db, list(shadow_domain.accounts or []))
+            _attach_live_quota_usage(db, list(shadow_domain.accounts or []))
             domain_payload = domain_to_dict(shadow_domain)
             domain_payload["user_count"] = item.account_count
             domain_payload["description"] = f"用户 {item.account_count} / 别名 {domain_payload['alias_count']} / 已用 {domain_payload['used_quota_mb']} MB"
@@ -854,7 +854,7 @@ def list_domains(
         stmt = stmt.order_by(MailDomain.name.asc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     domains = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    _attach_account_usage(db, [account for domain in domains for account in domain.accounts or []])
+    _attach_live_quota_usage(db, [account for domain in domains for account in domain.accounts or []])
     return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[domain_to_dict(item) for item in domains]))
 
 
@@ -906,7 +906,7 @@ def get_domain(
     )
     if domain is None:
         raise AppError("ADMIN_DOMAIN_NOT_FOUND", "域不存在", http_status=status.HTTP_404_NOT_FOUND)
-    _attach_account_usage(db, list(domain.accounts or []))
+    _attach_live_quota_usage(db, list(domain.accounts or []))
     return success_response(request, {"domain": domain_to_dict(domain)})
 
 

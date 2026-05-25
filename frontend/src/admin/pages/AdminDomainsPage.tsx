@@ -12,6 +12,15 @@ function domainStatusLabel(status: string) {
   return status;
 }
 
+function usageSourceLabel(source: string) {
+  if (source === 'cached') return '缓存聚合';
+  if (source === 'doveadm') return '实时读取';
+  if (source === 'unavailable') return '当前不可用';
+  if (source === 'mixed') return '实时+回退';
+  if (source.startsWith('fallback:')) return `回退 ${source.replace('fallback:', '')}`;
+  return source;
+}
+
 const emptyDomainForm: DomainFormInput = {
   name: '',
   quota_limit_mb: 10240,
@@ -137,6 +146,7 @@ export function AdminDomainsPage() {
     { accessorKey: 'user_count', header: '用户数' },
     { accessorKey: 'alias_count', header: '别名数' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)' },
+    { accessorKey: 'usage_source', header: '来源', cell: (info) => usageSourceLabel(info.getValue<string>() || 'doveadm') },
     { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={domainStatusLabel(String(info.getValue()))} /> },
     {
       id: 'actions',
@@ -258,6 +268,7 @@ export function AdminDomainsPage() {
             <div className="admin-info-card"><strong>别名数</strong><p>{detailQuery.data.domain.alias_count}</p></div>
             <div className="admin-info-card"><strong>配额上限</strong><p>{detailQuery.data.domain.quota_limit_mb} MB</p></div>
             <div className="admin-info-card"><strong>已用</strong><p>{detailQuery.data.domain.used_quota_mb} MB</p></div>
+            <div className="admin-info-card"><strong>来源</strong><p>{usageSourceLabel(detailQuery.data.domain.usage_source || 'doveadm')}</p></div>
           </div>
           {dnsCheckResult ? (
             <div className="admin-section-stack">

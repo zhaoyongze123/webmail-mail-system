@@ -98,6 +98,7 @@ export type AdminDomain = AdminListItem & {
   user_count: number;
   alias_count: number;
   used_quota_mb: number;
+  usage_source?: string;
 };
 
 export type AdminDnsCheckItem = {

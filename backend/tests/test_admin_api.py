@@ -694,6 +694,11 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert quotas_response.json()["data"]["user_items"][0]["quota_mb"] == 600
     assert quotas_response.json()["data"]["user_items"][0]["usage_source"] == "doveadm"
 
+    domains_response = client.get("/api/admin/domains", headers=headers)
+    assert domains_response.status_code == 200
+    assert domains_response.json()["data"]["items"][0]["used_quota_mb"] == 12.5
+    assert domains_response.json()["data"]["items"][0]["usage_source"] == "doveadm"
+
     users_response = client.get("/api/admin/users", headers=headers)
     assert users_response.status_code == 200
     assert users_response.json()["data"]["items"][0]["used_quota_mb"] == 12.5
@@ -941,6 +946,7 @@ def test_sqlite_vmail_directory_sync_and_login(monkeypatch: pytest.MonkeyPatch, 
     domains = domains_response.json()["data"]["items"]
     assert domains[0]["name"] == "example.com"
     assert domains[0]["user_count"] == 1
+    assert domains[0]["usage_source"] == "mixed"
 
     users_response = client.get("/api/admin/users", headers=headers)
     assert users_response.status_code == 200

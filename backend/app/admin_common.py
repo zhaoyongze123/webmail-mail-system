@@ -137,7 +137,8 @@ def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
     """将域对象转换为后台接口输出字典。"""
     user_count = len(domain.accounts or [])
     alias_count = len(domain.aliases or [])
-    used_quota_mb = sum(float(getattr(account, "_used_quota_mb", 0.0) or 0.0) for account in domain.accounts or [])
+    used_quota_mb = round(sum(float(getattr(account, "_used_quota_mb", 0.0) or 0.0) for account in domain.accounts or []), 2)
+    usage_source = "mixed" if any(getattr(account, "_usage_source", "").startswith("fallback:") for account in domain.accounts or []) else "doveadm"
     return {
         "id": str(domain.id),
         "name": domain.name,
@@ -147,6 +148,7 @@ def domain_to_dict(domain: MailDomain) -> dict[str, Any]:
         "user_count": user_count,
         "alias_count": alias_count,
         "used_quota_mb": used_quota_mb,
+        "usage_source": usage_source,
         "created_at": domain.created_at.isoformat(),
         "updated_at": domain.updated_at.isoformat(),
     }
