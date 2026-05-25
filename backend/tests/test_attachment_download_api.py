@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import re
 import sys
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from email import policy
@@ -362,6 +364,39 @@ def _download_attachment(
     raise AssertionError(f"附件下载未命中可用 attachment_id，候选值：{_attachment_candidates(index, attachment)}")
 
 
+def _preview_attachment(
+    client: TestClient,
+    folder: str,
+    uid: str,
+    attachment: dict[str, Any],
+    index: int,
+):
+    for candidate in _attachment_candidates(index, attachment):
+        response = client.get(
+            f"/api/folders/{folder}/messages/{uid}/attachments/{quote(candidate, safe='')}/preview"
+        )
+        if response.status_code == 200:
+            return candidate, response
+    raise AssertionError(f"附件预览未命中可用 attachment_id，候选值：{_attachment_candidates(index, attachment)}")
+
+
+def _make_docx_bytes(*paragraphs: str) -> bytes:
+    body = "".join(
+        f"<w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>"
+        for paragraph in paragraphs
+    )
+    document_xml = (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+        "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+        f"<w:body>{body}</w:body>"
+        "</w:document>"
+    ).encode("utf-8")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
 def test_attachment_download_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)
 
@@ -447,6 +482,52 @@ def test_attachment_download_exposes_word_attachment_metadata(monkeypatch: pytes
     assert attachment.get("size_bytes") == len(attachment_bytes)
     assert "content" not in attachment
     assert "data" not in attachment
+
+
+def test_attachment_preview_returns_docx_html_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = build_app(monkeypatch)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("聚类算法实验报告", "第二段正文")
+    raw_bytes = _make_message_bytes(
+        subject="Word 附件预览",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="请查看 docx 附件",
+        html_body="<p>请查看 docx 附件</p>",
+        attachments=[
+            (
+                "proposal.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "103", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/103")
+    assert detail_response.status_code == 200
+    payload = _extract_detail_payload(detail_response.json())
+    attachments = _extract_attachment_list(payload)
+    assert len(attachments) == 1
+
+    candidate, response = _preview_attachment(client, "INBOX", "103", attachments[0], 0)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    content_disposition = response.headers.get("content-disposition", "")
+    assert "inline" in content_disposition.lower()
+    assert "proposal.docx" in content_disposition
+    text = response.text
+    assert "proposal.docx" in text
+    assert "聚类算法实验报告" in text
+    assert "第二段正文" in text
+    assert candidate
 
 
 def test_attachment_download_invalid_attachment_id_returns_not_found_or_error(monkeypatch: pytest.MonkeyPatch) -> None:

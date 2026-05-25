@@ -587,10 +587,18 @@ describe('App 邮件工作台', () => {
     expect(
       screen.getByText('application/vnd.openxmlformats-officedocument.wordprocessingml.document · 3.0 KB'),
     ).not.toBeNull();
+    const previewButton = screen.getByRole('button', { name: '预览 会议纪要.docx' });
+    expect(previewButton).not.toBeNull();
     const downloadLink = screen.getByRole('link', { name: '下载' }) as HTMLAnchorElement;
     expect(downloadLink).not.toBeNull();
     expect(downloadLink.getAttribute('href')).toBe('/api/folders/INBOX/messages/101/attachments/attachment-1');
     expect(downloadLink.getAttribute('download')).toBe('会议纪要.docx');
+
+    await user.click(previewButton);
+    const previewDialog = await screen.findByRole('dialog', { name: '附件预览' });
+    const previewFrame = previewDialog.querySelector('iframe') as HTMLIFrameElement | null;
+    expect(previewFrame).not.toBeNull();
+    expect(previewFrame?.getAttribute('src')).toBe('/api/folders/INBOX/messages/101/attachments/attachment-1/preview');
   });
 
   it('纯文本邮件即使后端返回文本转 HTML 也会保持纯文本阅读', async () => {

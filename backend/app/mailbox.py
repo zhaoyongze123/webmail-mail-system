@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import html
+import io
 import re
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email import message_from_bytes
@@ -16,6 +18,7 @@ from email.message import Message
 from email.policy import default
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
+from xml.etree import ElementTree
 
 import bleach
 import tinycss2
@@ -1322,6 +1325,88 @@ def get_message_attachment(session: AuthSession, folder: str, uid: str, attachme
         ) from exc
     finally:
         adapter.logout()
+
+
+def _docx_preview_html(content: bytes, filename: str) -> bytes:
+    """把 docx 正文提取为简单 HTML，供附件预览弹层直接展示。"""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        ) from exc
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        ) from exc
+
+    paragraphs: list[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        text_parts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        paragraph_text = "".join(text_parts).strip()
+        if paragraph_text:
+            paragraphs.append(paragraph_text)
+
+    if not paragraphs:
+        paragraphs.append("该 Word 附件暂无可提取的正文内容。")
+
+    html_body = "".join(f"<p>{html.escape(item)}</p>" for item in paragraphs)
+    preview_html = (
+        "<!doctype html>"
+        "<html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(filename)}</title>"
+        "<style>"
+        "body{margin:0;padding:24px;font:15px/1.8 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+        "color:#24324a;background:#fff;}"
+        "article{max-width:880px;margin:0 auto;}"
+        "h1{font-size:20px;line-height:1.4;margin:0 0 20px;font-weight:700;}"
+        "p{margin:0 0 14px;white-space:pre-wrap;word-break:break-word;}"
+        "</style></head><body><article>"
+        f"<h1>{html.escape(filename)}</h1>{html_body}</article></body></html>"
+    )
+    return preview_html.encode("utf-8")
+
+
+def get_message_attachment_preview(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """按可预览类型返回附件预览内容。"""
+    attachment = get_message_attachment(session, folder, uid, attachment_id)
+    filename = str(attachment["filename"])
+    content_type = str(attachment["content_type"] or "application/octet-stream")
+    content = bytes(attachment["content"])
+    lower_name = filename.lower()
+    lower_type = content_type.lower()
+
+    if lower_type.startswith("image/") or lower_type == "application/pdf" or lower_type.startswith("text/"):
+        return {
+            "content": content,
+            "content_type": content_type,
+            "filename": filename,
+        }
+
+    if (
+        lower_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or lower_name.endswith(".docx")
+    ):
+        return {
+            "content": _docx_preview_html(content, filename),
+            "content_type": "text/html; charset=utf-8",
+            "filename": filename,
+        }
+
+    raise AppError(
+        "ATTACHMENT_PREVIEW_UNSUPPORTED",
+        "当前附件暂不支持预览",
+        http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+    )
 
 
 def operate_messages(session: AuthSession, folder: str, payload: MessageOperationRequest) -> dict[str, Any]:

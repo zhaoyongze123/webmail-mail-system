@@ -48,6 +48,10 @@ type AttachmentPreviewState = {
   contentType: string;
 };
 
+function buildAttachmentPreviewUrl(folder: string, uid: string, attachmentId: string) {
+  return `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(attachmentId)}/preview`;
+}
+
 function AppIcon({
   title,
   children,
@@ -102,7 +106,8 @@ function canPreviewAttachment(attachment: MessageAttachment) {
     lowerType.startsWith('image/') ||
     lowerType === 'application/pdf' ||
     lowerType.startsWith('text/') ||
-    /\.(png|jpe?g|gif|webp|bmp|svg|pdf|txt|md|json)$/i.test(lowerName)
+    lowerType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    /\.(png|jpe?g|gif|webp|bmp|svg|pdf|txt|md|json|docx)$/i.test(lowerName)
   );
 }
 
@@ -115,7 +120,11 @@ function attachmentPreviewKind(attachment: MessageAttachment) {
   if (lowerType === 'application/pdf' || /\.pdf$/i.test(lowerName)) {
     return 'pdf';
   }
-  if (lowerType.startsWith('text/') || /\.(txt|md|json)$/i.test(lowerName)) {
+  if (
+    lowerType.startsWith('text/') ||
+    lowerType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    /\.(txt|md|json|docx)$/i.test(lowerName)
+  ) {
     return 'text';
   }
   return 'file';
@@ -475,7 +484,7 @@ export default function App() {
   const folderGroups = useMemo(() => groupSidebarFolders(folders), [folders]);
   const attachmentPreviewUrl = (folder: string, uid: string, attachment: MessageAttachment) => {
     const id = attachmentId(attachment);
-    return id ? buildAttachmentUrl(folder, uid, id) : '';
+    return id ? buildAttachmentPreviewUrl(folder, uid, id) : '';
   };
 
   const formatSize = (value?: number | null) => {
@@ -2072,7 +2081,8 @@ export default function App() {
                     <ul>
                       {messageBody.attachments.map((attachment) => {
                         const id = attachmentId(attachment);
-                        const href = id ? buildAttachmentUrl(currentFolder, selectedMessage.uid, id) : '#';
+                        const downloadHref = id ? buildAttachmentUrl(currentFolder, selectedMessage.uid, id) : '#';
+                        const previewHref = id ? buildAttachmentPreviewUrl(currentFolder, selectedMessage.uid, id) : '#';
                         const attachmentType = attachment.content_type || '未知类型';
                         const size = formatSize(attachment.size_bytes ?? attachment.size ?? null);
                         const previewKind = attachmentPreviewKind(attachment);
@@ -2084,13 +2094,13 @@ export default function App() {
                                 {previewable ? (
                                   previewKind === 'image' ? (
                                     <img
-                                      src={href}
+                                      src={previewHref}
                                       alt={attachment.filename || '附件预览'}
                                       className="reading-attachment-card__preview-media"
                                     />
                                   ) : previewKind === 'pdf' ? (
                                     <iframe
-                                      src={href}
+                                      src={previewHref}
                                       title={`${attachment.filename || '附件'} 预览`}
                                       className="reading-attachment-card__preview-frame"
                                     />
@@ -2123,7 +2133,7 @@ export default function App() {
                                       预览
                                     </button>
                                   ) : null}
-                                  <a href={href} download={attachment.filename || undefined} aria-disabled={!id}>
+                                  <a href={downloadHref} download={attachment.filename || undefined} aria-disabled={!id}>
                                     下载
                                   </a>
                                 </div>

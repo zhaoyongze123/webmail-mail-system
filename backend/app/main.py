@@ -48,6 +48,7 @@ from app.mailbox import (
     create_folder,
     delete_folder,
     get_message_attachment,
+    get_message_attachment_preview,
     get_message_detail,
     list_folders,
     list_messages,
@@ -716,6 +717,28 @@ def download_attachment(request: Request, folder: str, uid: str, attachment_id: 
         media_type=str(attachment["content_type"]),
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "X-Attachment-Id": attachment_id,
+        },
+    )
+
+
+@app.get(
+    "/api/folders/{folder}/messages/{uid}/attachments/{attachment_id}/preview",
+    tags=["mailbox"],
+    summary="预览邮件附件",
+    response_description="可直接在浏览器内展示的附件预览内容",
+)
+def preview_attachment(request: Request, folder: str, uid: str, attachment_id: str) -> Response:
+    """返回附件预览内容，支持图片、PDF、文本和 docx 文本预览。"""
+    session = get_current_session(request)
+    validate_attachment_id(attachment_id)
+    preview = get_message_attachment_preview(session, folder, uid, attachment_id)
+    filename = str(preview["filename"])
+    return Response(
+        content=preview["content"],
+        media_type=str(preview["content_type"]),
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
             "X-Attachment-Id": attachment_id,
         },
     )
