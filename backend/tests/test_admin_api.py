@@ -721,6 +721,20 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert catch_all_response.json()["data"]["alias"]["source_address"] == "@mail.test"
 
 
+def test_parse_doveadm_quota_output_uses_storage_value_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    admin_system_module = importlib.import_module("app.admin_system")
+
+    parsed = admin_system_module._parse_quota_kib(
+        """
+        Quota name Type    Value Limit  %
+        User quota STORAGE 12    500    2
+        User quota MESSAGE 1     -      0
+        """
+    )
+
+    assert parsed == 12
+
+
 def test_admin_created_user_can_login_with_local_password(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     payload = admin_login(client)

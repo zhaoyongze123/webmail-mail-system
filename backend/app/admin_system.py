@@ -1040,9 +1040,26 @@ def delete_mail_queue_item(queue_id: str) -> dict[str, object]:
 def _parse_quota_kib(text: str) -> int | None:
     """从 `doveadm quota get` 输出中提取 KiB 值。"""
     for line in text.splitlines():
-        if "storage" not in line.lower():
+        normalized = line.strip()
+        if not normalized:
             continue
-        matched = re.search(r"(\d+)\s+(\d+)\s*$", line.strip())
+        lowered = normalized.lower()
+        if lowered.startswith("quota name") or lowered.startswith("quota ") or lowered.startswith("root "):
+            continue
+        parts = re.split(r"\s+", normalized)
+        if not parts:
+            continue
+        # doveadm quota get 常见输出为：
+        # Quota name Type    Value Limit %
+        # User quota STORAGE 12    500   2
+        # 这里应取 STORAGE 行的 Value 列，而不是 Limit 列。
+        if len(parts) >= 4 and parts[1].lower() == "storage":
+            value = parts[2]
+            if value.isdigit():
+                return int(value)
+        if "storage" not in lowered:
+            continue
+        matched = re.search(r"\bstorage\b.*?(\d+)(?:\s+(\d+))?(?:\s+\d+%?)?$", normalized, flags=re.IGNORECASE)
         if matched:
             return int(matched.group(1))
     generic = re.search(r"\b(\d+)\b", text)
