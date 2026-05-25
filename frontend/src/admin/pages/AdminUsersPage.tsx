@@ -24,6 +24,14 @@ function userStatusLabel(status: string) {
   return status;
 }
 
+function usageSourceLabel(source: string) {
+  if (source === 'cached') return '缓存聚合';
+  if (source === 'doveadm') return '实时读取';
+  if (source === 'unavailable') return '当前不可用';
+  if (source.startsWith('fallback:')) return `回退 ${source.replace('fallback:', '')}`;
+  return source;
+}
+
 const emptyUserForm: UserFormInput = {
   email: '',
   display_name: '',
@@ -207,6 +215,7 @@ export function AdminUsersPage() {
     { accessorKey: 'domain_name', header: '域名', cell: (info) => info.getValue<string>() || '—' },
     { accessorKey: 'quota_mb', header: '上限(MB)' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)', cell: (info) => info.getValue<number>() ?? 0 },
+    { accessorKey: 'usage_source', header: '来源', cell: (info) => usageSourceLabel(info.getValue<string>() || 'cached') },
     { accessorKey: 'usage_percent', header: '使用率', cell: (info) => `${info.getValue<number>() ?? 0}%` },
     { accessorKey: 'last_login_at', header: '最后登录', cell: (info) => formatLastLogin(info.getValue<string | null | undefined>()) },
     { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={userStatusLabel(String(info.getValue()))} /> },

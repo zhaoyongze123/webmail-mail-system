@@ -1216,7 +1216,7 @@ def list_admin_users(
             visible_accounts.sort(key=lambda item: item.email.lower())
         total = len(visible_accounts)
         items = visible_accounts[(page - 1) * page_size : page * page_size]
-        _attach_account_usage(db, items)
+        _attach_live_quota_usage(db, items)
         db.commit()
         return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[account_to_admin_dict(item) for item in items]))
     stmt = select(MailAccount).options(selectinload(MailAccount.domain))
@@ -1237,7 +1237,7 @@ def list_admin_users(
         stmt = stmt.order_by(MailAccount.email.asc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    _attach_account_usage(db, items)
+    _attach_live_quota_usage(db, items)
     return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[account_to_admin_dict(item) for item in items]))
 
 

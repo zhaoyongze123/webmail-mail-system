@@ -110,9 +110,15 @@ async def security_headers_middleware(request: Request, call_next):
     try:
         validate_csrf_request(request)
     except AppError as exc:
-        return add_security_headers(app_error_response(request, exc))
+        return add_security_headers(
+            app_error_response(request, exc),
+            allow_same_origin_frame=request.url.path.endswith("/preview") and "/attachments/" in request.url.path,
+        )
     response = await call_next(request)
-    return add_security_headers(response)
+    return add_security_headers(
+        response,
+        allow_same_origin_frame=request.url.path.endswith("/preview") and "/attachments/" in request.url.path,
+    )
 
 
 class BulkMessageRequest(BaseModel):
@@ -734,7 +740,7 @@ def preview_attachment(request: Request, folder: str, uid: str, attachment_id: s
     validate_attachment_id(attachment_id)
     preview = get_message_attachment_preview(session, folder, uid, attachment_id)
     filename = str(preview["filename"])
-    return Response(
+    response = Response(
         content=preview["content"],
         media_type=str(preview["content_type"]),
         headers={
@@ -742,6 +748,7 @@ def preview_attachment(request: Request, folder: str, uid: str, attachment_id: s
             "X-Attachment-Id": attachment_id,
         },
     )
+    return add_security_headers(response, allow_same_origin_frame=True)
 
 
 @app.post(

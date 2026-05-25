@@ -218,6 +218,18 @@ def test_attachment_invalid_id_rejected(monkeypatch: pytest.MonkeyPatch) -> None
     assert download_response.json()["error"]["code"] == "ATTACHMENT_INVALID_ID"
 
 
+def test_attachment_preview_allows_same_origin_frame_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = build_client(monkeypatch)
+    response = login(client, "user@example.com", "correct-password")
+    assert response.status_code == 200
+
+    preview_response = client.get("/api/folders/INBOX/messages/101/attachments/1/preview")
+
+    assert preview_response.status_code in {404, 415, 502}
+    assert preview_response.headers["x-frame-options"] == "SAMEORIGIN"
+    assert "frame-ancestors 'self'" in preview_response.headers["content-security-policy"]
+
+
 def test_sanitized_logging_excludes_sensitive_payloads(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     client, _ = build_client(monkeypatch)
     caplog.set_level(logging.INFO, logger="app.security")

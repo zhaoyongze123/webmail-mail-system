@@ -694,6 +694,11 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert quotas_response.json()["data"]["user_items"][0]["quota_mb"] == 600
     assert quotas_response.json()["data"]["user_items"][0]["usage_source"] == "doveadm"
 
+    users_response = client.get("/api/admin/users", headers=headers)
+    assert users_response.status_code == 200
+    assert users_response.json()["data"]["items"][0]["used_quota_mb"] == 12.5
+    assert users_response.json()["data"]["items"][0]["usage_source"] == "doveadm"
+
     update_quota_response = client.patch(
         f"/api/admin/users/{user_id}/quota",
         headers=headers,
@@ -915,6 +920,18 @@ def test_disabled_mailbox_user_cannot_login(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_sqlite_vmail_directory_sync_and_login(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+    admin_api_module = importlib.import_module("app.admin_api")
+    monkeypatch.setattr(
+        admin_api_module,
+        "get_mailbox_quota_usage",
+        lambda email: {
+            "status": "unavailable",
+            "detail": "当前 Dovecot 未启用 quota 命令",
+            "used_quota_mb": None,
+            "usage_source": "unavailable",
+            "command_result": {"ok": False},
+        },
+    )
 
     payload = admin_login(client)
     headers = auth_headers(payload["access_token"])
@@ -929,6 +946,7 @@ def test_sqlite_vmail_directory_sync_and_login(monkeypatch: pytest.MonkeyPatch, 
     assert users_response.status_code == 200
     users = users_response.json()["data"]["items"]
     assert users[0]["email"] == "alice@example.com"
+    assert users[0]["usage_source"] == "fallback:unavailable"
 
     login_response = client.post(
         "/api/auth/login",

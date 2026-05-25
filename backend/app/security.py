@@ -28,6 +28,12 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
 }
+ATTACHMENT_PREVIEW_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "SAMEORIGIN",
+}
 
 _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._@+\- ]+(?:/[A-Za-z0-9._@+\- ]+)*$")
 _SENSITIVE_KEYS = {
@@ -180,9 +186,10 @@ def validate_csrf_request(request: Request) -> None:
         )
 
 
-def add_security_headers(response: Response) -> Response:
-    """为响应追加默认安全响应头。"""
-    for name, value in SECURITY_HEADERS.items():
+def add_security_headers(response: Response, *, allow_same_origin_frame: bool = False) -> Response:
+    """为响应追加安全响应头，附件预览可按需放开同源嵌入。"""
+    headers = ATTACHMENT_PREVIEW_HEADERS if allow_same_origin_frame else SECURITY_HEADERS
+    for name, value in headers.items():
         response.headers[name] = value
     return response
 
