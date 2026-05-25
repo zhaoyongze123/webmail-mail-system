@@ -175,11 +175,17 @@ function renderPage(element: React.ReactElement) {
             queue_name: 'deferred',
             sender: 'sender@example.com',
             recipients: ['target@example.com'],
+            recipient_details: [{
+              address: 'target@example.com',
+              delay_reason: 'host mx.example.com refused to talk to me: 421 temporary failure',
+              delay_reason_display: '对方服务器临时拒绝建立连接，稍后会继续重试',
+            }],
             recipient_count: 1,
             message_size: 2048,
             arrival_time: 1747641600,
             created_at: 1747641600,
             name: 'Q1',
+            failure_reason: '对方服务器临时拒绝建立连接，稍后会继续重试',
             description: 'sender@example.com -> target@example.com',
           }],
           summary: { total: 1, deferred: 1 },
@@ -379,7 +385,7 @@ describe('admin stage A pages', () => {
     renderPage(<AdminDomainsPage />);
     fireEvent.click(await screen.findByRole('button', { name: '详情' }));
     fireEvent.click(await screen.findByRole('button', { name: 'DNS 检测' }));
-    expect(await screen.findByText('DNS 总状态：warning')).toBeInTheDocument();
+    expect(await screen.findByText('DNS 总状态：告警')).toBeInTheDocument();
     expect(screen.getByText('检测到 1 条 MX 记录')).toBeInTheDocument();
   });
 
@@ -397,12 +403,12 @@ describe('admin stage A pages', () => {
     expect(await screen.findByRole('button', { name: '重算使用量' })).toBeInTheDocument();
   });
 
-  it('队列页渲染刷新与 flush 入口', async () => {
+  it('队列页渲染刷新与投递入口', async () => {
     renderPage(<AdminQueuePage />);
     expect(await screen.findByRole('heading', { name: '队列摘要' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '状态' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '刷新' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Flush 队列' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '立即刷新投递' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '批量删除' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '按状态清空' })).toBeInTheDocument();
     expect(await screen.findByText('当前检测到 1 条队列邮件')).toBeInTheDocument();
@@ -417,7 +423,7 @@ describe('admin stage A pages', () => {
     expect(screen.getByRole('textbox', { name: '关键字' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '状态' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '发件人' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出 CSV' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出日志文件' })).toBeInTheDocument();
     expect(await screen.findByText('queued message accepted')).toBeInTheDocument();
   });
 
@@ -426,8 +432,8 @@ describe('admin stage A pages', () => {
     expect(await screen.findByRole('heading', { name: '审计筛选' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '关键字' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '成功状态' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出 CSV' })).toBeInTheDocument();
-    expect(await screen.findByText('admin.login')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出审计文件' })).toBeInTheDocument();
+    expect(await screen.findByText('后台 · 登录')).toBeInTheDocument();
   });
 
   it('系统配置页渲染主题、语言与保存入口', async () => {
@@ -444,23 +450,23 @@ describe('admin stage A pages', () => {
     expect(screen.getByRole('heading', { name: '磁盘用量' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '错误日志' })).toBeInTheDocument();
     expect(await screen.findByText(/postfix error line 1/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Dovecot' }));
+    fireEvent.click(screen.getByRole('button', { name: '收信服务' }));
     expect(await screen.findByText(/dovecot warning/)).toBeInTheDocument();
   });
 
   it('Rspamd 页渲染阈值表单与 DKIM 轮换入口', async () => {
     renderPage(<AdminRspamdPage />);
-    expect(await screen.findByRole('heading', { name: 'Rspamd 全局阈值' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '反垃圾评分阈值' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存阈值' })).toBeInTheDocument();
-    expect(await screen.findByText(/检测到 SPF 记录/)).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: '轮换 DKIM' })).toBeInTheDocument();
+    expect(await screen.findByText((content) => content.includes('发件人授权：') && content.includes('发件人授权记录'))).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '轮换签名私钥' })).toBeInTheDocument();
   });
 
   it('TLS 页渲染证书列表与续签入口', async () => {
     renderPage(<AdminTlsPage />);
-    expect(await screen.findByRole('heading', { name: 'TLS 证书状态' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '传输加密证书状态' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '触发续签' })).toBeInTheDocument();
     expect(await screen.findByText('/etc/letsencrypt/live/mail.example.com/fullchain.pem')).toBeInTheDocument();
-    expect(screen.getByText(/Jun 30 23:59:59 2026 GMT/)).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes('2026') && (content.includes('6/30') || content.includes('7/1')))).toBeInTheDocument();
   });
 });

@@ -22,7 +22,12 @@ from app.crypto import decrypt_text, encrypt_text
 from app.db import get_session_factory
 from app.errors import AppError
 from app.mail_adapters import ImapAdapter, ImapSettings, MailAdapterError
-from app.mail_directory import get_directory_account, update_directory_account_password, use_sqlite_mail_directory
+from app.mail_directory import (
+    create_directory_account,
+    get_directory_account,
+    update_directory_account_password,
+    use_sqlite_mail_directory,
+)
 from app.mail_preferences import get_user_preferences
 from app.mail_state import ensure_mail_account
 from app.models import MailAccount
@@ -312,16 +317,28 @@ def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict
     """处理邮箱注册并创建登录会话。"""
     settings = get_settings()
     email = payload.email.lower()
-    try:
-        authenticate_mailbox(email, payload.password, settings)
-    except AppError:
-        record_audit_event(
-            request,
-            "auth.register",
-            success=False,
-            metadata={"email": email, "reason": "invalid_credentials"},
-        )
-        raise
+    if use_sqlite_mail_directory():
+        try:
+            create_directory_account(email, payload.password)
+        except AppError as exc:
+            record_audit_event(
+                request,
+                "auth.register",
+                success=False,
+                metadata={"email": email, "reason": getattr(exc, "code", "register_failed")},
+            )
+            raise
+    else:
+        try:
+            authenticate_mailbox(email, payload.password, settings)
+        except AppError:
+            record_audit_event(
+                request,
+                "auth.register",
+                success=False,
+                metadata={"email": email, "reason": "invalid_credentials"},
+            )
+            raise
     ensure_mail_account(email, display_name=payload.display_name, mark_logged_in=True)
     session_id, user_data, csrf_token = _create_session(email, payload.password, settings)
     record_audit_event(
@@ -333,14 +350,14 @@ def register_user(request: Request, payload: RegisterRequest) -> tuple[str, dict
     return session_id, user_data, csrf_token
 
 
-def set_session_cookie(response: Response, session_id: str, csrf_token: str) -> None:
+def set_session_cookie(request: Request, response: Response, session_id: str, csrf_token: str) -> None:
     """把登录会话写入响应 Cookie。"""
-    issue_session_cookies(response, session_id, csrf_token)
+    issue_session_cookies(response, session_id, csrf_token, request=request)
 
 
-def clear_session_cookie(response: Response) -> None:
+def clear_session_cookie(request: Request, response: Response) -> None:
     """清理登录会话 Cookie。"""
-    clear_session_cookies(response)
+    clear_session_cookies(response, request=request)
 
 
 def get_current_session(request: Request) -> AuthSession:

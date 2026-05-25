@@ -52,7 +52,35 @@ def new_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def set_cookie(response: Response, name: str, value: str, *, max_age: int | None = None, secure: bool | None = None) -> None:
+def _request_uses_https(request: Request | None) -> bool:
+    """判断当前请求链路是否处于 HTTPS。"""
+    if request is None:
+        return False
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    if forwarded_proto:
+        return forwarded_proto.split(",", 1)[0].strip().lower() == "https"
+    return request.url.scheme.lower() == "https"
+
+
+def _resolve_cookie_secure(request: Request | None, secure: bool | None = None) -> bool:
+    """基于配置和当前请求链路决定是否写入 Secure Cookie。"""
+    settings = app_config.get_settings()
+    if secure is not None:
+        return secure
+    if not settings.session_cookie_secure:
+        return False
+    return _request_uses_https(request)
+
+
+def set_cookie(
+    response: Response,
+    name: str,
+    value: str,
+    *,
+    request: Request | None = None,
+    max_age: int | None = None,
+    secure: bool | None = None,
+) -> None:
     """按系统安全策略写入 Cookie。"""
     settings = app_config.get_settings()
     response.set_cookie(
@@ -60,35 +88,40 @@ def set_cookie(response: Response, name: str, value: str, *, max_age: int | None
         value,
         max_age=max_age,
         httponly=name != CSRF_COOKIE_NAME,
-        secure=settings.session_cookie_secure if secure is None else secure,
+        secure=_resolve_cookie_secure(request, secure),
         samesite="lax",
         path="/",
     )
 
 
-def clear_cookie(response: Response, name: str, *, secure: bool | None = None) -> None:
+def clear_cookie(response: Response, name: str, *, request: Request | None = None, secure: bool | None = None) -> None:
     """按系统安全策略清除 Cookie。"""
-    settings = app_config.get_settings()
     response.delete_cookie(
         name,
-        secure=settings.session_cookie_secure if secure is None else secure,
+        secure=_resolve_cookie_secure(request, secure),
         samesite="lax",
         path="/",
     )
 
 
-def issue_session_cookies(response: Response, session_id: str, csrf_token: str) -> None:
+def issue_session_cookies(response: Response, session_id: str, csrf_token: str, *, request: Request | None = None) -> None:
     """同时写入会话 Cookie 与 CSRF Cookie。"""
     settings = app_config.get_settings()
-    set_cookie(response, settings.session_cookie_name, session_id, max_age=settings.session_ttl_seconds)
-    set_cookie(response, CSRF_COOKIE_NAME, csrf_token, secure=settings.session_cookie_secure)
+    set_cookie(
+        response,
+        settings.session_cookie_name,
+        session_id,
+        request=request,
+        max_age=settings.session_ttl_seconds,
+    )
+    set_cookie(response, CSRF_COOKIE_NAME, csrf_token, request=request)
 
 
-def clear_session_cookies(response: Response) -> None:
+def clear_session_cookies(response: Response, *, request: Request | None = None) -> None:
     """同时清除会话 Cookie 与 CSRF Cookie。"""
     settings = app_config.get_settings()
-    clear_cookie(response, settings.session_cookie_name)
-    clear_cookie(response, CSRF_COOKIE_NAME)
+    clear_cookie(response, settings.session_cookie_name, request=request)
+    clear_cookie(response, CSRF_COOKIE_NAME, request=request)
 
 
 def is_safe_attachment_id(attachment_id: str) -> bool:

@@ -5,6 +5,18 @@ import { fetchAdminTls, renewAdminTls } from '../api';
 import { AdminDialog, ResultMessage, SectionCard, StatusPill } from '../components/AdminHelpers';
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminTlsItem } from '../types';
+import { formatLocaleDateTime } from '../../i18n/runtime';
+
+function formatCertificateExpiry(value?: string | null) {
+  if (!value) {
+    return '—';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return formatLocaleDateTime(parsed, { hour12: false });
+}
 
 export function AdminTlsPage() {
   const queryClient = useQueryClient();
@@ -38,7 +50,7 @@ export function AdminTlsPage() {
   const columns = useMemo<ColumnDef<AdminTlsItem>[]>(() => [
     { accessorKey: 'name', header: '证书目录' },
     { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
-    { accessorKey: 'expires_at', header: '到期时间', cell: (info) => info.getValue<string>() || '—' },
+    { accessorKey: 'expires_at', header: '到期时间', cell: (info) => formatCertificateExpiry(info.getValue<string>()) },
     { accessorKey: 'domains', header: '覆盖域名', cell: ({ row }) => row.original.domains.length ? row.original.domains.join(', ') : '—' },
     { accessorKey: 'certificate_path', header: '证书路径', cell: (info) => info.getValue<string>() || '—' },
   ], []);
@@ -46,8 +58,8 @@ export function AdminTlsPage() {
   return (
     <div className="admin-section-stack">
       <SectionCard
-        title="TLS 证书状态"
-        description="优先读取 Let’s Encrypt live 目录中的真实证书，并通过 openssl 提取到期时间和覆盖域名。"
+        title="传输加密证书状态"
+        description="优先读取证书目录中的真实证书，并通过系统证书解析工具提取到期时间和覆盖域名。"
         actions={(
           <div className="admin-inline-actions">
             <button type="button" className="admin-button admin-button-secondary" onClick={() => void refresh()}>
@@ -72,7 +84,7 @@ export function AdminTlsPage() {
       <AdminDialog
         open={renewOpen}
         title="确认触发证书续签"
-        description="将执行 certbot renew。开发环境未安装 certbot 时会返回明确降级提示。"
+        description="将执行证书续签命令。开发环境未安装续签工具时会返回明确降级提示。"
         onClose={() => setRenewOpen(false)}
         actions={(
           <>

@@ -9,6 +9,7 @@ import {
 } from './api';
 import { sanitizeMessageHtml } from './MessageReader';
 import type { MailSignature, SignatureUpsertPayload } from './types';
+import { translateText } from '../i18n/runtime';
 
 type EditorMode = 'rich' | 'plain';
 type ColorMenu = 'text' | 'highlight' | null;
@@ -227,7 +228,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
       })
       .catch((error) => {
         if (!cancelled) {
-          setErrorMessage((error as Error).message || '签名加载失败');
+          setErrorMessage((error as Error).message || translateText('签名加载失败'));
         }
       })
       .finally(() => {
@@ -523,7 +524,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
   }
 
   function handleLinkInsert() {
-    const rawUrl = window.prompt('请输入链接地址', 'https://');
+    const rawUrl = window.prompt(translateText('请输入链接地址'), 'https://');
     if (!rawUrl) {
       return;
     }
@@ -531,7 +532,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
     try {
       const parsed = new URL(url, window.location.origin);
       if (!['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol)) {
-        markError('链接地址无效');
+        markError(translateText('链接地址无效'));
         return;
       }
       restoreSelection();
@@ -540,7 +541,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
       }
       syncFromEditor();
     } catch {
-      markError('链接地址无效');
+      markError(translateText('链接地址无效'));
     }
   }
 
@@ -551,14 +552,14 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
   function handleInlineImageFiles(files: File[]) {
     files.forEach((file) => {
       if (!file.type.startsWith('image/')) {
-        markError('只能插入图片文件');
+        markError(translateText('只能插入图片文件'));
         return;
       }
       const reader = new FileReader();
       reader.onload = () => {
         const src = String(reader.result ?? '');
         if (!src) {
-          markError('图片读取失败');
+          markError(translateText('图片读取失败'));
           return;
         }
         const inlineImageId = createInlineImageId();
@@ -695,7 +696,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
     event.preventDefault();
     const name = draft.name.trim();
     if (!name) {
-      markError('请输入签名名称');
+      markError(translateText('请输入签名名称'));
       return;
     }
     const rawHtml = editorMode === 'rich' ? (editorRef.current?.innerHTML ?? draft.htmlBody) : plainTextToHtml(draft.textBody);
@@ -718,7 +719,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
       }
       await reloadSignatures(preferredId);
     } catch (error) {
-      markError((error as Error).message || '签名保存失败');
+      markError((error as Error).message || translateText('签名保存失败'));
     } finally {
       setSaving(false);
     }
@@ -729,7 +730,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
     if (!target) {
       return;
     }
-    const confirmed = window.confirm(`确定删除签名「${target.name}」吗？`);
+    const confirmed = window.confirm(translateText(`确定删除签名「${target.name}」吗？`));
     if (!confirmed) {
       return;
     }
@@ -742,7 +743,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
         resetEditorToBlank();
       }
     } catch (error) {
-      markError((error as Error).message || '签名删除失败');
+      markError((error as Error).message || translateText('签名删除失败'));
     } finally {
       setDeletingId(null);
     }
@@ -754,7 +755,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
       await setDefaultSignature(signatureId);
       await reloadSignatures(signatureId);
     } catch (error) {
-      markError((error as Error).message || '设置默认签名失败');
+      markError((error as Error).message || translateText('设置默认签名失败'));
     }
   }
 
@@ -1002,7 +1003,7 @@ export default function SignatureSettings({ open, onClose }: SignatureSettingsPr
                       </button>
                       <span className="toolbar-divider" aria-hidden="true" />
                       <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" onMouseDown={(event) => event.preventDefault()} onClick={handleLinkInsert}>
-                        link
+                        链接
                       </button>
                       <button type="button" className="toolbar-icon-btn" aria-label="取消链接" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('unlink')}>
                         Tx

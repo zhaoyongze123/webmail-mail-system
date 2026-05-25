@@ -6,6 +6,12 @@ import { AdminDialog, ResultMessage, SectionCard, StatusPill, useAdminListSearch
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminAlias, AliasFormInput } from '../types';
 
+function aliasStatusLabel(status: string) {
+  if (status === 'active') return '启用';
+  if (status === 'disabled') return '停用';
+  return status;
+}
+
 const emptyAliasForm: AliasFormInput = {
   domain_id: '',
   source_address: '',
@@ -64,7 +70,7 @@ export function AdminAliasesPage() {
     onSuccess: async () => {
       setCatchAllDialogOpen(false);
       setCatchAllForm(emptyCatchAllForm);
-      setSuccess('Catch-all 别名已创建。');
+      setSuccess('全收别名已创建。');
       setError(null);
       await refresh();
     },
@@ -119,7 +125,7 @@ export function AdminAliasesPage() {
     { accessorKey: 'source_address', header: '源地址' },
     { accessorKey: 'domain_name', header: '域名', cell: (info) => info.getValue<string>() || '—' },
     { accessorKey: 'description', header: '转发目标', cell: (info) => info.getValue<string>() || '—' },
-    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={aliasStatusLabel(String(info.getValue()))} /> },
     {
       id: 'actions',
       header: '操作',
@@ -168,7 +174,7 @@ export function AdminAliasesPage() {
         description={aliasCapability?.detail || '支持多目标地址、冲突提示和启停切换。'}
         actions={(
           <button type="button" className="admin-button admin-button-secondary" disabled={!aliasWritable} onClick={() => setCatchAllDialogOpen(true)}>
-            Catch-all 创建
+            创建全收别名
           </button>
         )}
       >
@@ -276,8 +282,8 @@ export function AdminAliasesPage() {
 
       <AdminDialog
         open={catchAllDialogOpen}
-        title="创建 Catch-all 别名"
-        description="为域名创建 @domain 形式的 catch-all 转发。"
+        title="创建全收别名"
+        description="为域名创建 @domain 形式的全收转发。"
         onClose={() => {
           setCatchAllDialogOpen(false);
           setCatchAllForm(emptyCatchAllForm);
@@ -296,7 +302,7 @@ export function AdminAliasesPage() {
               });
             }}
           >
-            创建 catch-all
+            创建全收别名
           </button>
         )}
       >

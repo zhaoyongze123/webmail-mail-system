@@ -253,7 +253,7 @@ def metrics(request: Request) -> dict[str, object]:
 def login(request: Request, response: Response, payload: LoginRequest) -> dict[str, object]:
     """校验邮箱账号密码并写入会话 Cookie。"""
     session_id, user_data, csrf_token = login_user(request, payload)
-    set_session_cookie(response, session_id, csrf_token)
+    set_session_cookie(request, response, session_id, csrf_token)
     return success_response(request, user_data)
 
 
@@ -267,7 +267,7 @@ def login(request: Request, response: Response, payload: LoginRequest) -> dict[s
 def register(request: Request, response: Response, payload: RegisterRequest) -> dict[str, object]:
     """注册邮箱账号并在成功后直接建立登录会话。"""
     session_id, user_data, csrf_token = register_user(request, payload)
-    set_session_cookie(response, session_id, csrf_token)
+    set_session_cookie(request, response, session_id, csrf_token)
     return success_response(request, user_data)
 
 
@@ -281,7 +281,7 @@ def register(request: Request, response: Response, payload: RegisterRequest) -> 
 def logout(request: Request, response: Response) -> dict[str, object]:
     """销毁当前登录会话并清空浏览器端 Cookie。"""
     logout_user(request)
-    clear_session_cookie(response)
+    clear_session_cookie(request, response)
     return success_response(request, {"logged_out": True})
 
 

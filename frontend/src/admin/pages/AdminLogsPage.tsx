@@ -2,12 +2,23 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { exportAdminLogs, fetchAdminLogs } from '../api';
-import { ResultMessage, SectionCard, StatusPill } from '../components/AdminHelpers';
+import { ResultMessage, SectionCard, StatusPill, formatAdminActorText, formatAdminTokenizedText, useAdminListSearchParams } from '../components/AdminHelpers';
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminLogEntry } from '../types';
 
 function formatDate(value: string) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function logLevelLabel(level: string) {
+  if (level === 'info') return '信息';
+  if (level === 'warning') return '告警';
+  if (level === 'error') return '错误';
+  return level;
+}
+
+function logSourceLabel(source: string) {
+  return formatAdminTokenizedText(source, '未知来源');
 }
 
 function downloadText(filename: string, content: string, mediaType: string) {
@@ -22,7 +33,7 @@ function downloadText(filename: string, content: string, mediaType: string) {
 
 export function AdminLogsPage() {
   const queryClient = useQueryClient();
-  const [query, setQuery] = useState('');
+  const params = useAdminListSearchParams({ q: '', page: 1 });
   const [source, setSource] = useState('');
   const [level, setLevel] = useState('');
   const [sender, setSender] = useState('');
@@ -32,9 +43,11 @@ export function AdminLogsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['admin-logs', query, source, level, sender, recipient],
+    queryKey: ['admin-logs', params.page, params.q, source, level, sender, recipient],
     queryFn: () => fetchAdminLogs({
-      q: query,
+      page: params.page,
+      page_size: 10,
+      q: params.q,
       status: level,
       domain_id: source,
       sender: sender || undefined,
@@ -44,7 +57,7 @@ export function AdminLogsPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: () => exportAdminLogs({ log_key: source || undefined, q: query || undefined, status: level || undefined, sender: sender || undefined, recipient: recipient || undefined, format: 'csv' }),
+    mutationFn: () => exportAdminLogs({ log_key: source || undefined, q: params.q || undefined, status: level || undefined, sender: sender || undefined, recipient: recipient || undefined, format: 'csv' }),
     onSuccess: (payload) => {
       setError(null);
       setSuccess(`已导出 ${payload.filename}`);
@@ -58,11 +71,11 @@ export function AdminLogsPage() {
 
   const columns = useMemo<ColumnDef<AdminLogEntry>[]>(() => [
     { accessorKey: 'created_at', header: '时间', cell: (info) => formatDate(String(info.getValue())) },
-    { accessorKey: 'source', header: '来源' },
-    { accessorKey: 'level', header: '级别', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'source', header: '来源', cell: (info) => logSourceLabel(String(info.getValue() || '')) },
+    { accessorKey: 'level', header: '级别', cell: (info) => <StatusPill status={String(info.getValue())} label={logLevelLabel(String(info.getValue()))} /> },
     { accessorKey: 'message', header: '消息' },
-    { accessorKey: 'actor', header: '操作者', cell: (info) => info.getValue<string>() || '—' },
-    { accessorKey: 'target', header: '目标', cell: (info) => info.getValue<string>() || '—' },
+    { accessorKey: 'actor', header: '操作者', cell: (info) => formatAdminActorText(String(info.getValue() || '')) },
+    { accessorKey: 'target', header: '目标', cell: (info) => formatAdminTokenizedText(String(info.getValue() || '')) },
   ], []);
 
   const summary = useMemo(() => ({
@@ -97,7 +110,7 @@ export function AdminLogsPage() {
               disabled={exportMutation.isPending}
               onClick={() => exportMutation.mutate()}
             >
-              {exportMutation.isPending ? '导出中...' : '导出 CSV'}
+              {exportMutation.isPending ? '导出中...' : '导出日志文件'}
             </button>
           </div>
         )}
@@ -116,28 +129,35 @@ export function AdminLogsPage() {
         <div className="admin-toolbar-grid admin-toolbar-grid--logs">
           <label>
             <span>关键字</span>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索消息内容" />
+            <input
+              value={params.q}
+              onChange={(event) => {
+                params.setQ(event.target.value);
+                params.setPage(1);
+              }}
+              placeholder="搜索消息内容"
+            />
           </label>
           <label>
             <span>来源</span>
-            <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如 postfix / audit" />
+            <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如：投递服务 / 审计" />
           </label>
           <label>
             <span>状态</span>
             <select value={level} onChange={(event) => setLevel(event.target.value)}>
               <option value="">全部</option>
-              <option value="info">info</option>
-              <option value="warning">warning</option>
-              <option value="error">error</option>
+              <option value="info">信息</option>
+              <option value="warning">告警</option>
+              <option value="error">错误</option>
             </select>
           </label>
           <label>
             <span>发件人</span>
-            <input value={sender} onChange={(event) => setSender(event.target.value)} placeholder="sender@example.com" />
+            <input value={sender} onChange={(event) => setSender(event.target.value)} placeholder="例如：sender@example.com" />
           </label>
           <label>
             <span>收件人</span>
-            <input value={recipient} onChange={(event) => setRecipient(event.target.value)} placeholder="target@example.com" />
+            <input value={recipient} onChange={(event) => setRecipient(event.target.value)} placeholder="例如：target@example.com" />
           </label>
         </div>
       </SectionCard>
@@ -146,6 +166,7 @@ export function AdminLogsPage() {
         data={data?.items ?? []}
         emptyMessage={isLoading ? '加载中...' : '暂无日志'}
         columns={columns}
+        pagination={data ? { ...data, onPageChange: params.setPage } : undefined}
       />
     </div>
   );

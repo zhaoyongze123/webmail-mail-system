@@ -109,7 +109,7 @@ describe('ComposePanel 写信发信草稿', () => {
   it('打开写信面板并展示基础字段', () => {
     const props = renderCompose();
 
-    expect(screen.getByRole('heading', { name: '写信' })).not.toBeNull();
+    expect(screen.getByRole('heading', { name: '新邮件' })).not.toBeNull();
     expect(screen.getByLabelText('收件人')).not.toBeNull();
     expect(screen.getByLabelText('抄送')).not.toBeNull();
     expect(screen.getByLabelText('密送')).not.toBeNull();
@@ -230,6 +230,30 @@ describe('ComposePanel 写信发信草稿', () => {
     expect(richEditor.innerHTML).toContain('第一行');
     expect(richEditor.innerHTML).toContain('第二行');
     expect(richEditor.innerHTML).toContain('第三行');
+  });
+
+  it('表情按钮在富文本模式可插入表情', async () => {
+    const user = userEvent.setup();
+    renderCompose();
+
+    const editor = screen.getByLabelText('正文') as HTMLDivElement;
+    editor.focus();
+    await user.click(screen.getByRole('button', { name: '插入表情' }));
+    await user.click(screen.getByRole('button', { name: '插入表情 😀' }));
+
+    expect(editor.innerHTML).toContain('😀');
+  });
+
+  it('表情按钮在纯文本模式可插入表情', async () => {
+    const user = userEvent.setup();
+    renderCompose();
+
+    await user.click(screen.getByRole('button', { name: '纯文本' }));
+    const editor = screen.getByLabelText('正文') as HTMLTextAreaElement;
+    await user.click(screen.getByRole('button', { name: '插入表情' }));
+    await user.click(screen.getByRole('button', { name: '插入表情 🎉' }));
+
+    expect(editor.value).toContain('🎉');
   });
 
   it('默认签名不会重复插入到已有正文末尾', async () => {

@@ -3,11 +3,19 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { fetchAdminActionHistory } from '../api';
 import { AdminListTable } from '../components/AdminListTable';
-import { ResultMessage, SectionCard, StatusPill } from '../components/AdminHelpers';
+import { ResultMessage, SectionCard, StatusPill, formatAdminActorText, formatAdminTokenizedText } from '../components/AdminHelpers';
 import type { AdminActionHistoryItem } from '../types';
 
 function formatDate(value: string) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function actionStatusLabel(status: string) {
+  if (status === 'ok') return '成功';
+  if (status === 'warning') return '告警';
+  if (status === 'error') return '失败';
+  if (status === 'unavailable') return '不可用';
+  return status;
 }
 
 export function AdminActionHistoryPage() {
@@ -40,10 +48,10 @@ export function AdminActionHistoryPage() {
 
   const columns = useMemo<ColumnDef<AdminActionHistoryItem>[]>(() => [
     { accessorKey: 'created_at', header: '时间', cell: (info) => formatDate(String(info.getValue())) },
-    { accessorKey: 'actor', header: '操作者' },
-    { accessorKey: 'action', header: '动作' },
-    { accessorKey: 'target', header: '目标' },
-    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'actor', header: '操作者', cell: (info) => formatAdminActorText(String(info.getValue() || '')) },
+    { accessorKey: 'action', header: '动作', cell: (info) => formatAdminTokenizedText(String(info.getValue() || '')) },
+    { accessorKey: 'target', header: '目标', cell: (info) => formatAdminTokenizedText(String(info.getValue() || '')) },
+    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={actionStatusLabel(String(info.getValue()))} /> },
     { accessorKey: 'detail', header: '详情', cell: (info) => info.getValue<string>() || '—' },
   ], []);
 
@@ -51,7 +59,7 @@ export function AdminActionHistoryPage() {
     <div className="admin-section-stack">
       <SectionCard
         title="操作历史筛选"
-        description="对接 /api/admin/action-history，展示后台关键动作、状态与执行详情。"
+        description="展示后台关键动作、状态与执行详情。"
         actions={(
           <div className="admin-inline-actions">
             <button
@@ -90,20 +98,20 @@ export function AdminActionHistoryPage() {
           </label>
           <label>
             <span>动作类型</span>
-            <input value={actionType} onChange={(event) => { setActionType(event.target.value); setPage(1); }} placeholder="例如 mail_system.backup" />
+            <input value={actionType} onChange={(event) => { setActionType(event.target.value); setPage(1); }} placeholder="例如：邮件系统备份" />
           </label>
           <label>
             <span>目标类型</span>
-            <input value={targetType} onChange={(event) => { setTargetType(event.target.value); setPage(1); }} placeholder="例如 service / config_file" />
+            <input value={targetType} onChange={(event) => { setTargetType(event.target.value); setPage(1); }} placeholder="例如：服务 / 配置文件" />
           </label>
           <label>
             <span>状态</span>
             <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}>
               <option value="">全部</option>
-              <option value="ok">ok</option>
-              <option value="warning">warning</option>
-              <option value="error">error</option>
-              <option value="unavailable">unavailable</option>
+              <option value="ok">成功</option>
+              <option value="warning">告警</option>
+              <option value="error">失败</option>
+              <option value="unavailable">不可用</option>
             </select>
           </label>
         </div>

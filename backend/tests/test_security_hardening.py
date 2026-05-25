@@ -16,7 +16,7 @@ from app.mail_adapters import MailAdapterError
 
 
 class FakeSettings:
-    def __init__(self) -> None:
+    def __init__(self, *, session_cookie_secure: bool = False) -> None:
         self.app_env = "test"
         self.app_name = "webmail-mvp"
         self.app_secret_key = "test-secret"
@@ -24,7 +24,7 @@ class FakeSettings:
         self.cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
         self.session_ttl_seconds = 60
         self.session_cookie_name = "webmail_session"
-        self.session_cookie_secure = False
+        self.session_cookie_secure = session_cookie_secure
         self.login_fail_ttl_seconds = 30
         self.login_fail_limit = 5
         self.mail_imap_host = "imap.test.local"
@@ -78,9 +78,14 @@ class FakeImapAdapter:
         return self.uid_fetch_message_bytes(uid)
 
 
-def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis.FakeRedis]:
+def build_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    session_cookie_secure: bool = False,
+    base_url: str = "http://testserver",
+) -> tuple[TestClient, fakeredis.FakeRedis]:
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
-    settings = FakeSettings()
+    settings = FakeSettings(session_cookie_secure=session_cookie_secure)
 
     crypto_module = ModuleType("app.crypto")
     crypto_module.encrypt_text = lambda value: value
@@ -149,7 +154,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, fakeredis
     monkeypatch.setattr(auth_module, "ImapAdapter", FakeImapAdapter)
 
     main_module = importlib.import_module("app.main")
-    return TestClient(main_module.app, raise_server_exceptions=False), fake_redis
+    return TestClient(main_module.app, raise_server_exceptions=False, base_url=base_url), fake_redis
 
 
 def login(client: TestClient, email: str, password: str):
@@ -179,6 +184,28 @@ def test_security_headers_cookie_and_csrf(monkeypatch: pytest.MonkeyPatch) -> No
     csrf_response = client.put("/api/settings", json={"system": {"page_size": 12}})
     assert csrf_response.status_code == 403
     assert csrf_response.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
+
+
+def test_http_request_does_not_force_secure_cookie_even_if_env_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = build_client(monkeypatch, session_cookie_secure=True)
+
+    response = login(client, "user@example.com", "correct-password")
+
+    assert response.status_code == 200
+    assert "Secure" not in response.headers.get("set-cookie", "")
+
+
+def test_https_request_keeps_secure_cookie_when_env_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = build_client(
+        monkeypatch,
+        session_cookie_secure=True,
+        base_url="https://testserver",
+    )
+
+    response = login(client, "user@example.com", "correct-password")
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers.get("set-cookie", "")
 
 
 def test_attachment_invalid_id_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

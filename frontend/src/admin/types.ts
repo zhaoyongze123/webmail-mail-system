@@ -131,12 +131,18 @@ export type AdminQueueItem = {
   queue_name: string;
   sender: string;
   recipients: string[];
+  recipient_details?: Array<{
+    address: string;
+    delay_reason?: string;
+    delay_reason_display?: string;
+  }>;
   recipient_count: number;
   message_size: number;
   arrival_time: number;
   created_at: number;
   name: string;
   description: string;
+  failure_reason?: string;
 };
 
 export type AdminQueueSnapshot = {

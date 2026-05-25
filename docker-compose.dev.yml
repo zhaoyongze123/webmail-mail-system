@@ -49,17 +49,34 @@ services:
         condition: service_healthy
 
   frontend:
-    image: node:20-alpine
+    image: node:22-bookworm
     working_dir: /app
     env_file:
       - .env.example
     environment:
       NODE_ENV: development
       VITE_API_BASE_URL: http://backend:8000
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      NO_PROXY: "localhost,127.0.0.1,backend,postgres,redis"
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      no_proxy: "localhost,127.0.0.1,backend,postgres,redis"
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
-    command: sh -c 'if [ ! -x node_modules/.bin/vite ]; then npm ci --include=dev; fi && exec npm run dev -- --host 0.0.0.0 --port 5173'
+    command: >
+      sh -c '
+      LOCK_HASH=$$(sha256sum package-lock.json | awk "{print \$$1}");
+      INSTALLED_HASH=$$(cat node_modules/.package-lock.hash 2>/dev/null || true);
+      if [ ! -x node_modules/.bin/vite ] || [ "$$LOCK_HASH" != "$$INSTALLED_HASH" ]; then
+        npm ci --include=dev &&
+        mkdir -p node_modules &&
+        printf "%s" "$$LOCK_HASH" > node_modules/.package-lock.hash;
+      fi &&
+      exec npm run dev -- --host 0.0.0.0 --port 5173'
     ports:
       - "5173:5173"
     depends_on:

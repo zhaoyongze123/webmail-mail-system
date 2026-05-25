@@ -6,6 +6,12 @@ import { AdminDialog, ResultMessage, SectionCard, StatusPill, useAdminListSearch
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminDomain, AdminDomainDnsCheck, DomainFormInput } from '../types';
 
+function domainStatusLabel(status: string) {
+  if (status === 'active') return '启用';
+  if (status === 'disabled') return '停用';
+  return status;
+}
+
 const emptyDomainForm: DomainFormInput = {
   name: '',
   quota_limit_mb: 10240,
@@ -131,7 +137,7 @@ export function AdminDomainsPage() {
     { accessorKey: 'user_count', header: '用户数' },
     { accessorKey: 'alias_count', header: '别名数' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)' },
-    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={domainStatusLabel(String(info.getValue()))} /> },
     {
       id: 'actions',
       header: '操作',
@@ -202,8 +208,8 @@ export function AdminDomainsPage() {
           <label>
             <span>状态</span>
             <select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as 'active' | 'disabled' }))}>
-              <option value="active">active</option>
-              <option value="disabled">disabled</option>
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
             </select>
           </label>
           <div className="admin-inline-actions">
@@ -257,7 +263,7 @@ export function AdminDomainsPage() {
             <div className="admin-section-stack">
               <div className="admin-inline-actions">
                 <span className={`admin-status-pill ${dnsCheckResult.status === 'ok' ? 'is-success' : dnsCheckResult.status === 'warning' ? 'is-warning' : 'is-working'}`}>
-                  DNS 总状态：{dnsCheckResult.status}
+                  DNS 总状态：{dnsCheckResult.status === 'ok' ? '正常' : dnsCheckResult.status === 'warning' ? '告警' : dnsCheckResult.status}
                 </span>
               </div>
               <div className="admin-info-grid">
@@ -286,8 +292,8 @@ export function AdminDomainsPage() {
             <input placeholder="搜索域名" value={params.q} onChange={(event) => params.setQ(event.target.value)} />
             <select value={params.status} onChange={(event) => params.setStatus(event.target.value)}>
               <option value="">全部状态</option>
-              <option value="active">active</option>
-              <option value="disabled">disabled</option>
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
             </select>
             <div className="admin-inline-actions">
               <button type="button" className="admin-button admin-button-secondary" disabled={selectedIds.length === 0} onClick={() => bulkMutation.mutate({ ids: selectedIds, status: 'active' })}>批量启用</button>

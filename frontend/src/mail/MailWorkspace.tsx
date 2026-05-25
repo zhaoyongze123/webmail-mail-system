@@ -431,6 +431,14 @@ export default function MailWorkspace({
     await loadMessages(currentFolder, { refresh: true });
   };
 
+  const handleFolderClick = (folderName: string) => {
+    if (folderName === currentFolder) {
+      void loadMessages(folderName, { refresh: true, query: activeQuery });
+      return;
+    }
+    setCurrentFolder(folderName);
+  };
+
   const runOperation = async (action: MessageOperationAction, uids: string[], nextTargetFolder?: string) => {
     setActionState('loading');
     setError(null);
@@ -572,7 +580,7 @@ export default function MailWorkspace({
                   type="button"
                   className={folder.name === currentFolder ? 'mail-workspace__folder is-active' : 'mail-workspace__folder'}
                   aria-current={folder.name === currentFolder ? 'page' : undefined}
-                  onClick={() => setCurrentFolder(folder.name)}
+                  onClick={() => handleFolderClick(folder.name)}
                 >
                   <span>{folder.display_name}</span>
                   <span aria-label={`${folder.display_name} 未读 ${folder.unread_count} 封`}>

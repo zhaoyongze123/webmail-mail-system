@@ -234,13 +234,128 @@ def quota_policy_to_dict(policy: QuotaPolicy | None, *, domain: MailDomain | Non
     }
 
 
-def audit_log_to_dict(log: AuditLog) -> dict[str, Any]:
+def resolve_actor_display_name(
+    db: Session,
+    *,
+    actor_type: str | None = None,
+    actor_id: str | None = None,
+    account_id: UUID | str | None = None,
+) -> str:
+    """解析后台操作者展示名，优先返回邮箱或用户名。"""
+    if actor_type == "system" and not actor_id and not account_id:
+        return "system"
+    if actor_type == "admin_user" and actor_id:
+        admin_user = db.get(AdminUser, actor_id)
+        if admin_user and admin_user.username:
+            return admin_user.username
+    if account_id:
+        mailbox_account = db.get(MailAccount, account_id)
+        if mailbox_account and mailbox_account.email:
+            return mailbox_account.display_name or mailbox_account.email
+    if actor_id:
+        mailbox_account = db.get(MailAccount, actor_id)
+        if mailbox_account and mailbox_account.email:
+            return mailbox_account.display_name or mailbox_account.email
+        admin_user = db.get(AdminUser, actor_id)
+        if admin_user and admin_user.username:
+            return admin_user.username
+    return actor_id or (str(account_id) if account_id else "system")
+
+
+def resolve_target_display_name(
+    db: Session,
+    *,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | list[Any] | None = None,
+) -> str:
+    """解析后台目标对象展示名，优先返回业务可读字段。"""
+    target_meta = metadata if isinstance(metadata, dict) else {}
+    if target_type == "domain":
+        if isinstance(target_meta.get("name"), str) and target_meta.get("name"):
+            return str(target_meta["name"])
+        if isinstance(target_meta.get("domain"), str) and target_meta.get("domain"):
+            return str(target_meta["domain"])
+        if target_id:
+            domain = db.get(MailDomain, target_id)
+            if domain and domain.name:
+                return domain.name
+    if target_type == "mail_account":
+        if isinstance(target_meta.get("email"), str) and target_meta.get("email"):
+            return str(target_meta["email"])
+        if target_id:
+            account = db.get(MailAccount, target_id)
+            if account and account.email:
+                return account.display_name or account.email
+    if target_type == "mail_alias":
+        if isinstance(target_meta.get("source_address"), str) and target_meta.get("source_address"):
+            return str(target_meta["source_address"])
+        if isinstance(target_meta.get("target"), str) and target_meta.get("target"):
+            return str(target_meta["target"])
+        if target_id:
+            alias = db.get(MailAlias, target_id)
+            if alias and alias.source_address:
+                return alias.source_address
+    if target_type == "quota_policy":
+        if isinstance(target_meta.get("domain"), str) and target_meta.get("domain"):
+            return f"{target_meta['domain']} 配额策略"
+        if target_id:
+            policy = db.get(QuotaPolicy, target_id)
+            if policy:
+                if policy.domain_id:
+                    domain = db.get(MailDomain, policy.domain_id)
+                    if domain and domain.name:
+                        return f"{domain.name} 配额策略"
+                return "全局配额策略"
+    if target_type == "admin_user" and target_id:
+        admin_user = db.get(AdminUser, target_id)
+        if admin_user and admin_user.username:
+            return admin_user.username
+    if target_type == "service":
+        return target_id or "服务"
+    if target_type == "config_file":
+        return target_id or "配置文件"
+    if target_type == "mail_queue":
+        queue_id = target_id or str(target_meta.get("queue_id") or "").strip()
+        recipient = str(target_meta.get("recipient") or target_meta.get("recipients") or "").strip()
+        if recipient and queue_id:
+            return f"{recipient} · {queue_id}"
+        if recipient:
+            return recipient
+        if queue_id:
+            return queue_id
+        return "邮件队列"
+    return target_id or target_type or "-"
+
+
+def audit_log_to_dict(log: AuditLog, *, db: Session | None = None) -> dict[str, Any]:
     """将审计日志对象转换为后台接口输出字典。"""
+    metadata = log.metadata_ or {}
+    actor_label = (
+        resolve_actor_display_name(
+            db,
+            actor_type=log.actor_type,
+            actor_id=log.actor_id,
+            account_id=log.account_id,
+        )
+        if db is not None
+        else (log.actor_id or (str(log.account_id) if log.account_id else "system"))
+    )
+    target_label = (
+        resolve_target_display_name(
+            db,
+            target_type=log.target_type,
+            target_id=log.target_id,
+            metadata=metadata,
+        )
+        if db is not None
+        else (log.target_id or log.target_type or "-")
+    )
     return {
         "id": str(log.id),
-        "actor": log.actor_id or log.account_id or "system",
+        "actor": actor_label,
         "action": log.event_type,
-        "target": log.target_id or log.target_type or "-",
+        "target": target_label,
         "event_type": log.event_type,
         "account_id": str(log.account_id) if log.account_id else None,
         "actor_type": log.actor_type,
@@ -250,7 +365,7 @@ def audit_log_to_dict(log: AuditLog) -> dict[str, Any]:
         "request_id": log.request_id,
         "ip": log.ip,
         "success": log.success,
-        "metadata": log.metadata_ or {},
+        "metadata": metadata,
         "created_at": log.created_at.isoformat(),
     }
 

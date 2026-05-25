@@ -24,6 +24,7 @@ import type {
   SettingsPayload,
   UserSettingsPreferences,
 } from './types';
+import { translateText } from '../i18n/runtime';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 const CSRF_COOKIE_NAME = 'webmail_csrf';
@@ -58,7 +59,7 @@ async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
   });
   const payload = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !payload.success) {
-    const message = payload.error?.message || '请求失败，请稍后重试';
+    const message = payload.error?.message || translateText('请求失败，请稍后重试');
     const error = new Error(message) as Error & { code?: string };
     error.code = payload.error?.code;
     throw error;
@@ -275,7 +276,7 @@ export async function uploadSettingsAvatar(file: File): Promise<SettingsPayload>
   });
   const payload = (await response.json()) as ApiResponse<SettingsPayload>;
   if (!response.ok || !payload.success) {
-    const message = payload.error?.message || '请求失败，请稍后重试';
+    const message = payload.error?.message || translateText('请求失败，请稍后重试');
     const error = new Error(message) as Error & { code?: string };
     error.code = payload.error?.code;
     throw error;
@@ -288,7 +289,7 @@ export function formatDateByTimezone(
   options?: { locale?: string; timezone?: string; dateStyle?: Intl.DateTimeFormatOptions['dateStyle']; timeStyle?: Intl.DateTimeFormatOptions['timeStyle'] },
 ): string {
   if (!value) {
-    return '未提供';
+    return translateText('未提供');
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {

@@ -7,6 +7,7 @@ import secrets
 import csv
 from io import StringIO
 from pathlib import Path
+import re
 from typing import Any
 from uuid import UUID
 
@@ -45,6 +46,8 @@ from app.admin_common import (
     quota_policy_to_dict,
     quota_usage_status,
     record_admin_audit,
+    resolve_actor_display_name,
+    resolve_target_display_name,
     normalize_pagination,
     utcnow,
 )
@@ -441,27 +444,29 @@ def _parse_user_csv(csv_content: str) -> list[dict[str, str]]:
     reader = csv.DictReader(StringIO(csv_content))
     rows: list[dict[str, str]] = []
     for row in reader:
-        email = str(row.get("email") or "").strip()
-        password = str(row.get("password") or "").strip()
+        email = str(row.get("email") or row.get("邮箱") or "").strip()
+        password = str(row.get("password") or row.get("密码") or "").strip()
         if not email or not password:
-            raise AppError("ADMIN_USER_IMPORT_INVALID", "CSV 中 email 和 password 不能为空", http_status=status.HTTP_400_BAD_REQUEST)
+            raise AppError("ADMIN_USER_IMPORT_INVALID", "导入内容中的邮箱和密码不能为空", http_status=status.HTTP_400_BAD_REQUEST)
+        raw_status = str(row.get("status") or row.get("状态") or "active").strip().lower()
+        normalized_status = "active" if raw_status in {"active", "启用", "enabled"} else "disabled" if raw_status in {"disabled", "停用"} else "active"
         rows.append(
             {
                 "email": email,
-                "display_name": str(row.get("display_name") or "").strip(),
-                "quota_mb": str(row.get("quota_mb") or "500").strip(),
-                "status": str(row.get("status") or "active").strip().lower(),
-                "is_admin": str(row.get("is_admin") or "false").strip().lower(),
+                "display_name": str(row.get("display_name") or row.get("显示名称") or "").strip(),
+                "quota_mb": str(row.get("quota_mb") or row.get("配额MB") or row.get("配额") or "500").strip(),
+                "status": normalized_status,
+                "is_admin": str(row.get("is_admin") or row.get("是否管理员") or "false").strip().lower(),
                 "password": password,
             }
         )
     if not rows:
-        raise AppError("ADMIN_USER_IMPORT_EMPTY", "CSV 中没有可导入的用户", http_status=status.HTTP_400_BAD_REQUEST)
+        raise AppError("ADMIN_USER_IMPORT_EMPTY", "导入内容中没有可导入的用户", http_status=status.HTTP_400_BAD_REQUEST)
     return rows
 
 
 def _parse_bool_text(value: str) -> bool:
-    return value.lower() in {"1", "true", "yes", "y", "on"}
+    return value.lower() in {"1", "true", "yes", "y", "on", "是", "已启用", "管理员"}
 
 
 def _email_domain(email: str) -> str:
@@ -1048,6 +1053,11 @@ def admin_queue_detail(
     """查看指定队列邮件正文。"""
     ensure_superadmin(admin)
     result = get_mail_queue_message(queue_id)
+    recipient_label = ""
+    if isinstance(result.get("content"), str):
+        matched = result["content"] and re.search(r"(?im)^(?:to|recipient):\s*(.+)$", str(result["content"]))
+        if matched:
+            recipient_label = matched.group(1).strip()
     record_admin_audit(
         request,
         admin,
@@ -1055,7 +1065,7 @@ def admin_queue_detail(
         success=result["status"] == "ok",
         target_type="mail_queue",
         target_id=queue_id,
-        metadata={"status": result["status"]},
+        metadata={"status": result["status"], "queue_id": queue_id, "recipient": recipient_label},
     )
     return success_response(request, result)
 
@@ -1095,7 +1105,7 @@ def admin_queue_delete(
         success=result["status"] == "ok",
         target_type="mail_queue",
         target_id=payload.queue_id,
-        metadata={"status": result["status"]},
+        metadata={"status": result["status"], "queue_id": payload.queue_id},
     )
     return success_response(request, {"queue_id": payload.queue_id, **result})
 
@@ -1116,7 +1126,7 @@ def admin_queue_requeue(
         success=result["status"] == "ok",
         target_type="mail_queue",
         target_id=payload.queue_id,
-        metadata={"status": result["status"]},
+        metadata={"status": result["status"], "queue_id": payload.queue_id},
     )
     return success_response(request, result)
 
@@ -1947,7 +1957,7 @@ def list_audit_logs(
     stmt = stmt.order_by(AuditLog.created_at.desc())
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[audit_log_to_dict(item) for item in items]))
+    return success_response(request, paginate(page=page, page_size=page_size, total=total, items=[audit_log_to_dict(item, db=db) for item in items]))
 
 
 @router.get("/action-history", response_model=ApiResponse)
@@ -1983,9 +1993,18 @@ def list_action_history(
             items=[
                 {
                     "id": str(item.id),
-                    "actor": item.admin_user_id and str(item.admin_user_id) or "system",
+                    "actor": resolve_actor_display_name(
+                        db,
+                        actor_type="admin_user" if item.admin_user_id else "system",
+                        actor_id=str(item.admin_user_id) if item.admin_user_id else None,
+                    ),
                     "action": item.action_type,
-                    "target": item.target_id or item.target_type or "-",
+                    "target": resolve_target_display_name(
+                        db,
+                        target_type=item.target_type,
+                        target_id=item.target_id,
+                        metadata=item.payload,
+                    ),
                     "event_type": item.action_type,
                     "actor_type": "admin_user" if item.admin_user_id else "system",
                     "actor_id": str(item.admin_user_id) if item.admin_user_id else None,

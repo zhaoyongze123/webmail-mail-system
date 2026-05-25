@@ -2,9 +2,24 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { bulkUpdateQuotas, fetchAdminDomains, fetchAdminQuotas, recalcAdminUserQuota, updateAdminUserQuota, updateQuotaPolicy } from '../api';
-import { AdminDialog, ResultMessage, SectionCard, StatusPill, useAdminListSearchParams } from '../components/AdminHelpers';
+import { AdminDialog, ResultMessage, SectionCard, StatusPill, translateSystemText, useAdminListSearchParams } from '../components/AdminHelpers';
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminMailboxUser, AdminQuotaItem, QuotaPolicyFormInput } from '../types';
+
+function quotaStatusLabel(status: string) {
+  if (status === 'healthy' || status === 'ok') return '正常';
+  if (status === 'warning') return '告警';
+  if (status === 'critical') return '严重';
+  if (status === 'unavailable') return '不可用';
+  return status;
+}
+
+function usageSourceLabel(source: string) {
+  if (source === 'cached') return '缓存聚合';
+  if (source === 'doveadm') return '实时读取';
+  if (source === 'unavailable') return '当前不可用';
+  return source;
+}
 
 const defaultPolicyForm: QuotaPolicyFormInput = {
   domain_id: null,
@@ -109,8 +124,8 @@ export function AdminQuotasPage() {
     { accessorKey: 'quota_limit_mb', header: '总上限(MB)' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)' },
     { accessorKey: 'usage_percent', header: '使用率', cell: (info) => `${info.getValue<number>() ?? 0}%` },
-    { accessorKey: 'usage_source', header: '来源', cell: (info) => info.getValue<string>() || 'cached' },
-    { accessorKey: 'status', header: '阈值状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'usage_source', header: '来源', cell: (info) => usageSourceLabel(info.getValue<string>() || 'cached') },
+    { accessorKey: 'status', header: '阈值状态', cell: (info) => <StatusPill status={String(info.getValue())} label={quotaStatusLabel(String(info.getValue()))} /> },
   ], []);
 
   const userColumns = useMemo<ColumnDef<AdminMailboxUser>[]>(() => [
@@ -133,8 +148,8 @@ export function AdminQuotasPage() {
     { accessorKey: 'quota_mb', header: '上限(MB)' },
     { accessorKey: 'used_quota_mb', header: '已用(MB)', cell: (info) => info.getValue<number>() ?? 0 },
     { accessorKey: 'usage_percent', header: '使用率', cell: (info) => `${info.getValue<number>() ?? 0}%` },
-    { accessorKey: 'usage_source', header: '来源', cell: (info) => info.getValue<string>() || 'cached' },
-    { accessorKey: 'quota_status', header: '阈值状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'usage_source', header: '来源', cell: (info) => usageSourceLabel(info.getValue<string>() || 'cached') },
+    { accessorKey: 'quota_status', header: '阈值状态', cell: (info) => <StatusPill status={String(info.getValue())} label={quotaStatusLabel(String(info.getValue()))} /> },
     {
       id: 'actions',
       header: '操作',
@@ -166,11 +181,11 @@ export function AdminQuotasPage() {
 
   return (
     <div className="admin-section-stack">
-      <SectionCard title="域级配额策略" description={quotaCapability?.detail || '优先读取 Dovecot `doveadm quota get`，不可用时自动回退到本地缓存聚合。'}>
+      <SectionCard title="域级配额策略" description={translateSystemText(quotaCapability?.detail) || '优先读取收信服务的实时配额结果，不可用时自动回退到本地缓存聚合。'}>
         {quotaCapability ? (
           <div className="admin-inline-actions">
-            <StatusPill status={quotaCapability.status} />
-            <span className="admin-page-meta">{quotaCapability.detail}</span>
+            <StatusPill status={quotaCapability.status} label={quotaStatusLabel(quotaCapability.status)} />
+            <span className="admin-page-meta">{translateSystemText(quotaCapability.detail)}</span>
           </div>
         ) : null}
         <form
@@ -317,7 +332,7 @@ export function AdminQuotasPage() {
       <AdminDialog
         open={Boolean(recalcTarget)}
         title="确认重算配额"
-        description={recalcTarget ? `将调用 doveadm 重新计算 ${recalcTarget.email} 的使用量。若环境未安装 doveadm，会返回明确降级提示。` : undefined}
+        description={recalcTarget ? `将调用收信服务配额重算命令，重新计算 ${recalcTarget.email} 的使用量。若环境未安装该命令，会返回明确降级提示。` : undefined}
         onClose={() => setRecalcTarget(null)}
         actions={(
           <>

@@ -16,6 +16,13 @@ import {
 import { AdminDialog, ResultMessage, SectionCard, StatusPill, useAdminListSearchParams } from '../components/AdminHelpers';
 import { AdminListTable } from '../components/AdminListTable';
 import type { AdminMailboxUser, UserFormInput, UserUpdateInput } from '../types';
+import { formatLocaleDateTime } from '../../i18n/runtime';
+
+function userStatusLabel(status: string) {
+  if (status === 'active') return '启用';
+  if (status === 'disabled') return '停用';
+  return status;
+}
 
 const emptyUserForm: UserFormInput = {
   email: '',
@@ -37,7 +44,7 @@ function formatLastLogin(value?: string | null) {
     return '—';
   }
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' });
+  return Number.isNaN(date.getTime()) ? value : formatLocaleDateTime(date, { dateStyle: 'medium', timeStyle: 'medium' });
 }
 
 export function AdminUsersPage() {
@@ -202,7 +209,7 @@ export function AdminUsersPage() {
     { accessorKey: 'used_quota_mb', header: '已用(MB)', cell: (info) => info.getValue<number>() ?? 0 },
     { accessorKey: 'usage_percent', header: '使用率', cell: (info) => `${info.getValue<number>() ?? 0}%` },
     { accessorKey: 'last_login_at', header: '最后登录', cell: (info) => formatLastLogin(info.getValue<string | null | undefined>()) },
-    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} /> },
+    { accessorKey: 'status', header: '状态', cell: (info) => <StatusPill status={String(info.getValue())} label={userStatusLabel(String(info.getValue()))} /> },
     {
       id: 'actions',
       header: '操作',
@@ -275,7 +282,7 @@ export function AdminUsersPage() {
         description="后台创建用户时会真实写入本地密码哈希。"
         actions={(
           <button type="button" className="admin-button admin-button-secondary" onClick={() => setImportDialogOpen(true)}>
-            CSV 导入
+            批量导入
           </button>
         )}
       >
@@ -348,8 +355,8 @@ export function AdminUsersPage() {
           <label>
             <span>状态</span>
             <select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as 'active' | 'disabled' }))}>
-              <option value="active">active</option>
-              <option value="disabled">disabled</option>
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
             </select>
           </label>
           <label className="admin-check-field">
@@ -390,8 +397,8 @@ export function AdminUsersPage() {
             <input placeholder="搜索邮箱/名称" value={params.q} onChange={(event) => params.setQ(event.target.value)} />
             <select value={params.status} onChange={(event) => params.setStatus(event.target.value)}>
               <option value="">全部状态</option>
-              <option value="active">active</option>
-              <option value="disabled">disabled</option>
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
             </select>
             <select value={params.domain_id} onChange={(event) => params.setDomainId(event.target.value)}>
               <option value="">全部域名</option>
@@ -452,8 +459,8 @@ export function AdminUsersPage() {
 
       <AdminDialog
         open={importDialogOpen}
-        title="CSV 导入用户"
-        description="支持按 email,password,display_name,quota_mb,status,is_admin 的 CSV 导入。"
+        title="批量导入用户"
+        description="支持按“邮箱、密码、显示名称、配额、状态、管理员标记”列顺序导入。"
         onClose={() => {
           setImportDialogOpen(false);
           setImportForm(emptyImportForm);
@@ -485,12 +492,12 @@ export function AdminUsersPage() {
             </select>
           </label>
           <label className="admin-dialog-field">
-            <span>CSV 内容</span>
+            <span>导入内容</span>
             <textarea
               rows={10}
               value={importForm.csv_content}
               onChange={(event) => setImportForm((current) => ({ ...current, csv_content: event.target.value }))}
-              placeholder="email,password,display_name,quota_mb,status,is_admin"
+              placeholder={'邮箱,密码,显示名称,配额MB,状态,是否管理员\nuser@example.com,Pass123!,张三,500,active,false'}
             />
           </label>
         </div>

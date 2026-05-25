@@ -910,6 +910,50 @@ def _queue_status_from_name(queue_name: str | None) -> str:
     return "unknown"
 
 
+def _summarize_delay_reason(delay_reason: str | None) -> str:
+    """把 Postfix 英文延迟原因压缩成更容易理解的中文摘要。"""
+    normalized = (delay_reason or "").strip()
+    if not normalized:
+        return ""
+    lowered = normalized.lower()
+    if "user unknown" in lowered or "unknown user" in lowered or "mailbox unavailable" in lowered:
+        return "收件人地址不存在或邮箱不可用"
+    if "mailbox full" in lowered or "quota exceeded" in lowered or "over quota" in lowered:
+        return "收件人邮箱空间不足"
+    if "spam" in lowered or "unsolicited" in lowered or "blocked" in lowered:
+        return "邮件被对方判定为垃圾邮件或被策略拦截"
+    if "rate limit" in lowered or "too many" in lowered:
+        return "投递频率过高，被对方限流"
+    if "refused to talk to me" in lowered:
+        if "421" in lowered or "450" in lowered or "451" in lowered or "452" in lowered:
+            return "对方服务器临时拒绝建立连接，稍后会继续重试"
+        return "对方服务器拒绝建立连接"
+    if "connection timed out" in lowered or "timed out" in lowered:
+        return "连接对方服务器超时"
+    if "host or domain name not found" in lowered or "name service error" in lowered:
+        return "收件域名解析失败"
+    if any(code in lowered for code in ("421", "450", "451", "452", "4.7.", "4.4.", "4.2.")):
+        return "对方服务器临时拒收，系统稍后会继续重试"
+    if any(code in lowered for code in ("550", "551", "552", "553", "554", "5.7.", "5.1.", "5.2.")):
+        return "对方服务器永久拒收，需要人工处理"
+    return "投递失败，等待系统重试或人工处理"
+
+
+def _normalize_queue_recipient(recipient: object) -> tuple[str, str | None, str | None]:
+    """标准化 Postfix recipient 项，避免前端直接展示原始 JSON。"""
+    if isinstance(recipient, dict):
+        address = str(
+            recipient.get("address")
+            or recipient.get("recipient")
+            or recipient.get("original_recipient")
+            or ""
+        ).strip()
+        delay_reason = str(recipient.get("delay_reason") or recipient.get("reason") or "").strip() or None
+        return address, delay_reason, _summarize_delay_reason(delay_reason)
+    address = str(recipient).strip()
+    return address, None, None
+
+
 def _parse_postqueue_json_lines(text: str) -> list[dict[str, object]]:
     """解析 `postqueue -j` 的 JSON Lines 输出。"""
     items: list[dict[str, object]] = []
@@ -923,10 +967,26 @@ def _parse_postqueue_json_lines(text: str) -> list[dict[str, object]]:
             continue
         queue_id = str(payload.get("queue_id") or payload.get("queue_name") or "").strip()
         sender = str(payload.get("sender") or payload.get("from") or "-").strip() or "-"
-        recipients = [str(item).strip() for item in payload.get("recipients") or [] if str(item).strip()]
+        recipient_details: list[dict[str, str]] = []
+        recipients: list[str] = []
+        for raw_recipient in payload.get("recipients") or []:
+            address, delay_reason, delay_reason_display = _normalize_queue_recipient(raw_recipient)
+            if not address:
+                continue
+            recipients.append(address)
+            detail = {"address": address}
+            if delay_reason:
+                detail["delay_reason"] = delay_reason
+            if delay_reason_display:
+                detail["delay_reason_display"] = delay_reason_display
+            recipient_details.append(detail)
         queue_name = str(payload.get("queue_name") or payload.get("queue") or "").strip()
         arrival_time = payload.get("arrival_time")
         message_size = payload.get("message_size")
+        first_failure_reason = next(
+            (item.get("delay_reason_display") or item.get("delay_reason") for item in recipient_details if item.get("delay_reason") or item.get("delay_reason_display")),
+            "",
+        )
         items.append(
             {
                 "id": queue_id or "-",
@@ -935,11 +995,13 @@ def _parse_postqueue_json_lines(text: str) -> list[dict[str, object]]:
                 "queue_name": queue_name or "unknown",
                 "sender": sender,
                 "recipients": recipients,
+                "recipient_details": recipient_details,
                 "recipient_count": len(recipients),
                 "message_size": int(message_size or 0),
                 "arrival_time": int(arrival_time or 0),
                 "created_at": int(arrival_time or 0),
                 "name": queue_id or "-",
+                "failure_reason": first_failure_reason,
                 "description": f"{sender} -> {', '.join(recipients[:2]) if recipients else '-'}",
             }
         )

@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { useEffect, useMemo, useState } from 'react';
 import type { ApiResponse } from './types';
+import { formatLocaleDateTime, translateText } from '../i18n/runtime';
 
 export type MailAddress = {
   name?: string | null;
@@ -165,7 +166,7 @@ async function requestMessage(folder: string, uid: number | string): Promise<Mes
   });
   const payload = (await response.json()) as ApiResponse<MessageDetail>;
   if (!response.ok || !payload.success || !payload.data) {
-    const message = payload.error?.message || '邮件详情加载失败';
+    const message = payload.error?.message || translateText('邮件详情加载失败');
     const error = new Error(message) as Error & { code?: string; status?: number };
     error.code = payload.error?.code;
     error.status = response.status;
@@ -215,7 +216,7 @@ export function MessageBodyView({ html, text, htmlTestId, textTestId, htmlClassN
 
   return (
     <pre className={textClassName ?? 'message-text-body'} data-testid={textTestId}>
-      {text || '这封邮件没有正文内容。'}
+      {text || translateText('这封邮件没有正文内容。')}
     </pre>
   );
 }
@@ -232,31 +233,28 @@ function formatAddress(address: MailAddress | string) {
 
 function formatAddressList(value: MessageDetail['to'] | MessageDetail['from']) {
   if (!value) {
-    return '未提供';
+    return translateText('未提供');
   }
   if (Array.isArray(value)) {
-    return value.map(formatAddress).join(', ') || '未提供';
+    return value.map(formatAddress).join(', ') || translateText('未提供');
   }
   return formatAddress(value);
 }
 
 function formatDate(value?: string | null) {
   if (!value) {
-    return '未提供';
+    return translateText('未提供');
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return new Intl.DateTimeFormat('zh-CN', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(date);
+  return formatLocaleDateTime(date, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function formatSize(value?: number | null) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
-    return '未知大小';
+    return translateText('未知大小');
   }
   if (value < 1024) {
     return `${value} B`;
@@ -300,7 +298,7 @@ export default function MessageReader({ folder, uid, onSessionExpired, onReply, 
         if (error.status === 401 || error.code === 'AUTH_SESSION_EXPIRED') {
           onSessionExpired?.();
         }
-        setState({ status: 'error', message: null, error: error.message || '邮件详情加载失败' });
+        setState({ status: 'error', message: null, error: error.message || translateText('邮件详情加载失败') });
       });
 
     return () => {

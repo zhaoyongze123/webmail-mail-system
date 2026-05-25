@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent
 import { clearComposeDraftCache, writeComposeDraftCache } from './composeDraftCache';
 import { fetchSignatures } from './api';
 import type { MailSignature } from './types';
+import { translateText } from '../i18n/runtime';
 
 type ApiError = {
   code: string;
@@ -188,6 +189,7 @@ const DEFAULT_ACTIVE_STYLES: ActiveStyles = {
   insertOrderedList: false,
   insertUnorderedList: false,
 };
+const QUICK_EMOJIS = ['😀', '😁', '😂', '😊', '😍', '😎', '🤝', '👍', '👏', '🎉', '🔥', '❤️', '📌', '📎', '✅', '🙏'];
 
 function createEmptyForm(values?: ComposeValues | null): ComposeForm {
   const textBody = values?.text_body ?? '';
@@ -442,7 +444,7 @@ async function requestApi<T>(input: string, init?: RequestInit): Promise<T> {
   });
   const payload = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !payload.success || payload.data === null) {
-    const message = payload.error?.message || '请求失败，请稍后重试';
+    const message = payload.error?.message || translateText('请求失败，请稍后重试');
     const error = new Error(message) as Error & { code?: string; status?: number };
     error.code = payload.error?.code;
     error.status = response.status;
@@ -467,7 +469,7 @@ async function requestOptionalApi<T>(input: string, init?: RequestInit): Promise
   });
   const payload = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !payload.success) {
-    const message = payload.error?.message || '请求失败，请稍后重试';
+    const message = payload.error?.message || translateText('请求失败，请稍后重试');
     const error = new Error(message) as Error & { code?: string; status?: number };
     error.code = payload.error?.code;
     error.status = response.status;
@@ -626,6 +628,7 @@ export default function ComposePanel({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
   const [openColorMenu, setOpenColorMenu] = useState<ColorMenu>(null);
+  const [openComposePopover, setOpenComposePopover] = useState<'system' | 'emoji' | null>(null);
   const [tablePickerOpen, setTablePickerOpen] = useState(false);
   const [tablePickerSize, setTablePickerSize] = useState({ rows: 1, columns: 1 });
   const [selectedInlineImageId, setSelectedInlineImageId] = useState<string | null>(null);
@@ -666,6 +669,7 @@ export default function ComposePanel({
     hasUserEditedRef.current = false;
     setLoadedDraftId(null);
     setOpenColorMenu(null);
+    setOpenComposePopover(null);
     setTablePickerOpen(false);
     setSelectedInlineImageId(null);
     setSelectedInlineImageWidth(INLINE_IMAGE_DEFAULT_WIDTH);
@@ -769,7 +773,7 @@ export default function ComposePanel({
         if (isSessionExpired(error)) {
           onSessionExpired?.();
         }
-        setErrorMessage(error.message || '草稿加载失败');
+        setErrorMessage(error.message || translateText('草稿加载失败'));
       });
     return () => {
       cancelled = true;
@@ -944,6 +948,46 @@ export default function ComposePanel({
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function insertEmoji(emoji: string) {
+    markEdited();
+    setOpenComposePopover(null);
+    if (editorMode === 'plain') {
+      const editor = plainBodyRef.current;
+      const currentValue = form.textBody;
+      const start = editor?.selectionStart ?? currentValue.length;
+      const end = editor?.selectionEnd ?? start;
+      const nextValue = `${currentValue.slice(0, start)}${emoji}${currentValue.slice(end)}`;
+      setForm((current) => ({ ...current, textBody: nextValue }));
+      window.setTimeout(() => {
+        if (!editor) {
+          return;
+        }
+        editor.focus();
+        const nextPosition = start + emoji.length;
+        editor.setSelectionRange(nextPosition, nextPosition);
+      }, 0);
+      return;
+    }
+    restoreEditorSelection();
+    if (typeof document.execCommand === 'function') {
+      document.execCommand('insertText', false, emoji);
+    } else {
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      if (range) {
+        range.deleteContents();
+        const textNode = document.createTextNode(emoji);
+        range.insertNode(textNode);
+        range.setStartAfter(textNode);
+        range.collapse(true);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    }
+    saveEditorSelection();
+    syncBodyFromEditor();
+  }
+
   function focusRecipientInput(field: RecipientField) {
     recipientInputRefs.current[field]?.focus();
   }
@@ -980,7 +1024,7 @@ export default function ComposePanel({
     setRecipientSelection(null);
     focusRecipientInput(field);
     if (duplicateValue) {
-      setErrorMessage('收件人不能重复');
+      setErrorMessage(translateText('收件人不能重复'));
     }
   }
 
@@ -1492,7 +1536,7 @@ export default function ComposePanel({
   }
 
   function applyCustomColor(command: 'foreColor' | 'hiliteColor') {
-    const color = window.prompt('请输入颜色值，例如 #1f2937');
+    const color = window.prompt(translateText('请输入颜色值，例如 #1f2937'));
     if (!color) {
       return;
     }
@@ -1500,7 +1544,7 @@ export default function ComposePanel({
   }
 
   function handleLinkInsert() {
-    const url = window.prompt('请输入链接地址');
+    const url = window.prompt(translateText('请输入链接地址'));
     if (!url) {
       return;
     }
@@ -1513,7 +1557,7 @@ export default function ComposePanel({
 
   function insertTable(rows: number, columns: number) {
     if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1 || rows > 20 || columns > 10) {
-      setErrorMessage('表格行数需为 1-20，列数需为 1-10');
+      setErrorMessage(translateText('表格行数需为 1-20，列数需为 1-10'));
       return;
     }
     const cells = Array.from({ length: columns }, () => '<td><br></td>').join('');
@@ -1523,15 +1567,15 @@ export default function ComposePanel({
   }
 
   function handleCustomTableInsert() {
-    const rows = Number(window.prompt('请输入表格行数', String(tablePickerSize.rows)));
-    const columns = Number(window.prompt('请输入表格列数', String(tablePickerSize.columns)));
+    const rows = Number(window.prompt(translateText('请输入表格行数'), String(tablePickerSize.rows)));
+    const columns = Number(window.prompt(translateText('请输入表格列数'), String(tablePickerSize.columns)));
     insertTable(rows, columns);
   }
 
   function handleInlineImageFiles(files: File[]) {
     files.forEach((file) => {
       if (!file.type.startsWith('image/')) {
-        setErrorMessage('只能插入图片文件');
+        setErrorMessage(translateText('只能插入图片文件'));
         return;
       }
       markEdited();
@@ -1753,9 +1797,9 @@ export default function ComposePanel({
   }
 
   const recipientFieldConfigs: Array<{ field: RecipientField; label: string; ariaLabel: string }> = [
-    { field: 'to', label: 'To', ariaLabel: '收件人' },
-    { field: 'cc', label: 'Cc', ariaLabel: '抄送' },
-    { field: 'bcc', label: 'Bcc', ariaLabel: '密送' },
+    { field: 'to', label: '收件人', ariaLabel: '收件人' },
+    { field: 'cc', label: '抄送', ariaLabel: '抄送' },
+    { field: 'bcc', label: '密送', ariaLabel: '密送' },
   ];
 
   const saveLabel =
@@ -1773,13 +1817,18 @@ export default function ComposePanel({
     <aside className="compose-panel" aria-label="写信面板" aria-modal="true">
       <form className="compose-panel-form" onSubmit={handleSubmit}>
         <header className="compose-panel-header">
-          <h2 className="visually-hidden">写信</h2>
+          <h2>新邮件</h2>
+          <div className="compose-window-controls" aria-label="窗口控制">
           <button type="button" className="compose-window-button" aria-label="最小化写信">
-            -
+            <span aria-hidden="true">−</span>
+          </button>
+          <button type="button" className="compose-window-button" aria-label="全屏写信">
+            <span aria-hidden="true">⤢</span>
           </button>
           <button type="button" className="compose-window-button" onClick={handleDiscard} aria-label="关闭写信">
-            x
+            <span aria-hidden="true">×</span>
           </button>
+          </div>
         </header>
 
         {errorMessage ? (
@@ -1790,7 +1839,7 @@ export default function ComposePanel({
 
         <section className="compose-address-container" aria-label="地址栏">
           <div className="compose-field-row">
-            <span className="field-label">From</span>
+            <span className="field-label">发件人</span>
             <span className="field-value text-black">{from}</span>
           </div>
           {recipientFieldConfigs.map((config) => {
@@ -1840,7 +1889,7 @@ export default function ComposePanel({
                     onFocus={() => setActiveAddressField(config.field)}
                     onBlur={() => handleRecipientBlur(config.field)}
                     onKeyDown={(event) => handleRecipientKeyDown(config.field, event)}
-                    placeholder="Add recipient"
+                    placeholder="输入邮箱地址后回车"
                     autoComplete="off"
                     aria-label={config.ariaLabel}
                   />
@@ -1862,12 +1911,12 @@ export default function ComposePanel({
         </section>
 
         <label className="compose-subject-container">
-          <span className="visually-hidden">主题</span>
+          <span className="compose-subject-label">主题</span>
           <input
             className="subject-input"
             value={form.subject}
             onChange={(event) => updateField('subject', event.target.value)}
-            placeholder="Subject"
+            placeholder="请输入主题"
             aria-label="主题"
           />
         </label>
@@ -1921,7 +1970,7 @@ export default function ComposePanel({
                   className="toolbar-icon-btn"
                   aria-label="加粗"
                   aria-pressed={activeStyles.bold}
-                  title="加粗"
+                  data-tooltip="加粗"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => toggleInlineStyle('bold')}
                 >
@@ -1932,7 +1981,7 @@ export default function ComposePanel({
                   className="toolbar-icon-btn italic"
                   aria-label="斜体"
                   aria-pressed={activeStyles.italic}
-                  title="斜体"
+                  data-tooltip="斜体"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => toggleInlineStyle('italic')}
                 >
@@ -1943,7 +1992,7 @@ export default function ComposePanel({
                   className="toolbar-icon-btn underline"
                   aria-label="下划线"
                   aria-pressed={activeStyles.underline}
-                  title="下划线"
+                  data-tooltip="下划线"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => toggleInlineStyle('underline')}
                 >
@@ -1954,7 +2003,7 @@ export default function ComposePanel({
                   className="toolbar-icon-btn strike"
                   aria-label="删除线"
                   aria-pressed={activeStyles.strikeThrough}
-                  title="删除线"
+                  data-tooltip="删除线"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => toggleInlineStyle('strikeThrough')}
                 >
@@ -1966,7 +2015,7 @@ export default function ComposePanel({
                     className="toolbar-color-button"
                     aria-label="文字颜色"
                     aria-expanded={openColorMenu === 'text'}
-                    title="文字颜色"
+                    data-tooltip="文字颜色"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
                       saveEditorSelection();
@@ -2006,7 +2055,7 @@ export default function ComposePanel({
                     className="toolbar-color-button highlight"
                     aria-label="背景高亮颜色"
                     aria-expanded={openColorMenu === 'highlight'}
-                    title="背景高亮颜色"
+                    data-tooltip="背景高亮颜色"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
                       saveEditorSelection();
@@ -2046,7 +2095,7 @@ export default function ComposePanel({
                   className="toolbar-icon-btn"
                   aria-label="有序列表"
                   aria-pressed={activeStyles.insertOrderedList}
-                  title="有序列表"
+                  data-tooltip="有序列表"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => runEditorCommand('insertOrderedList')}
                 >
@@ -2057,26 +2106,26 @@ export default function ComposePanel({
                   className="toolbar-icon-btn"
                   aria-label="无序列表"
                   aria-pressed={activeStyles.insertUnorderedList}
-                  title="无序列表"
+                  data-tooltip="无序列表"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => runEditorCommand('insertUnorderedList')}
                 >
                   •
                 </button>
-                <button type="button" className="toolbar-icon-btn" aria-label="减少缩进" title="减少缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('outdent')}>
+                <button type="button" className="toolbar-icon-btn" aria-label="减少缩进" data-tooltip="减少缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('outdent')}>
                   ←
                 </button>
-                <button type="button" className="toolbar-icon-btn" aria-label="增加缩进" title="增加缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('indent')}>
+                <button type="button" className="toolbar-icon-btn" aria-label="增加缩进" data-tooltip="增加缩进" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('indent')}>
                   →
                 </button>
-                <button type="button" className="toolbar-icon-btn" aria-label="引用块" title="引用块" onMouseDown={(event) => event.preventDefault()} onClick={handleQuoteInsert}>
+                <button type="button" className="toolbar-icon-btn" aria-label="引用块" data-tooltip="引用块" onMouseDown={(event) => event.preventDefault()} onClick={handleQuoteInsert}>
                   “”
                 </button>
                 <span className="toolbar-divider" aria-hidden="true" />
-                <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" title="添加链接" onMouseDown={(event) => event.preventDefault()} onClick={handleLinkInsert}>
-                  link
+                <button type="button" className="toolbar-icon-btn toolbar-link-btn" aria-label="添加链接" data-tooltip="添加链接" onMouseDown={(event) => event.preventDefault()} onClick={handleLinkInsert}>
+                  链接
                 </button>
-                <button type="button" className="toolbar-icon-btn" aria-label="取消链接" title="取消链接" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('unlink')}>
+                <button type="button" className="toolbar-icon-btn" aria-label="取消链接" data-tooltip="取消链接" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorCommand('unlink')}>
                   Tx
                 </button>
                 <div className="toolbar-popover-root">
@@ -2085,7 +2134,7 @@ export default function ComposePanel({
                     className="toolbar-icon-btn"
                     aria-label="插入表格"
                     aria-expanded={tablePickerOpen}
-                    title="插入表格"
+                    data-tooltip="插入表格"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
                       saveEditorSelection();
@@ -2127,7 +2176,7 @@ export default function ComposePanel({
                     </div>
                   ) : null}
                 </div>
-                <button type="button" className="toolbar-icon-btn" aria-label="插入图片" title="插入图片" onClick={() => imageInputRef.current?.click()}>
+                <button type="button" className="toolbar-icon-btn" aria-label="插入图片" data-tooltip="插入图片" onClick={() => imageInputRef.current?.click()}>
                   图
                 </button>
                 <input ref={imageInputRef} className="hidden-file-input" type="file" accept="image/*" onChange={handleInlineImageUpload} aria-label="插入图片" />
@@ -2139,7 +2188,7 @@ export default function ComposePanel({
                         type="button"
                         className="toolbar-icon-btn"
                         aria-label="图片左对齐"
-                        title="图片左对齐"
+                        data-tooltip="图片左对齐"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
                           const selected = getSelectedInlineImageElements();
@@ -2156,7 +2205,7 @@ export default function ComposePanel({
                         type="button"
                         className="toolbar-icon-btn"
                         aria-label="图片居中"
-                        title="图片居中"
+                        data-tooltip="图片居中"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
                           const selected = getSelectedInlineImageElements();
@@ -2173,7 +2222,7 @@ export default function ComposePanel({
                         type="button"
                         className="toolbar-icon-btn"
                         aria-label="图片右对齐"
-                        title="图片右对齐"
+                        data-tooltip="图片右对齐"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
                           const selected = getSelectedInlineImageElements();
@@ -2212,7 +2261,7 @@ export default function ComposePanel({
               role="textbox"
               aria-label="正文"
               aria-multiline="true"
-              data-placeholder="Write your email..."
+              data-placeholder="请输入邮件正文..."
               data-empty={hasEditorContent() ? 'false' : 'true'}
               onMouseDown={(event) => {
                 const target = event.target as HTMLElement | null;
@@ -2250,7 +2299,7 @@ export default function ComposePanel({
               role="textbox"
               aria-label="正文"
               aria-multiline="true"
-              placeholder="Write your email..."
+              placeholder="请输入邮件正文..."
               value={form.textBody}
               onChange={handlePlainBodyChange}
             />
@@ -2328,17 +2377,51 @@ export default function ComposePanel({
             </span>
           </div>
           <div className="footer-right" aria-label="更多操作">
-            <button type="button" className="icon-btn" title="添加附件" onClick={() => undefined}>
-              @
+            <label className="icon-btn compose-footer-upload" aria-label="快捷添加附件" data-tooltip="添加附件">
+              📎
+              <input type="file" multiple onChange={handleUpload} aria-label="快捷添加附件" />
+            </label>
+            <button type="button" className="icon-btn" aria-label="插入链接" data-tooltip="插入链接" onClick={handleLinkInsert}>
+              🔗
             </button>
-            <button type="button" className="icon-btn" title="插入变量">
-              {`{}`}
+            <div className="toolbar-popover-root">
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="插入表情"
+                data-tooltip="插入表情"
+                aria-expanded={openComposePopover === 'emoji'}
+                onClick={() => {
+                  if (editorMode === 'rich') {
+                    saveEditorSelection();
+                  }
+                  setOpenComposePopover((current) => (current === 'emoji' ? null : 'emoji'));
+                }}
+              >
+                ☺
+              </button>
+              {openComposePopover === 'emoji' ? (
+                <div className="compose-emoji-popover" role="menu" aria-label="表情面板">
+                  {QUICK_EMOJIS.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      className="compose-emoji-button"
+                      aria-label={`插入表情 ${emoji}`}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => insertEmoji(emoji)}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <button type="button" className="icon-btn" aria-label="更多写信操作" data-tooltip="更多写信操作">
+              ⋯
             </button>
-            <button type="button" className="icon-btn" title="日历">
-              #
-            </button>
-            <button type="button" className="icon-btn danger" title="丢弃草稿" onClick={handleDiscard}>
-              del
+            <button type="button" className="icon-btn danger" aria-label="快捷丢弃草稿" data-tooltip="丢弃草稿" onClick={handleDiscard}>
+              🗑
             </button>
           </div>
         </footer>

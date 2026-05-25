@@ -358,11 +358,19 @@ def test_admin_queue_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
                     "queue_name": "deferred",
                     "sender": "sender@example.com",
                     "recipients": ["target@example.com"],
+                    "recipient_details": [
+                        {
+                            "address": "target@example.com",
+                            "delay_reason": "host mx.example.com refused to talk to me: 421 temporary failure",
+                            "delay_reason_display": "对方服务器临时拒绝建立连接，稍后会继续重试",
+                        }
+                    ],
                     "recipient_count": 1,
                     "message_size": 2048,
                     "arrival_time": 1747641600,
                     "created_at": 1747641600,
                     "name": "ABCD1234",
+                    "failure_reason": "对方服务器临时拒绝建立连接，稍后会继续重试",
                     "description": "sender@example.com -> target@example.com",
                 },
             ],
@@ -705,7 +713,7 @@ def test_admin_users_and_aliases_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         "/api/admin/users/import-csv",
         headers=headers,
         json={
-            "csv_content": "email,password,display_name,quota_mb,status,is_admin\nnew@mail.test,Import123!,Imported,512,active,false\n",
+            "csv_content": "邮箱,密码,显示名称,配额MB,状态,是否管理员\nnew@mail.test,Import123!,Imported,512,启用,否\n",
             "domain_id": domain_id,
         },
     )

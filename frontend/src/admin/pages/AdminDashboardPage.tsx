@@ -1,6 +1,7 @@
 import { useId, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAdminDashboardTrends, fetchAdminOverview } from '../api';
+import { formatLocaleDateTime, formatLocaleNumber, translateText } from '../../i18n/runtime';
 
 function MiniSparkline({ values }: { values: number[] }) {
   const gradientId = useId().replace(/:/g, '');
@@ -28,7 +29,7 @@ function MiniSparkline({ values }: { values: number[] }) {
   const lastPoint = points[points.length - 1];
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="admin-sparkline" role="img" aria-label="趋势图">
+    <svg viewBox={`0 0 ${width} ${height}`} className="admin-sparkline" role="img" aria-label={translateText('趋势')}>
       <defs>
         <linearGradient id={`${gradientId}-fill`} x1="0%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="currentColor" stopOpacity="0.28" />
@@ -53,13 +54,13 @@ function MiniSparkline({ values }: { values: number[] }) {
 
 function formatNumber(value?: number | null) {
   if (value === undefined || value === null) return '—';
-  return new Intl.NumberFormat('zh-CN').format(value);
+  return formatLocaleNumber(value);
 }
 
 const auditTokenLabels: Record<string, string> = {
   admin: '后台',
   queue: '队列',
-  tls: 'TLS',
+  tls: '证书',
   rspamd: '反垃圾',
   users: '用户',
   user: '用户',
@@ -111,6 +112,14 @@ function formatTrendDateLabel(value: string) {
   const segments = value.split('-');
   if (segments.length !== 3) return value;
   return `${Number(segments[1])}/${Number(segments[2])}`;
+}
+
+function formatQueueStatusLabel(status: string) {
+  if (status === 'deferred') return '延迟重试';
+  if (status === 'active') return '投递中';
+  if (status === 'hold') return '人工挂起';
+  if (status === 'queued') return '排队中';
+  return status;
 }
 
 export function AdminDashboardPage() {
@@ -181,7 +190,7 @@ export function AdminDashboardPage() {
                 <div className="admin-audit-stream__headline">
                   <strong className="admin-audit-stream__action">{formatAuditAction(item.action)}</strong>
                   <time className="admin-audit-stream__time">
-                    {new Date(item.created_at).toLocaleString('zh-CN', {
+                    {formatLocaleDateTime(item.created_at, {
                       hour12: false,
                       month: 'numeric',
                       day: 'numeric',
@@ -245,23 +254,23 @@ export function AdminDashboardPage() {
             <h2>队列摘要</h2>
             <p>保留必要状态，不再把大段说明塞进主视区。</p>
           </div>
-          <span className="admin-dashboard-card__eyebrow">mail queue</span>
+          <span className="admin-dashboard-card__eyebrow">邮件队列</span>
         </div>
         <div className="admin-queue-summary">
           <div className="admin-queue-summary__item">
-            <span>deferred</span>
+            <span>{formatQueueStatusLabel('deferred')}</span>
             <strong>{formatNumber(queueSummary.deferred ?? 0)}</strong>
           </div>
           <div className="admin-queue-summary__item">
-            <span>active</span>
+            <span>{formatQueueStatusLabel('active')}</span>
             <strong>{formatNumber(queueSummary.active ?? 0)}</strong>
           </div>
           <div className="admin-queue-summary__item">
-            <span>hold</span>
+            <span>{formatQueueStatusLabel('hold')}</span>
             <strong>{formatNumber(queueSummary.hold ?? 0)}</strong>
           </div>
           <div className="admin-queue-summary__item">
-            <span>queued</span>
+            <span>{formatQueueStatusLabel('queued')}</span>
             <strong>{formatNumber(queueSummary.queued ?? 0)}</strong>
           </div>
         </div>

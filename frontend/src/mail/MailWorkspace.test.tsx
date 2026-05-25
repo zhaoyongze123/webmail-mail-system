@@ -152,6 +152,30 @@ describe('MailWorkspace 三栏工作台', () => {
     expect(screen.getByText('当前文件夹：已发送')).not.toBeNull();
   });
 
+  it('点击当前文件夹时会自动刷新列表', async () => {
+    const user = userEvent.setup();
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === '/api/folders') {
+        return Promise.resolve(apiResponse({ folders }));
+      }
+      if (url.startsWith('/api/folders/INBOX/messages')) {
+        return Promise.resolve(apiResponse({ folder: 'INBOX', page: 1, page_size: 30, total: 1, messages: inboxMessages }));
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    render(<MailWorkspace onOpenMessage={vi.fn()} />);
+
+    await screen.findByText(/最新客户邮件/);
+    mockFetch.mockClear();
+    await user.click(screen.getByRole('button', { name: /收件箱/ }));
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/folders/INBOX/messages?page=1&page_size=30&refresh=true'), expect.any(Object));
+    });
+  });
+
   it('支持当前文件夹搜索和清空搜索', async () => {
     const user = userEvent.setup();
     mockFetch.mockImplementation((input: RequestInfo | URL) => {

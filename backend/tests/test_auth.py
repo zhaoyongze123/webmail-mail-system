@@ -1,4 +1,5 @@
 import importlib
+import sqlite3
 import sys
 from types import ModuleType
 
@@ -30,10 +31,17 @@ class FakeSettings:
         self.mail_smtp_port = 25
         self.mail_smtp_ssl = False
         self.mail_smtp_starttls = False
+        self.mail_directory_backend = "postgres"
+        self.mail_directory_sqlite_path = "/tmp/test-vmail.db"
+        self.mail_directory_password_mode = "plain"
 
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def use_sqlite_mail_directory(self) -> bool:
+        return self.mail_directory_backend == "sqlite_vmail"
 
 
 class FakeImapAdapter:
@@ -114,6 +122,26 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
     return TestClient(main_module.app, raise_server_exceptions=False)
 
 
+def build_sqlite_vmail_client(monkeypatch: pytest.MonkeyPatch, tmp_path, *, login_fail_limit: int = 5) -> TestClient:
+    client = build_client(monkeypatch, login_fail_limit=login_fail_limit)
+    settings = importlib.import_module("app.config").get_settings()
+    settings.mail_directory_backend = "sqlite_vmail"
+    settings.mail_directory_sqlite_path = str(tmp_path / "vmail.db")
+    settings.mail_directory_password_mode = "plain"
+    with sqlite3.connect(settings.mail_directory_sqlite_path) as connection:
+        connection.execute("CREATE TABLE domains (domain TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE accounts (username TEXT NOT NULL, domain TEXT NOT NULL, password TEXT, PRIMARY KEY (username, domain))"
+        )
+        connection.execute("INSERT INTO domains(domain) VALUES (?)", ("example.com",))
+        connection.execute(
+            "INSERT INTO accounts(username, domain, password) VALUES (?, ?, ?)",
+            ("alice", "example.com", "Secret123!"),
+        )
+        connection.commit()
+    return client
+
+
 def login(client: TestClient, email: str, password: str, *, remember: bool = False):
     response = client.post(
         "/api/auth/login",
@@ -179,6 +207,61 @@ def test_register_success_sets_session_cookie_and_me_returns_email(monkeypatch: 
     me_response = client.get("/api/auth/me")
     assert me_response.status_code == 200
     assert me_response.json()["data"]["email"] == "new-user@example.com"
+
+
+def test_register_creates_sqlite_vmail_account_and_me_returns_email(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+    settings = importlib.import_module("app.config").get_settings()
+
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "email": "new-user@example.com",
+            "password": "Secret123!",
+            "display_name": "新用户",
+            "remember": True,
+        },
+    )
+    csrf_token = client.cookies.get("webmail_csrf")
+    if csrf_token:
+        client.headers.update({"X-CSRF-Token": csrf_token})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["email"] == "new-user@example.com"
+    with sqlite3.connect(settings.mail_directory_sqlite_path) as connection:
+        row = connection.execute(
+            "SELECT username, domain, password FROM accounts WHERE username = ? AND domain = ?",
+            ("new-user", "example.com"),
+        ).fetchone()
+    assert row == ("new-user", "example.com", "Secret123!")
+    assert any(event["event_type"] == "auth.register" and event["success"] is True for event in get_recent_audit_events())
+
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["data"]["email"] == "new-user@example.com"
+
+
+def test_register_rejects_existing_sqlite_vmail_account(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client = build_sqlite_vmail_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "email": "alice@example.com",
+            "password": "Secret123!",
+            "display_name": "Alice",
+            "remember": False,
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "ADMIN_USER_EXISTS"
+    assert body["error"]["message"] == "邮箱账号已存在"
+    assert any(event["event_type"] == "auth.register" and event["success"] is False for event in get_recent_audit_events())
 
 
 def test_logout_invalidates_session(monkeypatch: pytest.MonkeyPatch) -> None:

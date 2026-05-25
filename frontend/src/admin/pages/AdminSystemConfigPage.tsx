@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { backupAdminMailSystemConfig, fetchAdminMailSystemConfigPreview, fetchAdminSystemConfig, postaliasAdminMailSystemConfig, postmapAdminMailSystemConfig, reloadAdminDovecotService, reloadAdminPostfixService, restoreAdminMailSystemConfig, runAdminServiceAction, updateAdminSystemConfig } from '../api';
-import { ResultMessage, SectionCard, StatusPill } from '../components/AdminHelpers';
+import { ResultMessage, SectionCard, StatusPill, translateSystemText } from '../components/AdminHelpers';
 import type { AdminMailSystemCommandResult, AdminMailSystemConfigPreview, AdminSystemConfigPayload } from '../types';
 
 const defaultConfig: AdminSystemConfigPayload = {
@@ -19,7 +19,7 @@ function CommandResultCard({ title, result }: { title: string; result?: AdminMai
     <div className="admin-info-card">
       <strong>{title}</strong>
       <StatusPill status={result.status} />
-      <p>{result.detail}</p>
+      <p>{translateSystemText(result.detail)}</p>
       {result.backup_path ? <p>{result.backup_path}</p> : null}
       {result.path ? <p>{result.path}</p> : null}
     </div>
@@ -38,7 +38,7 @@ function ConfigPreviewCard({
     <div className="admin-info-card">
       <strong>{title}</strong>
       <StatusPill status={resolvedPreview.status} />
-      <p>{resolvedPreview.detail}</p>
+      <p>{translateSystemText(resolvedPreview.detail)}</p>
       <pre className="admin-log-output">{resolvedPreview.content || '暂无配置预览'}</pre>
     </div>
   );
@@ -187,11 +187,11 @@ export function AdminSystemConfigPage() {
     : null;
 
   const previewCards = useMemo(() => mailSystemPreview ? [
-    <ConfigPreviewCard key="postfix" title="Postfix 配置预览" preview={mailSystemPreview.postfix} />,
-    <ConfigPreviewCard key="dovecot" title="Dovecot 配置预览" preview={mailSystemPreview.dovecot} />,
+    <ConfigPreviewCard key="postfix" title="投递服务配置预览" preview={mailSystemPreview.postfix} />,
+    <ConfigPreviewCard key="dovecot" title="收信服务配置预览" preview={mailSystemPreview.dovecot} />,
   ] : [
-    <ConfigPreviewCard key="postfix" title="Postfix 配置预览" />,
-    <ConfigPreviewCard key="dovecot" title="Dovecot 配置预览" />,
+    <ConfigPreviewCard key="postfix" title="投递服务配置预览" />,
+    <ConfigPreviewCard key="dovecot" title="收信服务配置预览" />,
   ], [mailSystemPreview]);
 
   return (
@@ -227,7 +227,7 @@ export function AdminSystemConfigPage() {
           <label>
             <span>语言</span>
             <select value={form.language} onChange={(event) => setForm((current) => ({ ...current, language: event.target.value as AdminSystemConfigPayload['language'] }))}>
-              <option value="zh-CN">中文</option>
+              <option value="zh-CN">简体中文</option>
               <option value="en-US">English</option>
             </select>
           </label>
@@ -261,7 +261,7 @@ export function AdminSystemConfigPage() {
               刷新预览
             </button>
             <button type="button" className="admin-button admin-button-secondary" onClick={() => backupMutation.mutate('/etc/postfix/main.cf')}>
-              备份 Postfix
+              备份投递服务配置
             </button>
           </div>
         )}
@@ -284,35 +284,35 @@ export function AdminSystemConfigPage() {
             恢复配置
           </button>
           <button type="button" className="admin-button admin-button-secondary" onClick={() => postmapMutation.mutate()}>
-            postmap
+            更新映射索引
           </button>
           <button type="button" className="admin-button admin-button-secondary" onClick={() => postaliasMutation.mutate()}>
-            postalias
+            更新别名索引
           </button>
           <button type="button" className="admin-button admin-button-primary" onClick={() => postfixReloadMutation.mutate()}>
-            postfix reload
+            重载投递服务
           </button>
           <button type="button" className="admin-button admin-button-primary" onClick={() => dovecotReloadMutation.mutate()}>
-            dovecot reload
+            重载收信服务
           </button>
         </div>
       </SectionCard>
 
       <SectionCard
         title="服务动作"
-        description="最小闭环支持 service action，直接对接后端 /api/admin/system/service-action。"
+        description="提供最小可用的服务启停能力，便于联调和排障。"
       >
         <div className="admin-form-grid admin-form-grid--two">
           <label>
             <span>服务名</span>
-            <input value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="postfix / dovecot / rspamd" />
+            <input value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="例如：投递服务、收信服务、反垃圾服务" />
           </label>
           <label>
             <span>动作</span>
             <select value={serviceAction} onChange={(event) => setServiceAction(event.target.value as 'start' | 'stop' | 'restart')}>
-              <option value="start">start</option>
-              <option value="stop">stop</option>
-              <option value="restart">restart</option>
+              <option value="start">启动</option>
+              <option value="stop">停止</option>
+              <option value="restart">重启</option>
             </select>
           </label>
         </div>
@@ -322,7 +322,7 @@ export function AdminSystemConfigPage() {
             className="admin-button admin-button-primary"
             onClick={() => serviceActionMutation.mutate({ service: serviceName, action: serviceAction })}
           >
-            执行服务动作
+            执行服务操作
           </button>
         </div>
         <div className="admin-info-grid">

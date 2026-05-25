@@ -55,13 +55,13 @@ export function AdminLoginPage() {
     <div className="admin-auth-page">
       <form className="admin-auth-card" onSubmit={onSubmit}>
         <div>
-          <p className="admin-auth-kicker">Webmail Admin</p>
+          <p className="admin-auth-kicker">邮件后台管理</p>
           <h1>管理员登录</h1>
-          <p>使用后台管理员账号登录，开发环境默认账号为 `admin`。</p>
+          <p>使用后台管理员账号登录。</p>
         </div>
         <label>
           <span>管理员账号</span>
-          <input type="text" autoComplete="username" placeholder="admin" {...register('username')} />
+          <input type="text" autoComplete="username" placeholder="请输入管理员账号" {...register('username')} />
           {errors.username ? <em>{errors.username.message}</em> : null}
         </label>
         <label>

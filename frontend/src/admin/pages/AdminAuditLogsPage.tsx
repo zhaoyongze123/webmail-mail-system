@@ -3,11 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { exportAdminAuditLogs, fetchAdminAuditLogsPage } from '../api';
 import { AdminListTable } from '../components/AdminListTable';
-import { ResultMessage, SectionCard, StatusPill } from '../components/AdminHelpers';
+import { ResultMessage, SectionCard, StatusPill, formatAdminActorText, formatAdminDateTime, formatAdminTokenizedText, useAdminListSearchParams } from '../components/AdminHelpers';
 import type { AdminAuditLogItem } from '../types';
 
 function formatDate(value: string) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+  return formatAdminDateTime(value);
 }
 
 function downloadText(filename: string, content: string, mediaType: string) {
@@ -22,7 +22,7 @@ function downloadText(filename: string, content: string, mediaType: string) {
 
 export function AdminAuditLogsPage() {
   const queryClient = useQueryClient();
-  const [query, setQuery] = useState('');
+  const params = useAdminListSearchParams({ q: '', page: 1 });
   const [actor, setActor] = useState('');
   const [action, setAction] = useState('');
   const [target, setTarget] = useState('');
@@ -34,7 +34,9 @@ export function AdminAuditLogsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const queryParams = {
-    q: query || undefined,
+    page: params.page,
+    page_size: 10,
+    q: params.q || undefined,
     actor_id: actor || undefined,
     action: action || undefined,
     target: target || undefined,
@@ -50,7 +52,7 @@ export function AdminAuditLogsPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: () => exportAdminAuditLogs({ q: query || undefined, status: successOnly === '' ? undefined : successOnly, format: 'csv' }),
+    mutationFn: () => exportAdminAuditLogs({ q: params.q || undefined, status: successOnly === '' ? undefined : successOnly, format: 'csv' }),
     onSuccess: (payload) => {
       setError(null);
       setSuccess(`已导出 ${payload.filename}`);
@@ -69,13 +71,13 @@ export function AdminAuditLogsPage() {
   }), [data?.total, items]);
 
   const columns = useMemo<ColumnDef<AdminAuditLogItem>[]>(() => [
-    { accessorKey: 'actor', header: '操作者' },
-    { accessorKey: 'action', header: '动作' },
-    { accessorKey: 'target', header: '目标' },
+    { accessorKey: 'actor', header: '操作者', cell: (info) => formatAdminActorText(String(info.getValue() || '')) },
+    { accessorKey: 'action', header: '动作', cell: (info) => formatAdminTokenizedText(String(info.getValue() || '')) },
+    { accessorKey: 'target', header: '目标', cell: (info) => formatAdminTokenizedText(String(info.getValue() || '')) },
     {
       accessorKey: 'event_type',
       header: '事件类型',
-      cell: (info) => <StatusPill status={String(info.getValue() || '—')} />,
+      cell: (info) => <StatusPill status="info" label={formatAdminTokenizedText(String(info.getValue() || ''))} />,
     },
     { accessorKey: 'created_at', header: '时间', cell: (info) => formatDate(String(info.getValue())) },
   ], []);
@@ -91,7 +93,7 @@ export function AdminAuditLogsPage() {
               <span>自动刷新</span>
               <select value={autoRefresh ? 'on' : 'off'} onChange={(event) => setAutoRefresh(event.target.value === 'on')}>
                 <option value="on">开启</option>
-                <option value="off">关闭</option>
+                <option value="off">关闭自动刷新</option>
               </select>
             </label>
             <button
@@ -107,7 +109,7 @@ export function AdminAuditLogsPage() {
               disabled={exportMutation.isPending}
               onClick={() => exportMutation.mutate()}
             >
-              {exportMutation.isPending ? '导出中...' : '导出 CSV'}
+              {exportMutation.isPending ? '导出中...' : '导出审计文件'}
             </button>
           </div>
         )}
@@ -126,19 +128,26 @@ export function AdminAuditLogsPage() {
         <div className="admin-toolbar-grid admin-toolbar-grid--audit">
           <label>
             <span>关键字</span>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="操作者 / 动作 / 目标" />
+            <input
+              value={params.q}
+              onChange={(event) => {
+                params.setQ(event.target.value);
+                params.setPage(1);
+              }}
+              placeholder="操作者 / 动作 / 目标"
+            />
           </label>
           <label>
             <span>操作者</span>
-            <input value={actor} onChange={(event) => setActor(event.target.value)} placeholder="例如 admin" />
+            <input value={actor} onChange={(event) => setActor(event.target.value)} placeholder="例如：管理员" />
           </label>
           <label>
             <span>动作</span>
-            <input value={action} onChange={(event) => setAction(event.target.value)} placeholder="例如 login" />
+            <input value={action} onChange={(event) => setAction(event.target.value)} placeholder="例如：登录" />
           </label>
           <label>
             <span>目标</span>
-            <input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="例如 user-1" />
+            <input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="例如：用户编号" />
           </label>
           <label>
             <span>开始日期</span>
@@ -163,6 +172,7 @@ export function AdminAuditLogsPage() {
         data={items}
         emptyMessage="暂无符合条件的审计日志"
         columns={columns}
+        pagination={data ? { ...data, onPageChange: params.setPage } : undefined}
       />
     </div>
   );

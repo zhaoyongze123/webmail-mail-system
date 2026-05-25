@@ -112,7 +112,7 @@ export function buildRoutes(): RouteObject[] {
                 {
                   path: 'rspamd',
                   element: (
-                    <AdminPageShell title="Rspamd 反垃圾" description="查看全局垃圾分阈值，并聚合域级 SPF / DMARC / DKIM 状态。">
+                    <AdminPageShell title="反垃圾策略" description="查看全局垃圾评分阈值，并聚合域级发件授权、域名策略与签名状态。">
                       <AdminRspamdPage />
                     </AdminPageShell>
                   ),
@@ -120,7 +120,7 @@ export function buildRoutes(): RouteObject[] {
                 {
                   path: 'tls',
                   element: (
-                    <AdminPageShell title="TLS 与证书" description="查看当前证书状态，并触发 Let’s Encrypt 续签。">
+                    <AdminPageShell title="传输加密与证书" description="查看当前证书状态，并触发证书续签。">
                       <AdminTlsPage />
                     </AdminPageShell>
                   ),
@@ -128,7 +128,7 @@ export function buildRoutes(): RouteObject[] {
                 {
                   path: 'queue',
                   element: (
-                    <AdminPageShell title="邮件队列" description="查看 Postfix 队列并执行 flush / 删除操作。">
+                    <AdminPageShell title="邮件队列" description="查看当前邮件队列，并执行立即投递或删除操作。">
                       <AdminQueuePage />
                     </AdminPageShell>
                   ),
@@ -152,7 +152,7 @@ export function buildRoutes(): RouteObject[] {
                 {
                   path: 'security',
                   element: (
-                    <AdminPageShell title="安全设置" description="修改管理员密码，并管理 TOTP 二次验证入口。">
+                    <AdminPageShell title="安全设置" description="修改管理员密码，并管理动态口令二次验证入口。">
                       <AdminSecurityPage />
                     </AdminPageShell>
                   ),

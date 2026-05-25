@@ -65,7 +65,7 @@ export function AdminSecurityPage() {
     onSuccess: async () => {
       passwordForm.reset();
       setError(null);
-      setMessage('密码已更新。当前登录态保留，建议完成 TOTP 配置后重新确认登录。');
+      setMessage('密码已更新。当前登录态保留，建议完成动态口令配置后重新确认登录。');
     },
     onError: (err) => {
       setMessage(null);
@@ -79,12 +79,12 @@ export function AdminSecurityPage() {
       setTotpSecret(payload.secret);
       setProvisioningUri(payload.provisioning_uri);
       setTotpEnabled(payload.enabled);
-      setMessage('TOTP 已初始化，请用验证器扫描二维码链接或手动输入密钥后完成启用。');
+      setMessage('动态口令已初始化，请用验证器扫描二维码链接或手动输入密钥后完成启用。');
       setError(null);
     },
     onError: (err) => {
       setMessage(null);
-      setError((err as Error).message || 'TOTP 初始化失败');
+      setError((err as Error).message || '动态口令初始化失败');
     },
   });
 
@@ -93,12 +93,12 @@ export function AdminSecurityPage() {
     onSuccess: (payload) => {
       totpForm.reset();
       setTotpEnabled(payload.enabled);
-      setMessage('TOTP 已启用。');
+      setMessage('动态口令已启用。');
       setError(null);
     },
     onError: (err) => {
       setMessage(null);
-      setError((err as Error).message || 'TOTP 启用失败');
+      setError((err as Error).message || '动态口令启用失败');
     },
   });
 
@@ -109,12 +109,12 @@ export function AdminSecurityPage() {
       setDisableCode('');
       setDisableDialogOpen(false);
       setTotpEnabled(!payload.enabled ? false : payload.enabled);
-      setMessage('TOTP 已停用。');
+      setMessage('动态口令已停用。');
       setError(null);
     },
     onError: (err) => {
       setMessage(null);
-      setError((err as Error).message || 'TOTP 停用失败');
+      setError((err as Error).message || '动态口令停用失败');
     },
   });
 
@@ -140,7 +140,7 @@ export function AdminSecurityPage() {
         <div className="admin-form-card__header">
           <div>
             <h2>修改密码</h2>
-            <p>调用 `/api/admin/auth/change-password`。提交后不会自动注销当前会话。</p>
+            <p>提交后不会自动注销当前会话。</p>
           </div>
           <span className={`admin-status-pill ${changePasswordMutation.isPending ? 'is-working' : 'is-idle'}`}>
             {changePasswordMutation.isPending ? '提交中' : '可操作'}
@@ -174,8 +174,8 @@ export function AdminSecurityPage() {
       <section className="admin-form-card">
         <div className="admin-form-card__header">
           <div>
-            <h2>TOTP 管理</h2>
-            <p>先初始化，再用验证码启用或停用。调用 `/api/admin/auth/totp/setup`、`/enable`、`/disable`。</p>
+            <h2>动态口令管理</h2>
+            <p>先初始化，再用验证码启用或停用。</p>
           </div>
           <span className={`admin-status-pill ${totpEnabled ? 'is-success' : 'is-warning'}`}>
             {totpEnabled ? '已启用' : '未启用'}
@@ -186,8 +186,8 @@ export function AdminSecurityPage() {
             <strong>初始化状态</strong>
             <p>当前密钥：{totpSecret ? '已生成' : '未生成'}</p>
             <p>配置标识：{provisioningLabel}</p>
-            {totpSecret ? <p className="admin-mono">Secret: {totpSecret}</p> : null}
-            {provisioningUri ? <p className="admin-mono">URI: {provisioningUri}</p> : null}
+            {totpSecret ? <p className="admin-mono">密钥：{totpSecret}</p> : null}
+            {provisioningUri ? <p className="admin-mono">配置链接：{provisioningUri}</p> : null}
           </div>
           <div className="admin-inline-actions">
             <button
@@ -196,7 +196,7 @@ export function AdminSecurityPage() {
               onClick={() => totpSetupMutation.mutate()}
               disabled={totpSetupMutation.isPending}
             >
-              {totpSetupMutation.isPending ? '初始化中...' : '初始化 TOTP'}
+              {totpSetupMutation.isPending ? '初始化中...' : '初始化动态口令'}
             </button>
           </div>
           <form className="admin-form-grid" onSubmit={submitTotp}>
@@ -207,7 +207,7 @@ export function AdminSecurityPage() {
             </label>
             <div className="admin-inline-actions">
               <button type="submit" className="admin-button admin-button-primary" disabled={totpEnableMutation.isPending}>
-                {totpEnableMutation.isPending ? '提交中...' : '启用 TOTP'}
+                {totpEnableMutation.isPending ? '提交中...' : '启用动态口令'}
               </button>
               <button
                 type="button"
@@ -220,7 +220,7 @@ export function AdminSecurityPage() {
                   setError(null);
                 }}
               >
-                {totpDisableMutation.isPending ? '停用中...' : '停用 TOTP'}
+                {totpDisableMutation.isPending ? '停用中...' : '停用动态口令'}
               </button>
             </div>
           </form>
@@ -229,8 +229,8 @@ export function AdminSecurityPage() {
 
       <AdminDialog
         open={disableDialogOpen}
-        title="确认停用 TOTP"
-        description="请输入当前验证器生成的 6 位验证码。校验通过后会立即停用当前管理员账号的 TOTP。"
+        title="确认停用动态口令"
+        description="请输入当前验证器生成的 6 位验证码。校验通过后会立即停用当前管理员账号的动态口令。"
         onClose={() => {
           if (totpDisableMutation.isPending) return;
           setDisableDialogOpen(false);
@@ -257,7 +257,7 @@ export function AdminSecurityPage() {
                 const normalizedCode = disableCode.trim();
                 if (normalizedCode.length < 6) {
                   setMessage(null);
-                  setError('请输入 6 位验证码后再停用 TOTP');
+                  setError('请输入 6 位验证码后再停用动态口令');
                   return;
                 }
                 totpDisableMutation.mutate({ code: normalizedCode });

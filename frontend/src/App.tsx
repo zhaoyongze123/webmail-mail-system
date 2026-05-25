@@ -28,6 +28,7 @@ import ComposePanel, { type ComposeValues } from './mail/ComposePanel';
 import { readComposeDraftCache } from './mail/composeDraftCache';
 import SignatureSettings from './mail/SignatureSettings';
 import { MessageBodyView, sanitizeMessageHtml } from './mail/MessageReader';
+import { USER_LOCALE_STORAGE_KEY, setRuntimeLocale } from './i18n/runtime';
 import type {
   AuthCredentials,
   ContactItem,
@@ -39,6 +40,241 @@ import type {
   UserSettingsPreferences,
   MessageAttachment,
 } from './mail/types';
+
+type AttachmentPreviewState = {
+  open: boolean;
+  name: string;
+  url: string;
+  contentType: string;
+};
+
+function AppIcon({
+  title,
+  children,
+  onClick,
+  disabled,
+  className = '',
+}: {
+  title: string;
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`icon-button ${className}`.trim()}
+      onClick={onClick}
+      aria-label={title}
+      data-tooltip={title}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
+function AttachmentKindIcon({ contentType, filename }: { contentType: string; filename: string }) {
+  const lower = `${contentType} ${filename}`.toLowerCase();
+  if (lower.includes('pdf')) {
+    return <span className="attachment-kind attachment-kind--pdf">PDF</span>;
+  }
+  if (lower.includes('image') || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lower)) {
+    return <span className="attachment-kind attachment-kind--image">IMG</span>;
+  }
+  if (lower.includes('sheet') || lower.includes('.xls') || lower.includes('.csv')) {
+    return <span className="attachment-kind attachment-kind--sheet">XLS</span>;
+  }
+  if (lower.includes('word') || lower.includes('.doc')) {
+    return <span className="attachment-kind attachment-kind--doc">DOC</span>;
+  }
+  if (lower.includes('text') || /\.(txt|md|json|csv)$/.test(lower)) {
+    return <span className="attachment-kind attachment-kind--text">TXT</span>;
+  }
+  return <span className="attachment-kind attachment-kind--file">FILE</span>;
+}
+
+function canPreviewAttachment(attachment: MessageAttachment) {
+  const lowerType = String(attachment.content_type || '').toLowerCase();
+  const lowerName = String(attachment.filename || '').toLowerCase();
+  return (
+    lowerType.startsWith('image/') ||
+    lowerType === 'application/pdf' ||
+    lowerType.startsWith('text/') ||
+    /\.(png|jpe?g|gif|webp|bmp|svg|pdf|txt|md|json)$/i.test(lowerName)
+  );
+}
+
+function attachmentPreviewKind(attachment: MessageAttachment) {
+  const lowerType = String(attachment.content_type || '').toLowerCase();
+  const lowerName = String(attachment.filename || '').toLowerCase();
+  if (lowerType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(lowerName)) {
+    return 'image';
+  }
+  if (lowerType === 'application/pdf' || /\.pdf$/i.test(lowerName)) {
+    return 'pdf';
+  }
+  if (lowerType.startsWith('text/') || /\.(txt|md|json)$/i.test(lowerName)) {
+    return 'text';
+  }
+  return 'file';
+}
+
+function renderFolderIcon(folder: MailFolder) {
+  const folderType = String(folder.type || '').toLowerCase();
+  const normalizedName = String(folder.display_name || folder.name || '').toLowerCase();
+
+  if (folderType === 'inbox' || normalizedName.includes('收件') || normalizedName.includes('inbox')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="M4 5h16v11H4z"></path>
+        <path d="M4 13h4l2 3h4l2-3h4"></path>
+      </svg>
+    );
+  }
+  if (folderType === 'sent' || normalizedName.includes('已发') || normalizedName.includes('sent')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+        <path d="M3 11.5 21 4l-5.6 16-4.2-5-4.3 3 .9-5.8z"></path>
+      </svg>
+    );
+  }
+  if (folderType === 'drafts' || normalizedName.includes('草稿') || normalizedName.includes('draft')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="M7 3h7l5 5v13H7z"></path>
+        <path d="M14 3v6h6"></path>
+      </svg>
+    );
+  }
+  if (folderType === 'spam' || normalizedName.includes('垃圾') || normalizedName.includes('spam')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="M12 3 4 7v6c0 5 3.4 7.7 8 8 4.6-.3 8-3 8-8V7z"></path>
+        <path d="M9 9h6"></path>
+      </svg>
+    );
+  }
+  if (folderType === 'trash' || normalizedName.includes('回收') || normalizedName.includes('已删除') || normalizedName.includes('trash')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="M3 6h18"></path>
+        <path d="M8 6V4h8v2"></path>
+        <path d="M19 6l-1 14H6L5 6"></path>
+        <path d="M10 11v6"></path>
+        <path d="M14 11v6"></path>
+      </svg>
+    );
+  }
+  if (folderType === 'archive' || normalizedName.includes('归档') || normalizedName.includes('archive')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="M4 5h16v4H4z"></path>
+        <path d="M5 9h14v10H5z"></path>
+        <path d="M10 13h4"></path>
+      </svg>
+    );
+  }
+  if (normalizedName.includes('星标') || normalizedName.includes('star')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.8 1-6.1L3.2 9.4l6.1-.9z"></path>
+      </svg>
+    );
+  }
+  if (normalizedName.includes('延后') || normalizedName.includes('稍后')) {
+    return (
+      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M12 7v5l3 2"></path>
+      </svg>
+    );
+  }
+  return (
+    <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+    </svg>
+  );
+}
+
+function folderTooltipLabel(folder: MailFolder) {
+  const label = folder.display_name || folder.name;
+  if (folder.unread_count > 0) {
+    return `${label} · 未读 ${folder.unread_count} 封`;
+  }
+  if (folder.total_count > 0) {
+    return `${label} · 共 ${folder.total_count} 封`;
+  }
+  return label;
+}
+
+type SidebarFolderGroup = {
+  primaryFolders: MailFolder[];
+  secondaryFolders: MailFolder[];
+  labelFolders: MailFolder[];
+};
+
+function getFolderPriority(folder: MailFolder) {
+  const folderType = String(folder.type || '').toLowerCase();
+  const label = String(folder.display_name || folder.name || '').toLowerCase();
+  if (folderType === 'inbox' || label.includes('收件') || label.includes('inbox')) return 1;
+  if (label.includes('星标') || label.includes('star')) return 2;
+  if (label.includes('延后') || label.includes('稍后') || label.includes('snooze')) return 3;
+  if (folderType === 'sent' || label.includes('已发') || label.includes('sent')) return 4;
+  if (folderType === 'drafts' || label.includes('草稿') || label.includes('draft')) return 5;
+  if (label.includes('购物') || label.includes('shopping')) return 6;
+  if (folderType === 'spam' || label.includes('垃圾') || label.includes('spam')) return 7;
+  if (folderType === 'trash' || label.includes('回收') || label.includes('已删除') || label.includes('trash')) return 8;
+  if (folderType === 'archive' || label.includes('归档') || label.includes('archive')) return 9;
+  return 99;
+}
+
+function isLabelFolder(folder: MailFolder) {
+  const folderType = String(folder.type || '').toLowerCase();
+  const canonical = String(folder.canonical_name || '').toLowerCase();
+  const rawName = String(folder.name || '').toLowerCase();
+  const displayName = String(folder.display_name || '').toLowerCase();
+  if (rawName.startsWith('[imap]') || displayName.startsWith('[imap]')) {
+    return true;
+  }
+  if (folderType === 'custom') {
+    return true;
+  }
+  if (canonical.startsWith('[imap]')) {
+    return true;
+  }
+  return getFolderPriority(folder) === 99;
+}
+
+function groupSidebarFolders(folders: MailFolder[]): SidebarFolderGroup {
+  const sorted = [...folders].sort((left, right) => {
+    const leftPriority = getFolderPriority(left);
+    const rightPriority = getFolderPriority(right);
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+    return (left.display_name || left.name).localeCompare((right.display_name || right.name), 'zh-CN');
+  });
+
+  const primaryFolders: MailFolder[] = [];
+  const secondaryFolders: MailFolder[] = [];
+  const labelFolders: MailFolder[] = [];
+
+  sorted.forEach((folder) => {
+    if (isLabelFolder(folder)) {
+      labelFolders.push(folder);
+      return;
+    }
+    if (getFolderPriority(folder) <= 6) {
+      primaryFolders.push(folder);
+      return;
+    }
+    secondaryFolders.push(folder);
+  });
+
+  return { primaryFolders, secondaryFolders, labelFolders };
+}
 
 export default function App() {
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -80,6 +316,8 @@ export default function App() {
   const [showFolderManager, setShowFolderManager] = useState(false);
   const [showSignatures, setShowSignatures] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
+  const [showMoreFolders, setShowMoreFolders] = useState(false);
+  const [showLabelFolders, setShowLabelFolders] = useState(true);
   const [contacts, setContacts] = useState<ContactItem[]>([]);
   const [contactQuery, setContactQuery] = useState('');
   const [contactPage, setContactPage] = useState(1);
@@ -122,6 +360,7 @@ export default function App() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [activeSettingsSection, setActiveSettingsSection] = useState<'general' | 'appearance' | 'security' | 'account'>('general');
   const [accountEmail, setAccountEmail] = useState('user@localhost');
   const [hasAccountContext, setHasAccountContext] = useState(false);
   const [isInitialDataReady, setIsInitialDataReady] = useState(false);
@@ -131,7 +370,13 @@ export default function App() {
   const [composeInitialValues, setComposeInitialValues] = useState<ComposeValues | null>(null);
   const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: MailMessageSummary } | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
+  const [hoveredMessageUid, setHoveredMessageUid] = useState<string | null>(null);
   const suppressAutoMarkReadRef = useRef<string | null>(null);
+  const generalSettingsRef = useRef<HTMLElement | null>(null);
+  const appearanceSettingsRef = useRef<HTMLElement | null>(null);
+  const securitySettingsRef = useRef<HTMLFormElement | null>(null);
+  const accountSettingsRef = useRef<HTMLElement | null>(null);
 
   const normalizePreferences = (value: Partial<UserSettingsPreferences> | null | undefined): UserSettingsPreferences => ({
     system: {
@@ -160,6 +405,17 @@ export default function App() {
         ...nextSystem,
       },
     }));
+  };
+
+  const focusSettingsSection = (section: 'general' | 'appearance' | 'security' | 'account') => {
+    setActiveSettingsSection(section);
+    const refMap = {
+      general: generalSettingsRef,
+      appearance: appearanceSettingsRef,
+      security: securitySettingsRef,
+      account: accountSettingsRef,
+    } as const;
+    refMap[section].current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const applyFolders = (nextFolders: MailFolder[]) => {
@@ -216,6 +472,11 @@ export default function App() {
   };
 
   const attachmentId = (attachment: MessageAttachment) => attachment.attachment_id || attachment.id || '';
+  const folderGroups = useMemo(() => groupSidebarFolders(folders), [folders]);
+  const attachmentPreviewUrl = (folder: string, uid: string, attachment: MessageAttachment) => {
+    const id = attachmentId(attachment);
+    return id ? buildAttachmentUrl(folder, uid, id) : '';
+  };
 
   const formatSize = (value?: number | null) => {
     if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -228,6 +489,18 @@ export default function App() {
       return `${(value / 1024).toFixed(1)} KB`;
     }
     return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const openAttachmentPreview = (attachment: MessageAttachment) => {
+    if (!selectedMessage) return;
+    const url = attachmentPreviewUrl(currentFolder, selectedMessage.uid, attachment);
+    if (!url) return;
+    setAttachmentPreview({
+      open: true,
+      name: attachment.filename || '未命名附件',
+      url,
+      contentType: attachment.content_type || '',
+    });
   };
 
   const contactStorageKey = (scope: string) => `webmail-contacts:${scope.trim().toLowerCase() || 'default'}`;
@@ -350,6 +623,12 @@ export default function App() {
     };
   }, [preferences.theme.mode]);
 
+  useEffect(() => {
+    const locale = preferences.system.language || 'zh-CN';
+    window.localStorage.setItem(USER_LOCALE_STORAGE_KEY, locale);
+    setRuntimeLocale(locale);
+  }, [preferences.system.language]);
+
   // Load Folders & Settings
   useEffect(() => {
     let cancelled = false;
@@ -449,6 +728,34 @@ export default function App() {
     activeSearch.dateTo,
     activeSearch.hasAttachments,
   ]);
+
+  const handleFolderClick = (folderName: string) => {
+    setSelectedMessage(null);
+    setSelectedMessageUids([]);
+    setMessageBody({ html: null, text: '', attachments: [] });
+
+    if (folderName === currentFolder) {
+      void loadMessages({ refresh: true, resetSelection: false });
+      return;
+    }
+
+    setMessagePage(1);
+    setCurrentFolder(folderName);
+    setSearchDraft({
+      query: '',
+      sender: '',
+      dateFrom: '',
+      dateTo: '',
+      hasAttachments: false,
+    });
+    setActiveSearch({
+      query: '',
+      sender: '',
+      dateFrom: '',
+      dateTo: '',
+      hasAttachments: false,
+    });
+  };
 
   // Load specific message details when selected
   useEffect(() => {
@@ -759,6 +1066,39 @@ export default function App() {
     }
   };
 
+  const handleMessageRowAction = async (
+    message: MailMessageSummary,
+    action: MessageOperationAction | 'hard_delete',
+  ) => {
+    try {
+      if (action === 'hard_delete') {
+        await deleteMessages(currentFolder, [message.uid]);
+      } else {
+        await updateMessageOperation(currentFolder, { action, uids: [message.uid] });
+      }
+
+      if (action === 'mark_read' || action === 'mark_unread') {
+        const nextRead = action === 'mark_read';
+        suppressAutoMarkReadRef.current = action === 'mark_unread' ? message.uid : null;
+        setMessages((current) => current.map((item) => (
+          item.uid === message.uid ? { ...item, read: nextRead } : item
+        )));
+        setSelectedMessage((current) => (
+          current?.uid === message.uid ? { ...current, read: nextRead } : current
+        ));
+      } else {
+        setMessages((current) => current.filter((item) => item.uid !== message.uid));
+        setMessageTotal((current) => Math.max(0, current - 1));
+        setSelectedMessage((current) => (current?.uid === message.uid ? null : current));
+        setSelectedMessageUids((current) => current.filter((uid) => uid !== message.uid));
+      }
+
+      await refreshFolders();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
   const handleMove = async (targetFolder: string) => {
     if (!selectedMessage || !targetFolder) return;
     try {
@@ -910,7 +1250,7 @@ export default function App() {
         current_password: passwordForm.current_password,
         new_password: passwordForm.new_password,
       });
-      setPasswordSuccess('密码已更新，并已通过新密码完成 IMAP 验证。');
+      setPasswordSuccess('密码已更新，并已通过新密码完成收信服务登录验证。');
       setPasswordForm({ current_password: '', new_password: '', confirm_password: '' });
     } catch (error) {
       setPasswordError((error as Error).message || '修改密码失败');
@@ -982,7 +1322,7 @@ export default function App() {
   };
 
   const buildReplyQuote = (message: MailMessageSummary, body: { html: string | null; text: string }): ComposeValues => {
-    const subject = message.subject?.startsWith('Re:') ? message.subject : `Re: ${message.subject || '(无主题)'}`;
+    const subject = message.subject?.startsWith('回复：') ? message.subject : `回复：${message.subject || '(无主题)'}`;
     const meta = buildReplyQuoteMeta(message, body);
     const quoteBlockText = `---- 原始邮件 ----\n${meta.metaText}\n\n${body.text}`;
     const quoteBlockHtml = `<blockquote>${meta.metaHtml}<div>${meta.quoteBodyHtml}</div></blockquote>`;
@@ -1180,6 +1520,10 @@ export default function App() {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
+          <div className="mail-brandmark">
+            <span className="mail-brandmark__title">WebMail</span>
+            <span className="mail-brandmark__subtitle">邮件工作台</span>
+          </div>
           <div className="account-info">
             <div className="account-avatar">
               {preferences.user.avatar_url ? (
@@ -1189,7 +1533,7 @@ export default function App() {
               )}
             </div>
             <div className="account-text">
-              <span className="account-name">{preferences.user.display_name || 'User'}</span>
+              <span className="account-name">{preferences.user.display_name || '未命名用户'}</span>
               {preferences.user.profile_title ? <span className="account-title">{preferences.user.profile_title}</span> : null}
               <span className="account-email">{accountEmail}</span>
             </div>
@@ -1205,191 +1549,260 @@ export default function App() {
           </button>
         </div>
 
-        <form className="search-box search-panel" onSubmit={doSearch}>
-          <label className="search-field">
-            <span className="search-field__label">关键词</span>
-            <div className="search-input-wrapper">
-              <svg className="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="11" cy="11" r="8"></circle>
-                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-              </svg>
-              <input
-                type="search"
-                className="search-input"
-                placeholder="搜索邮件..."
-                value={searchDraft.query}
-                onChange={(event) => setSearchDraft((current) => ({ ...current, query: event.target.value }))}
-              />
-              {searchDraft.query || searchDraft.sender || searchDraft.dateFrom || searchDraft.dateTo || searchDraft.hasAttachments ? (
-                <button
-                  type="button"
-                  onClick={handleClearSearch}
-                  className="search-input__clear"
-                  aria-label="清除搜索条件"
-                >
-                  ×
-                </button>
-              ) : null}
-            </div>
-          </label>
-          <div className="search-actions">
-            <button type="submit" className="search-action search-action--primary">搜索</button>
-            <button
-              type="button"
-              className="search-action"
-              onClick={() => setShowSearchFilters((current) => !current)}
-              aria-expanded={showSearchFilters}
-            >
-              {showSearchFilters ? '收起筛选' : '展开筛选'}
-            </button>
-            <button type="button" className="search-action" onClick={handleClearSearch}>清除</button>
-          </div>
-          {showSearchFilters ? (
-            <div className="search-filters-panel">
-              <label className="search-field">
-                <span className="search-field__label">发件人</span>
-                <input
-                  type="text"
-                  className="search-field__input"
-                  value={searchDraft.sender}
-                  onChange={(event) => setSearchDraft((current) => ({ ...current, sender: event.target.value }))}
-                  placeholder="姓名或邮箱"
-                />
-              </label>
-              <div className="search-grid">
-                <label className="search-field">
-                  <span className="search-field__label">开始日期</span>
-                  <input
-                    type="date"
-                    className="search-field__input"
-                    value={searchDraft.dateFrom}
-                    onChange={(event) => setSearchDraft((current) => ({ ...current, dateFrom: event.target.value }))}
-                  />
-                </label>
-                <label className="search-field">
-                  <span className="search-field__label">结束日期</span>
-                  <input
-                    type="date"
-                    className="search-field__input"
-                    value={searchDraft.dateTo}
-                    onChange={(event) => setSearchDraft((current) => ({ ...current, dateTo: event.target.value }))}
-                  />
-                </label>
-              </div>
-              <label className="search-toggle">
-                <input
-                  type="checkbox"
-                  checked={searchDraft.hasAttachments}
-                  onChange={(event) => setSearchDraft((current) => ({ ...current, hasAttachments: event.target.checked }))}
-                />
-                <span>仅看有附件</span>
-              </label>
-            </div>
-          ) : null}
-        </form>
-
         <div className="nav-section">
           <div className="nav-group">
             <div className="nav-title">文件夹</div>
             <ul>
-              {folders.map(folder => (
+              {folderGroups.primaryFolders.map(folder => (
                 <li
                   key={folder.name}
                   className={`nav-item ${currentFolder === folder.name ? 'active' : ''}`}
-                  onClick={() => {
-                    setSelectedMessage(null);
-                    setSelectedMessageUids([]);
-                    setMessageBody({ html: null, text: '', attachments: [] });
-                    setMessagePage(1);
-                    setCurrentFolder(folder.name);
-                    setSearchDraft({
-                      query: '',
-                      sender: '',
-                      dateFrom: '',
-                      dateTo: '',
-                      hasAttachments: false,
-                    });
-                    setActiveSearch({
-                      query: '',
-                      sender: '',
-                      dateFrom: '',
-                      dateTo: '',
-                      hasAttachments: false,
-                    });
-                  }}
+                  onClick={() => handleFolderClick(folder.name)}
+                  title={folderTooltipLabel(folder)}
+                  aria-label={folderTooltipLabel(folder)}
                 >
                   <div className="nav-item-left">
-                    <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                    </svg>
-                    <span>{folder.display_name || folder.name}</span>
+                    <span className="nav-icon-wrap">
+                      {renderFolderIcon(folder)}
+                    </span>
+                    <span
+                      className="nav-item-label"
+                      data-tooltip={folderTooltipLabel(folder)}
+                    >
+                      {folder.display_name || folder.name}
+                    </span>
                   </div>
                   {folder.unread_count > 0 && <span className="badge">{folder.unread_count}</span>}
                 </li>
               ))}
             </ul>
+            {folderGroups.secondaryFolders.length ? (
+              <>
+                <button
+                  type="button"
+                  className={`nav-item nav-item-toggle ${showMoreFolders ? 'active' : ''}`}
+                  onClick={() => setShowMoreFolders((current) => !current)}
+                  aria-expanded={showMoreFolders}
+                  aria-label={showMoreFolders ? '收起更多文件夹' : '显示更多文件夹'}
+                >
+                  <div className="nav-item-left">
+                    <span className={`nav-icon-wrap nav-chevron${showMoreFolders ? ' is-open' : ''}`}>
+                      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="m6 9 6 6 6-6"></path>
+                      </svg>
+                    </span>
+                    <span className="nav-item-label" data-tooltip={showMoreFolders ? '收起更多文件夹' : '显示更多文件夹'}>
+                      {showMoreFolders ? '收起更多文件夹' : '显示更多文件夹'}
+                    </span>
+                  </div>
+                </button>
+                {showMoreFolders ? (
+                  <ul className="nav-sublist">
+                    {folderGroups.secondaryFolders.map((folder) => (
+                      <li
+                        key={folder.name}
+                        className={`nav-item ${currentFolder === folder.name ? 'active' : ''}`}
+                        onClick={() => handleFolderClick(folder.name)}
+                        title={folderTooltipLabel(folder)}
+                        aria-label={folderTooltipLabel(folder)}
+                      >
+                        <div className="nav-item-left">
+                          <span className="nav-icon-wrap">
+                            {renderFolderIcon(folder)}
+                          </span>
+                          <span className="nav-item-label" data-tooltip={folderTooltipLabel(folder)}>
+                            {folder.display_name || folder.name}
+                          </span>
+                        </div>
+                        {folder.unread_count > 0 && <span className="badge">{folder.unread_count}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+          <div className="nav-group nav-group--labels">
+            <div className="nav-label-header">
+              <button
+                type="button"
+                className="nav-label-toggle"
+                onClick={() => setShowLabelFolders((current) => !current)}
+                aria-expanded={showLabelFolders}
+                aria-label={showLabelFolders ? '收起标签' : '展开标签'}
+              >
+                <span>标签</span>
+              </button>
+              <button
+                type="button"
+                className="nav-label-create"
+                onClick={openFolderManager}
+                aria-label="新建标签"
+                data-tooltip="新建标签"
+              >
+                +
+              </button>
+            </div>
+            {showLabelFolders ? (
+              <ul className="nav-sublist nav-sublist--labels">
+                {folderGroups.labelFolders.map((folder) => (
+                  <li
+                    key={folder.name}
+                    className={`nav-item nav-item-label-folder ${currentFolder === folder.name ? 'active' : ''}`}
+                    onClick={() => handleFolderClick(folder.name)}
+                    title={folderTooltipLabel(folder)}
+                    aria-label={folderTooltipLabel(folder)}
+                  >
+                    <div className="nav-item-left">
+                      <span className="nav-icon-wrap">
+                        <svg className="nav-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+                          <path d="M10.5 3H20a1 1 0 0 1 1 1v7.4a2 2 0 0 1-.59 1.41l-6.59 6.59a2 2 0 0 1-2.82 0L3.59 12a2 2 0 0 1 0-2.82l5.5-5.59A2 2 0 0 1 10.5 3Z"></path>
+                        </svg>
+                      </span>
+                      <span className="nav-item-label" data-tooltip={folderTooltipLabel(folder)}>
+                        {folder.display_name || folder.name}
+                      </span>
+                    </div>
+                    {folder.unread_count > 0 && <span className="badge">{folder.unread_count}</span>}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         </div>
 
-        <div className="sidebar-footer">
-          <button type="button" className="footer-item footer-button" onClick={openContacts} aria-label="打开联系人">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
-              <circle cx="9" cy="7" r="4"></circle>
-              <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-            </svg>
-            联系人
-          </button>
-          <button type="button" className="footer-item footer-button" onClick={openFolderManager} aria-label="管理文件夹">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 7h6l2 2h10v10H3z"></path>
-            </svg>
-            文件夹管理
-          </button>
-          <button
-            type="button"
-            className="footer-item footer-button"
-            onClick={() => {
-              setPasswordError(null);
-              setPasswordSuccess(null);
-              setSettingsError(null);
-              setPasswordForm({ current_password: '', new_password: '', confirm_password: '' });
-              setShowSettings(true);
-            }}
-            aria-label="打开设置"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-            设置
-          </button>
-          <button type="button" className="footer-item footer-button" onClick={() => setShowSignatures(true)}>
-            签名设置
-          </button>
-          <div className="footer-item" onClick={handleLogout}>退出登录</div>
-        </div>
       </aside>
 
       {/* Main Content */}
       <main className="main-content">
         <header className="topbar">
           <div className="topbar-left">
-            <div className="topbar-title">
-              {folders.find(f => f.name === currentFolder)?.display_name || currentFolder}
-              {activeSearch.query.trim() && (
-                <span style={{fontSize: '14px', color: '#666', fontWeight: 400, marginLeft: '12px'}}>
-                  搜索: {activeSearch.query.trim()}
-                  {activeSearchSummary ? ` · ${activeSearchSummary}` : ''}
-                </span>
-              )}
-            </div>
+            <form className="gmail-searchbar" onSubmit={doSearch}>
+              <svg className="gmail-searchbar__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="7"></circle>
+                <path d="m20 20-3.5-3.5"></path>
+              </svg>
+              <input
+                type="search"
+                className="gmail-searchbar__input"
+                placeholder="搜索邮件..."
+                value={searchDraft.query}
+                onChange={(event) => setSearchDraft((current) => ({ ...current, query: event.target.value }))}
+                aria-label="搜索邮件"
+              />
+              {(searchDraft.query || searchDraft.sender || searchDraft.dateFrom || searchDraft.dateTo || searchDraft.hasAttachments) ? (
+                <button
+                  type="button"
+                  className="gmail-searchbar__clear"
+                  onClick={handleClearSearch}
+                  aria-label="清除搜索条件"
+                  title="清除搜索条件"
+                >
+                  ×
+                </button>
+              ) : null}
+              <AppIcon
+                title={showSearchFilters ? '收起筛选' : '展开筛选'}
+                className="gmail-searchbar__filter"
+                onClick={() => setShowSearchFilters((current) => !current)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M4 6h16"></path>
+                  <path d="M7 12h10"></path>
+                  <path d="M10 18h4"></path>
+                </svg>
+              </AppIcon>
+            </form>
           </div>
           <div className="topbar-right">
-             <button className="action-btn" onClick={() => loadMessages({ refresh: true })}>刷新列表</button>
+            <AppIcon title="刷新列表" onClick={() => loadMessages({ refresh: true })}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 2v6h-6"></path>
+                <path d="M3 11a9 9 0 0 1 15.5-5L21 8"></path>
+                <path d="M3 22v-6h6"></path>
+                <path d="M21 13a9 9 0 0 1-15.5 5L3 16"></path>
+              </svg>
+            </AppIcon>
+            <AppIcon title="打开联系人" onClick={openContacts}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M17 11v6"></path>
+                <path d="M20 14h-6"></path>
+                <path d="M3 21a6 6 0 0 1 12 0"></path>
+              </svg>
+            </AppIcon>
+            <AppIcon title="管理文件夹" onClick={openFolderManager}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3.75 7.5a2.25 2.25 0 0 1 2.25-2.25h3.7c.6 0 1.17.24 1.6.66l1.04 1.09h5.67a2.25 2.25 0 0 1 2.25 2.25v6.75a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 16Z"></path>
+                <path d="M3.75 9.75h16.5"></path>
+              </svg>
+            </AppIcon>
+            <AppIcon title="打开设置" onClick={() => setShowSettings(true)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="2.8"></circle>
+                <path d="M12 3.75v1.5"></path>
+                <path d="M12 18.75v1.5"></path>
+                <path d="m18.54 5.46-1.06 1.06"></path>
+                <path d="m6.52 17.48-1.06 1.06"></path>
+                <path d="M20.25 12h-1.5"></path>
+                <path d="M5.25 12h-1.5"></path>
+                <path d="m18.54 18.54-1.06-1.06"></path>
+                <path d="m6.52 6.52-1.06-1.06"></path>
+                <path d="M14.86 4.64 14.4 6.03"></path>
+                <path d="M9.6 17.97 9.14 19.36"></path>
+                <path d="m19.36 14.86-1.39-.46"></path>
+                <path d="m6.03 9.6-1.39-.46"></path>
+                <path d="m19.36 9.14-1.39.46"></path>
+                <path d="m6.03 14.4-1.39.46"></path>
+                <path d="m14.86 19.36-.46-1.39"></path>
+                <path d="m9.6 6.03-.46-1.39"></path>
+              </svg>
+            </AppIcon>
           </div>
         </header>
+        {showSearchFilters ? (
+          <section className="gmail-search-filters" aria-label="搜索筛选">
+            <label className="search-field">
+              <span className="search-field__label">发件人</span>
+              <input
+                type="text"
+                className="search-field__input"
+                value={searchDraft.sender}
+                onChange={(event) => setSearchDraft((current) => ({ ...current, sender: event.target.value }))}
+                placeholder="姓名或邮箱"
+              />
+            </label>
+            <label className="search-field">
+              <span className="search-field__label">开始日期</span>
+              <input
+                type="date"
+                className="search-field__input"
+                value={searchDraft.dateFrom}
+                onChange={(event) => setSearchDraft((current) => ({ ...current, dateFrom: event.target.value }))}
+              />
+            </label>
+            <label className="search-field">
+              <span className="search-field__label">结束日期</span>
+              <input
+                type="date"
+                className="search-field__input"
+                value={searchDraft.dateTo}
+                onChange={(event) => setSearchDraft((current) => ({ ...current, dateTo: event.target.value }))}
+              />
+            </label>
+            <label className="search-toggle">
+              <input
+                type="checkbox"
+                checked={searchDraft.hasAttachments}
+                onChange={(event) => setSearchDraft((current) => ({ ...current, hasAttachments: event.target.checked }))}
+              />
+              <span>仅看有附件</span>
+            </label>
+            <button type="submit" className="search-action search-action--primary" onClick={(event) => { event.preventDefault(); void doSearch(event as unknown as FormEvent<HTMLFormElement>); }}>
+              应用筛选
+            </button>
+          </section>
+        ) : null}
 
         <div className="content-row">
           {/* Message List */}
@@ -1407,8 +1820,16 @@ export default function App() {
                 </label>
                 <span className="message-list-toolbar__meta">共 {messageTotal} 封</span>
                 <span className="message-list-toolbar__meta">已选 {selectedMessageUids.length} 封</span>
+                {activeSearchSummary ? (
+                  <span className="message-list-toolbar__meta message-list-toolbar__meta--search">
+                    {activeSearchSummary}
+                  </span>
+                ) : null}
               </div>
               <div className="message-pagination">
+                <span className="message-folder-chip">
+                  {folders.find(f => f.name === currentFolder)?.display_name || currentFolder}
+                </span>
                 <button
                   type="button"
                   className="message-pagination__button"
@@ -1461,8 +1882,11 @@ export default function App() {
                 <div
                   key={msg.uid}
                   className="message-row"
-                  style={{ background: selectedMessage?.uid === msg.uid ? '#eaf1fb' : '' }}
+                  data-active={selectedMessage?.uid === msg.uid ? 'true' : 'false'}
+                  data-hovered={hoveredMessageUid === msg.uid ? 'true' : 'false'}
                   onClick={() => setSelectedMessage(msg)}
+                  onMouseEnter={() => setHoveredMessageUid(msg.uid)}
+                  onMouseLeave={() => setHoveredMessageUid((current) => (current === msg.uid ? null : current))}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setContextMenu({ x: event.clientX, y: event.clientY, message: msg });
@@ -1481,8 +1905,62 @@ export default function App() {
                   </label>
                   {!msg.read ? <div className="unread-dot"></div> : <div className="read-dot-placeholder"></div>}
                   <div className="sender-name">{resolveSenderLabel(msg)}</div>
-                  <div className="message-subject">{msg.subject || '(无主题)'}</div>
+                  <div className="message-subject">
+                    {msg.has_attachments ? <span className="message-attachment-pin" title="包含附件">📎</span> : null}
+                    {msg.subject || '(无主题)'}
+                  </div>
                   <div className="message-preview">{msg.snippet}</div>
+                  <div className="message-row-actions" aria-hidden={hoveredMessageUid === msg.uid ? 'false' : 'true'}>
+                    <button
+                      type="button"
+                      className="message-row-action"
+                      aria-label={msg.read ? '邮件行标为未读' : '邮件行标为已读'}
+                      data-tooltip={msg.read ? '标为未读' : '标为已读'}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleMessageRowAction(msg, msg.read ? 'mark_unread' : 'mark_read');
+                      }}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M4 5h16v14H4z"></path>
+                        <path d="m4 7 8 6 8-6"></path>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className="message-row-action"
+                      aria-label="邮件行删除"
+                      data-tooltip="删除"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleMessageRowAction(msg, 'delete');
+                      }}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 6h18"></path>
+                        <path d="M8 6V4h8v2"></path>
+                        <path d="M19 6l-1 14H6L5 6"></path>
+                        <path d="M10 11v6"></path>
+                        <path d="M14 11v6"></path>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className="message-row-action"
+                      aria-label="邮件行彻底删除"
+                      data-tooltip="彻底删除"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleMessageRowAction(msg, 'hard_delete');
+                      }}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="8"></circle>
+                        <path d="m9 9 6 6"></path>
+                        <path d="m15 9-6 6"></path>
+                      </svg>
+                    </button>
+                  </div>
                   <div className="message-time">{formatDate(msg.date)}</div>
                 </div>
               ))
@@ -1490,50 +1968,83 @@ export default function App() {
           </div>
 
           {/* Reading Pane */}
-          {selectedMessage && (
+          {selectedMessage ? (
             <div className="reading-pane">
               <div className="reading-header">
                 <div className="reading-header-top">
+                  <div className="reading-toolbar-group">
+                    <AppIcon title={selectedMessage.read ? '标为未读' : '标为已读'} onClick={() => handleMsgAction(selectedMessage.read ? 'mark_unread' : 'mark_read')}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M4 4h16v16H4z"></path>
+                        <path d="m22 6-10 7L2 6"></path>
+                      </svg>
+                    </AppIcon>
+                    <AppIcon title="删除" onClick={() => handleMsgAction('delete')}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 6h18"></path>
+                        <path d="M8 6V4h8v2"></path>
+                        <path d="M19 6l-1 14H6L5 6"></path>
+                      </svg>
+                    </AppIcon>
+                    <AppIcon title="彻底删除" onClick={() => handleMsgAction('hard_delete')}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="9"></circle>
+                        <path d="m9 9 6 6"></path>
+                        <path d="m15 9-6 6"></path>
+                      </svg>
+                    </AppIcon>
+                    <AppIcon title="回复" onClick={() => openCompose(buildReplyQuote(selectedMessage, messageBody))}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="m9 17-5-5 5-5"></path>
+                        <path d="M20 18v-2a4 4 0 0 0-4-4H4"></path>
+                      </svg>
+                    </AppIcon>
+                    <AppIcon title="转发" onClick={() => openCompose({ subject: `转发：${selectedMessage.subject || '(无主题)'}` })}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="m15 17 5-5-5-5"></path>
+                        <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
+                      </svg>
+                    </AppIcon>
+                  </div>
                   <select
                     title="移动到"
-                    className="minmax-btn"
+                    className="reading-toolbar-select"
                     value=""
                     onChange={e => handleMove(e.target.value)}
-                    style={{ marginRight: '8px' }}
                   >
                     <option value="" disabled>移动到...</option>
                     {folders.filter(f => f.name !== currentFolder).map(f => (
                       <option key={f.name} value={f.name}>{f.display_name}</option>
                     ))}
                   </select>
-                  <button className="minmax-btn" onClick={() => handleMsgAction(selectedMessage.read ? 'mark_unread' : 'mark_read')} title="标记已读/未读">
-                    {selectedMessage.read ? '标为未读' : '标为已读'}
-                  </button>
-                  <button className="minmax-btn" onClick={() => handleMsgAction('delete')} title="移到回收站 (操作)" style={{ marginLeft: '8px' }}>
-                    <span style={{fontSize: '14px', marginRight: '4px'}}>🗑</span> 删除
-                  </button>
-                  <button className="minmax-btn" onClick={() => handleMsgAction('hard_delete')} title="彻底删除" style={{ marginLeft: '8px' }}>
-                    <span style={{fontSize: '14px', marginRight: '4px'}}>⚠</span> 彻底删除
-                  </button>
-                  <button className="minmax-btn" onClick={() => setSelectedMessage(null)} title="关闭" style={{ border: 'none', marginLeft: 'auto' }}>
-                    <span style={{fontSize: '20px'}}>×</span>
-                  </button>
+                  <AppIcon title="关闭阅读区" className="reading-close" onClick={() => setSelectedMessage(null)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="m18 6-12 12"></path>
+                      <path d="m6 6 12 12"></path>
+                    </svg>
+                  </AppIcon>
                 </div>
-                <div className="reading-field">
-                  <div className="field-label">发件人</div>
-                  <div className="field-value">
-                    {resolveSenderLabel(selectedMessage)} <span>&lt;{selectedMessage.sender?.email || '未提供'}&gt;</span>
+                <div className="reading-meta-card">
+                  <div className="reading-avatar">
+                    {(resolveSenderLabel(selectedMessage) || '?').charAt(0).toUpperCase()}
                   </div>
-                </div>
-                {selectedMessage.to?.length ? (
-                  <div className="reading-field">
-                     <div className="field-label">收件人</div>
-                     <div className="field-value">{selectedMessage.to.map(t => t.email).join(', ')}</div>
-                  </div>
-                ) : null}
-                <div className="reading-field" style={{marginTop: '12px', paddingBottom: '12px'}}>
-                  <div className="field-label" style={{color: '#222', fontSize: '18px', fontWeight: 600, width: '100%'}}>
-                    {selectedMessage.subject || '(无主题)'}
+                  <div className="reading-meta-main">
+                    <div className="reading-subject-line">
+                      <h2>{selectedMessage.subject || '(无主题)'}</h2>
+                      <span>{formatDate(selectedMessage.date)}</span>
+                    </div>
+                    <div className="reading-field">
+                      <div className="field-label">发件人</div>
+                      <div className="field-value">
+                        {resolveSenderLabel(selectedMessage)} <span>&lt;{selectedMessage.sender?.email || '未提供'}&gt;</span>
+                      </div>
+                    </div>
+                    {selectedMessage.to?.length ? (
+                      <div className="reading-field">
+                         <div className="field-label">收件人</div>
+                         <div className="field-value">{selectedMessage.to.map(t => t.email).join(', ')}</div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1548,7 +2059,10 @@ export default function App() {
                   textClassName="reading-text-body"
                 />
                 <section className="reading-attachments" aria-label="附件">
-                  <h3>附件</h3>
+                  <div className="reading-attachments__header">
+                    <h3>附件</h3>
+                    <span>{messageBody.attachments.length} 个文件</span>
+                  </div>
                   {messageBody.attachments.length > 0 ? (
                     <ul>
                       {messageBody.attachments.map((attachment) => {
@@ -1556,15 +2070,60 @@ export default function App() {
                         const href = id ? buildAttachmentUrl(currentFolder, selectedMessage.uid, id) : '#';
                         const attachmentType = attachment.content_type || '未知类型';
                         const size = formatSize(attachment.size_bytes ?? attachment.size ?? null);
+                        const previewKind = attachmentPreviewKind(attachment);
+                        const previewable = canPreviewAttachment(attachment);
                         return (
                           <li key={id || attachment.filename}>
-                            <div>
-                              <strong>{attachment.filename || '未命名附件'}</strong>
-                              <span>{attachmentType} · {size}</span>
+                            <div className="reading-attachment-card">
+                              <div className="reading-attachment-card__preview">
+                                {previewable ? (
+                                  previewKind === 'image' ? (
+                                    <img
+                                      src={href}
+                                      alt={attachment.filename || '附件预览'}
+                                      className="reading-attachment-card__preview-media"
+                                    />
+                                  ) : previewKind === 'pdf' ? (
+                                    <iframe
+                                      src={href}
+                                      title={`${attachment.filename || '附件'} 预览`}
+                                      className="reading-attachment-card__preview-frame"
+                                    />
+                                  ) : (
+                                    <div className="reading-attachment-card__preview-fallback">
+                                      <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                      <span>可预览附件</span>
+                                    </div>
+                                  )
+                                ) : (
+                                  <div className="reading-attachment-card__preview-fallback">
+                                    <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                    <span>{attachmentType}</span>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="reading-attachment-card__footer">
+                                <div className="reading-attachment-card__meta">
+                                  <strong>{attachment.filename || '未命名附件'}</strong>
+                                  <span>{attachmentType} · {size}</span>
+                                </div>
+                                <div className="reading-attachment-card__actions">
+                                  {previewable ? (
+                                    <button
+                                      type="button"
+                                      className="attachment-action"
+                                      aria-label={`预览 ${attachment.filename || '附件'}`}
+                                      onClick={() => openAttachmentPreview(attachment)}
+                                    >
+                                      预览
+                                    </button>
+                                  ) : null}
+                                  <a href={href} download={attachment.filename || undefined} aria-disabled={!id}>
+                                    下载
+                                  </a>
+                                </div>
+                              </div>
                             </div>
-                            <a href={href} download={attachment.filename || undefined} aria-disabled={!id}>
-                              下载
-                            </a>
                           </li>
                         );
                       })}
@@ -1575,9 +2134,35 @@ export default function App() {
                 </section>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </main>
+
+      {attachmentPreview?.open ? (
+        <div className="attachment-preview-overlay" onClick={() => setAttachmentPreview(null)}>
+          <div className="attachment-preview-dialog" role="dialog" aria-modal="true" aria-label="附件预览" onClick={(event) => event.stopPropagation()}>
+            <div className="attachment-preview-header">
+              <div>
+                <strong>{attachmentPreview.name}</strong>
+                <span>{attachmentPreview.contentType || '附件预览'}</span>
+              </div>
+              <AppIcon title="关闭预览" onClick={() => setAttachmentPreview(null)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="m18 6-12 12"></path>
+                  <path d="m6 6 12 12"></path>
+                </svg>
+              </AppIcon>
+            </div>
+            <div className="attachment-preview-body">
+              {attachmentPreview.contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachmentPreview.name) ? (
+                <img src={attachmentPreview.url} alt={attachmentPreview.name} className="attachment-preview-media" />
+              ) : (
+                <iframe src={attachmentPreview.url} title={attachmentPreview.name} className="attachment-preview-frame" />
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1588,11 +2173,51 @@ export default function App() {
                 <h2>设置</h2>
                 <p>统一管理当前登录用户的系统偏好、资料信息和主题显示。</p>
               </div>
+              <button
+                type="button"
+                className="contacts-close-button"
+                onClick={() => setShowSettings(false)}
+                aria-label="关闭设置"
+              >
+                ×
+              </button>
             </div>
-            <section className="settings-panel">
+            <nav className="settings-nav" aria-label="设置导航">
+              <button
+                type="button"
+                className={activeSettingsSection === 'general' ? 'active' : ''}
+                onClick={() => focusSettingsSection('general')}
+              >
+                常规
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === 'appearance' ? 'active' : ''}
+                onClick={() => focusSettingsSection('appearance')}
+              >
+                外观
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === 'security' ? 'active' : ''}
+                onClick={() => focusSettingsSection('security')}
+              >
+                安全
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === 'account' ? 'active' : ''}
+                onClick={() => focusSettingsSection('account')}
+              >
+                账户
+              </button>
+            </nav>
+            <div className="settings-content">
+            {activeSettingsSection === 'general' ? (
+            <section className="settings-panel" ref={generalSettingsRef}>
               <div className="settings-panel__head">
-                <h3>系统设置</h3>
-                <p>控制分页、自动已读、回复引用和本地化显示。</p>
+                <h3>常规设置</h3>
+                <p>集中管理阅读习惯、语言时区和个人资料。</p>
               </div>
               <div className="settings-grid">
                 <div className="settings-field">
@@ -1637,10 +2262,10 @@ export default function App() {
                     value={preferences.system.timezone}
                     onChange={e => updateSystemPreferences({ timezone: e.target.value })}
                   >
-                    <option value="Asia/Shanghai">Asia/Shanghai</option>
-                    <option value="UTC">UTC</option>
-                    <option value="America/Los_Angeles">America/Los_Angeles</option>
-                    <option value="Europe/London">Europe/London</option>
+                    <option value="Asia/Shanghai">中国上海（UTC+8）</option>
+                    <option value="UTC">协调世界时（UTC）</option>
+                    <option value="America/Los_Angeles">美国洛杉矶（UTC-8/UTC-7）</option>
+                    <option value="Europe/London">英国伦敦（UTC+0/UTC+1）</option>
                   </select>
                 </div>
                 <div className="settings-field settings-check-row settings-field-full">
@@ -1652,14 +2277,6 @@ export default function App() {
                   />
                   <label htmlFor="markReadOnOpen">自动标记为已读（打开邮件时）</label>
                 </div>
-              </div>
-            </section>
-            <section className="settings-panel">
-              <div className="settings-panel__head">
-                <h3>用户设置</h3>
-                <p>这些资料将和当前登录账号绑定保存。</p>
-              </div>
-              <div className="settings-grid">
                 <div className="settings-field">
                   <label htmlFor="displayName">显示名称</label>
                   <input
@@ -1693,7 +2310,7 @@ export default function App() {
                   <input
                     id="avatarUrl"
                     type="url"
-                    placeholder="https://example.com/avatar.png"
+                    placeholder="https://你的域名.com/avatar.png"
                     value={preferences.user.avatar_url}
                     onChange={(event) => setPreferences((current) => ({ ...current, user: { ...current.user, avatar_url: event.target.value } }))}
                   />
@@ -1708,11 +2325,13 @@ export default function App() {
                 </div>
               </div>
             </section>
+            ) : null}
             {settingsError ? <div className="settings-message settings-message-error" role="alert">{settingsError}</div> : null}
-            <section className="settings-panel">
+            {activeSettingsSection === 'appearance' ? (
+            <section className="settings-panel" ref={appearanceSettingsRef}>
               <div className="settings-panel__head">
-                <h3>主题设置</h3>
-                <p>即时切换浅色与深色主题，保存后下次登录继续生效。</p>
+                <h3>外观设置</h3>
+                <p>切换主题和界面观感，保存后下次登录继续生效。</p>
               </div>
               <div className="theme-mode-group" role="radiogroup" aria-label="主题模式">
                 <button
@@ -1735,9 +2354,13 @@ export default function App() {
                 </button>
               </div>
             </section>
-            <form className="settings-password-panel" onSubmit={handleChangePassword}>
-              <h3>修改密码</h3>
-              <p>仅更新 Webmail 会话保存的密码，并用新密码重新验证 IMAP 登录。</p>
+            ) : null}
+            {activeSettingsSection === 'security' ? (
+            <form className="settings-password-panel" ref={securitySettingsRef} onSubmit={handleChangePassword}>
+              <div className="settings-panel__head">
+                <h3>安全设置</h3>
+                <p>处理密码与签名等高频安全操作。</p>
+              </div>
               <div className="settings-field">
                 <label htmlFor="currentPassword">旧密码</label>
                 <input
@@ -1779,6 +2402,13 @@ export default function App() {
               </div>
               {passwordError ? <div className="settings-message settings-message-error" role="alert">{passwordError}</div> : null}
               {passwordSuccess ? <div className="settings-message settings-message-success" role="status">{passwordSuccess}</div> : null}
+              <div className="settings-utility-card">
+                <div>
+                  <strong>签名设置</strong>
+                  <p>管理默认签名、销售签名等发信模板。</p>
+                </div>
+                <button type="button" onClick={() => setShowSignatures(true)}>进入签名设置</button>
+              </div>
               <div className="settings-actions">
                 <button
                   type="button"
@@ -1795,11 +2425,28 @@ export default function App() {
                 </button>
               </div>
             </form>
+            ) : null}
+            {activeSettingsSection === 'account' ? (
+            <section className="settings-panel" ref={accountSettingsRef}>
+              <div className="settings-panel__head">
+                <h3>账户操作</h3>
+                <p>执行当前账号的保存、关闭和退出操作。</p>
+              </div>
+              <div className="settings-utility-card settings-utility-card--danger">
+                <div>
+                  <strong>退出登录</strong>
+                  <p>结束当前会话并返回登录界面。</p>
+                </div>
+                <button type="button" onClick={handleLogout}>退出登录</button>
+              </div>
+            </section>
+            ) : null}
             <div className="settings-actions settings-actions-bottom">
               <button type="button" onClick={() => setShowSettings(false)}>关闭设置</button>
               <button className="primary" onClick={handleSaveSettings} disabled={isSavingSettings}>
                 {isSavingSettings ? '保存中...' : '保存设置'}
               </button>
+            </div>
             </div>
           </div>
         </div>

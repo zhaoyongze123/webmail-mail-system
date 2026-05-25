@@ -325,10 +325,24 @@ describe('App 邮件工作台', () => {
     await user.keyboard('{Enter}');
 
     await waitFor(() => {
-      expect(screen.getByText((content) => content.includes('搜索: release'))).not.toBeNull();
+      expect(screen.getByText((content) => content.includes('关键词：release'))).not.toBeNull();
       expect(screen.getByText('当前文件夹暂无邮件。')).not.toBeNull();
     });
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/folders/INBOX/messages/search?'), expect.any(Object));
+  });
+
+  it('点击当前文件夹会自动刷新邮件列表', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText('客户报价确认');
+    mockFetch.mockClear();
+
+    await user.click(screen.getAllByText('收件箱')[0]);
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/folders/INBOX/messages?page=1&page_size=30&refresh=true'), expect.any(Object));
+    });
   });
 
   it('搜索表单会提交发件人、日期范围和有附件筛选', async () => {
@@ -342,7 +356,7 @@ describe('App 邮件工作台', () => {
     fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-05-07' } });
     fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-05-08' } });
     await user.click(screen.getByLabelText('仅看有附件'));
-    await user.click(screen.getByRole('button', { name: '搜索' }));
+    await user.click(screen.getByRole('button', { name: '应用筛选' }));
 
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => String(url).includes('/api/folders/INBOX/messages/search?'));
@@ -354,7 +368,7 @@ describe('App 邮件工作台', () => {
       expect(url.searchParams.get('date_to')).toBe('2026-05-08');
       expect(url.searchParams.get('has_attachments')).toBe('true');
     });
-    const summary = screen.getByText(/搜索: 客户/);
+    const summary = screen.getByText(/关键词：客户/);
     expect(summary.textContent).toContain('有附件');
   });
 
@@ -625,7 +639,10 @@ describe('App 邮件工作台', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole('button', { name: '签名设置' }));
+    await user.click(await screen.findByRole('button', { name: '打开设置' }));
+    const settingsDialog = await screen.findByRole('dialog', { name: '设置' });
+    await user.click(within(settingsDialog).getByRole('button', { name: '安全' }));
+    await user.click(within(settingsDialog).getByRole('button', { name: '进入签名设置' }));
     const dialog = await screen.findByRole('dialog', { name: '签名设置' });
 
     expect(within(dialog).getByText('默认签名')).not.toBeNull();
@@ -650,7 +667,7 @@ describe('App 邮件工作台', () => {
     const panel = await screen.findByRole('complementary', { name: '写信面板' });
     expect(within(panel).getByRole('button', { name: '选择 alice@example.com' })).not.toBeNull();
     expect((within(panel).getByRole('textbox', { name: '收件人' }) as HTMLInputElement).value).toBe('');
-    expect((within(panel).getByLabelText('主题') as HTMLInputElement).value).toBe('Re: 客户报价确认');
+    expect((within(panel).getByLabelText('主题') as HTMLInputElement).value).toBe('回复：客户报价确认');
     expect(within(panel).getByLabelText('正文').innerHTML).toContain('报价正文内容');
   });
 
@@ -738,6 +755,7 @@ describe('App 邮件工作台', () => {
     await screen.findByText('sam.samlee.mobbin@gmail.com');
     await user.click(screen.getByRole('button', { name: '打开设置' }));
     const dialog = await screen.findByRole('dialog', { name: '设置' });
+    await user.click(within(dialog).getByRole('button', { name: '安全' }));
 
     await user.type(within(dialog).getByLabelText('旧密码'), 'correct-password');
     await user.type(within(dialog).getByLabelText('新密码'), 'updated-password');
@@ -756,7 +774,7 @@ describe('App 邮件工作台', () => {
         }),
       );
     });
-    expect(within(dialog).getByText('密码已更新，并已通过新密码完成 IMAP 验证。')).not.toBeNull();
+    expect(within(dialog).getByText('密码已更新，并已通过新密码完成收信服务登录验证。')).not.toBeNull();
     expect((within(dialog).getByLabelText('旧密码') as HTMLInputElement).value).toBe('');
   });
 
@@ -819,6 +837,7 @@ describe('App 邮件工作台', () => {
     await screen.findByText('sam.samlee.mobbin@gmail.com');
     await user.click(screen.getByRole('button', { name: '打开设置' }));
     const dialog = await screen.findByRole('dialog', { name: '设置' });
+    await user.click(within(dialog).getByRole('button', { name: '安全' }));
 
     await user.type(within(dialog).getByLabelText('旧密码'), 'correct-password');
     await user.type(within(dialog).getByLabelText('新密码'), 'updated-password');
@@ -937,6 +956,7 @@ describe('App 邮件工作台', () => {
     await user.type(within(dialog).getByLabelText('职位/头衔'), '设计负责人');
     await user.type(within(dialog).getByLabelText('头像地址'), 'https://cdn.example.com/avatar.png');
     await user.type(within(dialog).getByLabelText('个人简介'), '负责品牌体验');
+    await user.click(within(dialog).getByRole('button', { name: '外观' }));
     await user.click(within(dialog).getByRole('button', { name: /深色主题/ }));
     await user.click(within(dialog).getByRole('button', { name: '保存设置' }));
 
