@@ -27,3 +27,7 @@ test-results/
 
 # Local planning source files
 副本邮件系统功能清单.xlsx
+
+# Local sqlite data
+backend/dev.db
+backend/*.db

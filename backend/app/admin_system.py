@@ -1634,8 +1634,11 @@ def _parse_postfix_delivery_logs(
         item["events"].append(event)
         item["raw_lines"].append(line)
         item["event_count"] = int(item["event_count"]) + 1
-        item["status"] = current_status
-        item["status_detail"] = detail[:200]
+        previous_status = str(item.get("status") or "")
+        terminal_statuses = {"sent", "deferred", "bounced", "rejected"}
+        if not (current_status == "removed" and previous_status in terminal_statuses):
+            item["status"] = current_status
+            item["status_detail"] = detail[:200]
 
     keyword = (query or "").strip().lower()
     normalized_sender = (sender or "").strip().lower()
@@ -1674,12 +1677,21 @@ def _parse_postfix_delivery_logs(
         items.append(normalized_item)
 
     items.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    def _final_status(item: dict[str, object]) -> str:
+        events = item.get("events", [])
+        if isinstance(events, list):
+            for event in reversed(events):
+                if isinstance(event, dict):
+                    status = str(event.get("status") or "")
+                    if status in {"sent", "deferred", "bounced", "rejected"}:
+                        return status
+        return str(item.get("status") or "")
     summary = {
         "total": len(items),
-        "sent": sum(1 for item in items if item.get("status") == "sent"),
-        "deferred": sum(1 for item in items if item.get("status") == "deferred"),
-        "bounced": sum(1 for item in items if item.get("status") == "bounced"),
-        "rejected": sum(1 for item in items if item.get("status") == "rejected"),
+        "sent": sum(1 for item in items if _final_status(item) == "sent"),
+        "deferred": sum(1 for item in items if _final_status(item) == "deferred"),
+        "bounced": sum(1 for item in items if _final_status(item) == "bounced"),
+        "rejected": sum(1 for item in items if _final_status(item) == "rejected"),
     }
     return {
         "status": "ok",

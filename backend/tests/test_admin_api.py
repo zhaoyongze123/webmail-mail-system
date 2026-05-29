@@ -45,6 +45,11 @@ class FakeSettings:
         self.admin_totp_issuer = "Webmail Admin"
         self.mail_quota_enabled = True
         self.mailbox_password_scheme = "SHA512-CRYPT"
+        self.attachment_preview_cache_dir = "/tmp/webmail-preview-cache-test"
+        self.attachment_preview_cache_ttl_seconds = 3600
+        self.attachment_preview_cache_max_mb = 32
+        self.attachment_preview_housekeeping_interval_seconds = 1
+        self.attachment_preview_processing_timeout_seconds = 30
         self.admin_ip_allowlist = ""
         self.admin_ip_blocklist = ""
         self.postfix_main_cf_path = "/etc/postfix/main.cf"
@@ -53,6 +58,14 @@ class FakeSettings:
         self.postfix_system_aliases_path = "/etc/aliases"
         self.admin_config_backup_dir = "/tmp/webmail-admin-backups"
         self.admin_audit_retention_days = 90
+        self.web_push_enabled = False
+        self.web_push_vapid_public_key = None
+        self.web_push_vapid_private_key = None
+        self.web_push_vapid_claims_subject = "mailto:admin@test.local"
+        self.mail_notification_poll_enabled = False
+        self.mail_notification_poll_interval_seconds = 45
+        self.mail_notification_batch_size = 10
+        self.mail_notification_imap_timeout_seconds = 15
 
     @property
     def cors_origin_list(self) -> list[str]:

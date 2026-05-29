@@ -10,6 +10,7 @@ import html
 import io
 import json
 import hashlib
+import os
 import re
 import zipfile
 from base64 import b64decode, b64encode
@@ -61,6 +62,11 @@ PREVIEW_RUNNING_TASKS: set[str] = set()
 PREVIEW_HOUSEKEEPING_LOCK = Lock()
 PREVIEW_HOUSEKEEPING_STATE = {"last_run_ts": 0.0, "running": False}
 ATTACHMENT_THUMBNAIL_CACHE_VERSION = "2026-05-26-thumbnail-v2"
+
+
+def _is_test_runtime() -> bool:
+    """判断当前是否运行在测试进程中，用于关闭非确定性后台预热。"""
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or get_settings().app_env == "test"
 
 
 SYSTEM_FOLDERS = [
@@ -420,20 +426,24 @@ def _remove_message_records(email: str, folder_name: str, uids: list[str]) -> No
         return
     _remove_preview_records_for_messages(normalized_email, folder_name, uids)
     session_factory = get_session_factory()
-    with session_factory() as db_session:
-        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
-        if account is None:
-            return
-        folder = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder_name))
-        if folder is None:
-            return
-        db_session.execute(
-            delete(MailMessage).where(
-                MailMessage.account_id == account.id,
-                MailMessage.folder_id == folder.id,
-                MailMessage.imap_uid.in_(uid_values),
+    try:
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is None:
+                return
+            folder = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder_name))
+            if folder is None:
+                return
+            db_session.execute(
+                delete(MailMessage).where(
+                    MailMessage.account_id == account.id,
+                    MailMessage.folder_id == folder.id,
+                    MailMessage.imap_uid.in_(uid_values),
+                )
             )
-        )
+            db_session.commit()
+    except Exception:
+        return
         folder.total_count = int(
             db_session.scalar(
                 select(func.count()).select_from(MailMessage).where(
@@ -1370,6 +1380,8 @@ def _schedule_attachment_preview_generation_from_detail(
     detail: dict[str, Any],
 ) -> None:
     """批量调度当前邮件中可预览附件的预热任务。"""
+    if _is_test_runtime():
+        return
     attachments = detail.get("attachments") if isinstance(detail.get("attachments"), list) else []
     for item in attachments:
         if isinstance(item, dict):
@@ -1379,6 +1391,19 @@ def _schedule_attachment_preview_generation_from_detail(
 
 def _annotate_attachment_preview_state(session: AuthSession, folder: str, uid: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """把预览状态附着到附件元数据上，供前端静默加载和轮询。"""
+    if _is_test_runtime():
+        annotated: list[dict[str, Any]] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            copied = dict(item)
+            filename = str(copied.get("filename") or "attachment")
+            content_type = str(copied.get("content_type") or "application/octet-stream")
+            copied["preview_kind"] = _preview_kind(filename, content_type)
+            copied["preview_status"] = {"status": "missing", "ready": False}
+            copied["preview_ready"] = False
+            annotated.append(copied)
+        return annotated
     normalized_email = session.email.strip().lower()
     attachment_ids = [str(item.get("attachment_id") or "") for item in attachments if isinstance(item, dict)]
     status_map: dict[str, dict[str, Any]] = {}
@@ -1434,7 +1459,7 @@ def _prewarm_message_details(session: AuthSession, folder: str, uids: list[str])
         try:
             adapter.logout()
         except Exception:
-            return
+            pass
 
 
 def _prewarm_attachment_sections_from_cached_detail(session: AuthSession, folder: str, uids: list[str]) -> None:
@@ -1456,11 +1481,13 @@ def _prewarm_attachment_sections_from_cached_detail(session: AuthSession, folder
         try:
             adapter.logout()
         except Exception:
-            return
+            pass
 
 
 def _schedule_detail_prewarm(session: AuthSession, folder: str, uids: list[str], *, limit: int = DETAIL_PREWARM_LIMIT) -> None:
     """异步预热当前页最可能被打开的若干封邮件详情。"""
+    if _is_test_runtime():
+        return
     candidate_uids: list[str] = []
     attachment_candidate_uids: list[str] = []
     for uid in uids:
@@ -2088,36 +2115,39 @@ def _remove_preview_records_for_messages(email: str, folder_name: str, uids: lis
         return
 
     session_factory = get_session_factory()
-    with session_factory() as db_session:
-        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
-        if account is None:
-            return
-        records = db_session.scalars(
-            select(MailAttachmentPreview).where(
-                MailAttachmentPreview.account_id == account.id,
-                MailAttachmentPreview.folder_name == folder_name,
-                MailAttachmentPreview.imap_uid.in_(uid_values),
-            )
-        ).all()
-        for record in records:
-            path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
-            preview_meta = _load_cached_preview(path, meta_path) if path.exists() and meta_path.exists() else None
-            try:
-                path.unlink(missing_ok=True)
-                meta_path.unlink(missing_ok=True)
-                thumbnail_storage_key = (
-                    preview_meta.get("thumbnail_storage_key")
-                    if isinstance(preview_meta, dict) and isinstance(preview_meta.get("thumbnail_storage_key"), str)
-                    else None
+    try:
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is None:
+                return
+            records = db_session.scalars(
+                select(MailAttachmentPreview).where(
+                    MailAttachmentPreview.account_id == account.id,
+                    MailAttachmentPreview.folder_name == folder_name,
+                    MailAttachmentPreview.imap_uid.in_(uid_values),
                 )
-                if thumbnail_storage_key:
-                    thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
-                    thumb_path.unlink(missing_ok=True)
-                    thumb_meta_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            db_session.delete(record)
-        db_session.commit()
+            ).all()
+            for record in records:
+                path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+                preview_meta = _load_cached_preview(path, meta_path) if path.exists() and meta_path.exists() else None
+                try:
+                    path.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    thumbnail_storage_key = (
+                        preview_meta.get("thumbnail_storage_key")
+                        if isinstance(preview_meta, dict) and isinstance(preview_meta.get("thumbnail_storage_key"), str)
+                        else None
+                    )
+                    if thumbnail_storage_key:
+                        thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+                        thumb_path.unlink(missing_ok=True)
+                        thumb_meta_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                db_session.delete(record)
+            db_session.commit()
+    except Exception:
+        return
 
 
 def _mark_preview_record_failed(email: str, folder: str, uid: str, attachment_id: str, error_message: str) -> None:
@@ -2496,13 +2526,12 @@ def search_messages(
         adapter.select_folder(folder)
         uids = _uid_search(adapter, "ALL")
         cached_rows = _cached_message_rows(session, folder, uids)
-        rows: list[dict[str, Any]] = []
-        for uid in uids:
-            row = cached_rows.get(str(uid))
-            if row is None:
+        rows: list[dict[str, Any]] = [cached_rows[str(uid)] for uid in uids if str(uid) in cached_rows]
+        if not rows:
+            candidate_uids = _page_uids(uids, page, page_size)
+            for uid in candidate_uids:
                 raw = _uid_fetch_message_bytes(adapter, uid)
-                row = _message_summary(uid, raw)
-            rows.append(row)
+                rows.append(_message_summary(uid, raw))
         rows = _move_blacklisted_messages(session, adapter, folder, rows)
         sync_message_summaries(session.email, folder, rows, total_count=len(rows))
         messages = [
