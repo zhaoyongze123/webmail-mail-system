@@ -65,6 +65,18 @@ def _decode_text(value: bytes | str) -> str:
     return value
 
 
+def _extract_fetch_payload(data: Any, *, operation: str) -> bytes:
+    """从 IMAP FETCH 返回值中提取首个字节负载。"""
+    for item in data or []:
+        if isinstance(item, tuple) and len(item) >= 2:
+            payload = item[1]
+            if isinstance(payload, bytes):
+                return payload
+            if isinstance(payload, str):
+                return payload.encode("utf-8")
+    raise MailAdapterError("IMAP 邮件内容为空", operation=operation)
+
+
 def _search_criteria_args(criteria: str | Iterable[str]) -> tuple[str, ...]:
     """把搜索条件规范为 IMAP 可接受的参数元组。"""
     if isinstance(criteria, str):
@@ -369,14 +381,7 @@ class ImapAdapter:
             status, data = client.uid("FETCH", uid, "(RFC822)")
             if status != "OK":
                 raise MailAdapterError(f"IMAP UID 获取邮件失败: {status}", operation="uid_fetch_message_bytes")
-            for item in data or []:
-                if isinstance(item, tuple) and len(item) >= 2:
-                    payload = item[1]
-                    if isinstance(payload, bytes):
-                        return payload
-                    if isinstance(payload, str):
-                        return payload.encode("utf-8")
-            raise MailAdapterError("IMAP UID 邮件内容为空", operation="uid_fetch_message_bytes")
+            return _extract_fetch_payload(data, operation="uid_fetch_message_bytes")
         except AttributeError:
             return self.fetch_message_bytes(uid)
         except (
@@ -387,6 +392,67 @@ class ImapAdapter:
             imaplib.IMAP4.readonly,
         ) as exc:
             raise _format_error("IMAP UID 获取邮件", exc) from exc
+
+    def uid_fetch_headers(self, uid: str | bytes) -> bytes:
+        """仅拉取 RFC822 头部。"""
+        client = self._ensure_client()
+        try:
+            status, data = client.uid("FETCH", uid, "(BODY.PEEK[HEADER])")
+            if status != "OK":
+                raise MailAdapterError(f"IMAP UID 获取邮件头失败: {status}", operation="uid_fetch_headers")
+            return _extract_fetch_payload(data, operation="uid_fetch_headers")
+        except AttributeError:
+            return self.uid_fetch_message_bytes(uid)
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP UID 获取邮件头", exc) from exc
+
+    def uid_fetch_body_section(self, uid: str | bytes, section: str) -> bytes:
+        """拉取指定 BODY section 内容。"""
+        client = self._ensure_client()
+        query = f"(BODY.PEEK[{section}])"
+        try:
+            status, data = client.uid("FETCH", uid, query)
+            if status != "OK":
+                raise MailAdapterError(f"IMAP UID 获取正文分段失败: {status}", operation="uid_fetch_body_section")
+            return _extract_fetch_payload(data, operation="uid_fetch_body_section")
+        except AttributeError:
+            return self.uid_fetch_message_bytes(uid)
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP UID 获取正文分段", exc) from exc
+
+    def uid_fetch_bodystructure(self, uid: str | bytes) -> bytes:
+        """拉取 BODYSTRUCTURE 响应原文。"""
+        client = self._ensure_client()
+        try:
+            status, data = client.uid("FETCH", uid, "(BODYSTRUCTURE)")
+            if status != "OK":
+                raise MailAdapterError(f"IMAP UID 获取 BODYSTRUCTURE 失败: {status}", operation="uid_fetch_bodystructure")
+            raw = " ".join(_decode_text(item) if not isinstance(item, tuple) else _decode_text(item[0]) for item in (data or []))
+            if not raw.strip():
+                raise MailAdapterError("IMAP BODYSTRUCTURE 为空", operation="uid_fetch_bodystructure")
+            return raw.encode("utf-8", errors="replace")
+        except AttributeError:
+            return b""
+        except (
+            OSError,
+            ssl.SSLError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            imaplib.IMAP4.readonly,
+        ) as exc:
+            raise _format_error("IMAP UID 获取 BODYSTRUCTURE", exc) from exc
 
     def mark_seen(self, uid: str | bytes) -> None:
         client = self._ensure_client()

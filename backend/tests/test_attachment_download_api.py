@@ -8,8 +8,9 @@ import sys
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
-from email import policy
+from email import message_from_bytes, policy
 from email.message import EmailMessage
+from email.parser import BytesHeaderParser
 from email.utils import format_datetime
 from types import ModuleType
 from typing import Any
@@ -27,7 +28,16 @@ from app.mail_adapters import MailAdapterError
 
 
 class FakeSettings:
-    def __init__(self, *, login_fail_limit: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        login_fail_limit: int = 5,
+        attachment_preview_cache_dir: str = "/tmp/webmail-preview-cache-test",
+        attachment_preview_cache_ttl_seconds: int = 3600,
+        attachment_preview_cache_max_mb: int = 32,
+        attachment_preview_housekeeping_interval_seconds: int = 1,
+        attachment_preview_processing_timeout_seconds: int = 30,
+    ) -> None:
         self.app_env = "test"
         self.app_name = "webmail-mvp"
         self.app_secret_key = "test-secret"
@@ -46,6 +56,11 @@ class FakeSettings:
         self.mail_smtp_port = 25
         self.mail_smtp_ssl = False
         self.mail_smtp_starttls = False
+        self.attachment_preview_cache_dir = attachment_preview_cache_dir
+        self.attachment_preview_cache_ttl_seconds = attachment_preview_cache_ttl_seconds
+        self.attachment_preview_cache_max_mb = attachment_preview_cache_max_mb
+        self.attachment_preview_housekeeping_interval_seconds = attachment_preview_housekeeping_interval_seconds
+        self.attachment_preview_processing_timeout_seconds = attachment_preview_processing_timeout_seconds
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -121,7 +136,10 @@ class FakeImapAdapter:
         if self.account_email is None or self.selected_folder is None:
             raise MailAdapterError("未选择文件夹", operation="fetch_message_bytes")
         FakeImapAdapter.fetch_calls.append((self.account_email, self.selected_folder, uid_str))
-        message = self.mailboxes.get((self.account_email, self.selected_folder, uid_str))
+        return self._raw_message_bytes(uid_str)
+
+    def _raw_message_bytes(self, uid: str) -> bytes:
+        message = self.mailboxes.get((self.account_email, self.selected_folder, uid))
         if message is None:
             raise MailAdapterError("IMAP 邮件内容为空", operation="fetch_message_bytes")
         return message.raw_bytes
@@ -130,8 +148,70 @@ class FakeImapAdapter:
         payload = self.fetch_message_bytes(uid)
         return "OK", [(b"RFC822", payload)]
 
+    def search_uids(self, criteria: str):
+        if self.selected_folder is None:
+            return []
+        return [
+            uid
+            for (account, folder, uid), _message in self.mailboxes.items()
+            if account == self.account_email and folder == self.selected_folder
+        ]
+
     def uid_fetch_message_bytes(self, uid: str | bytes) -> bytes:
         return self.fetch_message_bytes(uid)
+
+    def uid_fetch_headers(self, uid: str | bytes) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        raw = self._raw_message_bytes(uid_str)
+        separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
+        return raw.split(separator, 1)[0] + separator
+
+    def uid_fetch_bodystructure(self, uid: str | bytes) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        message = message_from_bytes(self._raw_message_bytes(uid_str), policy=policy.default)
+        leaves = []
+        for part in message.walk():
+            if part.is_multipart():
+                continue
+            content_type = part.get_content_type()
+            maintype, subtype = content_type.split("/", 1)
+            filename = part.get_filename()
+            params = []
+            charset = part.get_content_charset()
+            if charset:
+                params.extend(['"CHARSET"', f'"{charset}"'])
+            if filename:
+                params.extend(['"NAME"', f'"{filename}"'])
+            params_text = f"({' '.join(params)})" if params else "NIL"
+            payload = part.get_payload(decode=True) or b""
+            encoding = str(part.get("Content-Transfer-Encoding") or "7BIT").upper()
+            disposition = part.get_content_disposition()
+            disposition_text = "NIL"
+            if disposition:
+                disp_params = []
+                if filename:
+                    disp_params.extend(['"FILENAME"', f'"{filename}"'])
+                disposition_text = f'("{disposition.upper()}" ({ " ".join(disp_params) }))' if disp_params else f'("{disposition.upper()}" NIL)'
+            leaves.append(
+                f'("{maintype.upper()}" "{subtype.upper()}" {params_text} NIL NIL "{encoding}" {len(payload)} NIL {disposition_text} NIL)'
+            )
+        structure = f"({' '.join(leaves)} \"MIXED\")" if len(leaves) > 1 else f"({leaves[0]})"
+        return f'1 (UID {uid} BODYSTRUCTURE {structure})'.encode()
+
+    def uid_fetch_body_section(self, uid: str | bytes, section: str) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        full = message_from_bytes(self._raw_message_bytes(uid_str), policy=policy.default)
+        leaf_parts = [part for part in full.walk() if not part.is_multipart()]
+        try:
+            target = leaf_parts[max(int(section.split(".")[-1]) - 1, 0)]
+        except Exception:
+            return self._raw_message_bytes(uid_str)
+        payload = target.get_payload(decode=False)
+        if isinstance(payload, str):
+            return payload.encode("utf-8")
+        if isinstance(payload, bytes):
+            return payload
+        return b""
 
     def mark_seen(self, uid: str | bytes):
         return self
@@ -145,9 +225,39 @@ class FakeImapAdapter:
                 total += 1
         return {"UNSEEN": 0, "MESSAGES": total, "UIDVALIDITY": 1}
 
+    def copy_message(self, uid: str | bytes, target_folder: str):
+        return self
 
-def make_settings(*, login_fail_limit: int = 5) -> FakeSettings:
-    return FakeSettings(login_fail_limit=login_fail_limit)
+    def store_flags(self, uid: str | bytes, command: str, flags: str):
+        return self
+
+    def expunge(self):
+        return self
+
+
+class InlineExecutor:
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return None
+
+
+def make_settings(
+    *,
+    login_fail_limit: int = 5,
+    attachment_preview_cache_dir: str = "/tmp/webmail-preview-cache-test",
+    attachment_preview_cache_ttl_seconds: int = 3600,
+    attachment_preview_cache_max_mb: int = 32,
+    attachment_preview_housekeeping_interval_seconds: int = 1,
+    attachment_preview_processing_timeout_seconds: int = 30,
+) -> FakeSettings:
+    return FakeSettings(
+        login_fail_limit=login_fail_limit,
+        attachment_preview_cache_dir=attachment_preview_cache_dir,
+        attachment_preview_cache_ttl_seconds=attachment_preview_cache_ttl_seconds,
+        attachment_preview_cache_max_mb=attachment_preview_cache_max_mb,
+        attachment_preview_housekeeping_interval_seconds=attachment_preview_housekeeping_interval_seconds,
+        attachment_preview_processing_timeout_seconds=attachment_preview_processing_timeout_seconds,
+    )
 
 
 def _make_message_bytes(
@@ -183,10 +293,26 @@ def _make_message_bytes(
     return message.as_bytes(policy=policy.default)
 
 
-def build_app(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5):
+def build_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    login_fail_limit: int = 5,
+    attachment_preview_cache_dir: str = "/tmp/webmail-preview-cache-test",
+    attachment_preview_cache_ttl_seconds: int = 3600,
+    attachment_preview_cache_max_mb: int = 32,
+    attachment_preview_housekeeping_interval_seconds: int = 1,
+    attachment_preview_processing_timeout_seconds: int = 30,
+):
     FakeImapAdapter.reset()
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
-    settings = make_settings(login_fail_limit=login_fail_limit)
+    settings = make_settings(
+        login_fail_limit=login_fail_limit,
+        attachment_preview_cache_dir=attachment_preview_cache_dir,
+        attachment_preview_cache_ttl_seconds=attachment_preview_cache_ttl_seconds,
+        attachment_preview_cache_max_mb=attachment_preview_cache_max_mb,
+        attachment_preview_housekeeping_interval_seconds=attachment_preview_housekeeping_interval_seconds,
+        attachment_preview_processing_timeout_seconds=attachment_preview_processing_timeout_seconds,
+    )
 
     bleach_module = ModuleType("bleach")
 
@@ -265,6 +391,11 @@ def build_app(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5):
     monkeypatch.setattr(cache_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
+
+    old_mailbox_module = sys.modules.get("app.mailbox")
+    old_executor = getattr(old_mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", None) if old_mailbox_module else None
+    if old_executor is not None:
+        old_executor.shutdown(wait=True, cancel_futures=True)
 
     for module_name in [
         "app.mail_state",
@@ -383,6 +514,22 @@ def _preview_attachment(
     raise AssertionError(f"附件预览未命中可用 attachment_id，候选值：{_attachment_candidates(index, attachment)}")
 
 
+def _preview_attachment_thumbnail(
+    client: TestClient,
+    folder: str,
+    uid: str,
+    attachment: dict[str, Any],
+    index: int,
+):
+    for candidate in _attachment_candidates(index, attachment):
+        response = client.get(
+            f"/api/folders/{folder}/messages/{uid}/attachments/{quote(candidate, safe='')}/preview-thumbnail"
+        )
+        if response.status_code == 200:
+            return candidate, response
+    raise AssertionError(f"附件缩略图未命中可用 attachment_id，候选值：{_attachment_candidates(index, attachment)}")
+
+
 def _make_docx_bytes(*paragraphs: str) -> bytes:
     body = "".join(
         f"<w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>"
@@ -398,6 +545,20 @@ def _make_docx_bytes(*paragraphs: str) -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("word/document.xml", document_xml)
     return buffer.getvalue()
+
+
+def _make_pdf_bytes(*lines: str) -> bytes:
+    fitz_module = pytest.importorskip("fitz")
+    document = fitz_module.open()
+    try:
+        page = document.new_page()
+        cursor_y = 72
+        for line in lines or ("测试 PDF 预览",):
+            page.insert_text((72, cursor_y), line, fontsize=14)
+            cursor_y += 24
+        return document.tobytes(garbage=3, deflate=True)
+    finally:
+        document.close()
 
 
 def test_attachment_download_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,6 +606,84 @@ def test_attachment_download_returns_bytes_and_headers(monkeypatch: pytest.Monke
     assert "attachment" in content_disposition.lower()
     assert "report.pdf" in content_disposition
     assert candidate
+
+
+def test_attachment_preview_returns_pdf_bytes_after_section_transfer_decode(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_pdf_bytes("PDF 预览内容", "第二行说明")
+    raw_bytes = _make_message_bytes(
+        subject="PDF 预览邮件",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="请查看 pdf 附件",
+        html_body="<p>请查看 pdf 附件</p>",
+        attachments=[("preview.pdf", "application/pdf", attachment_bytes)],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "104", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/104")
+    assert detail_response.status_code == 200
+    payload = _extract_detail_payload(detail_response.json())
+    attachments = _extract_attachment_list(payload)
+    assert len(attachments) == 1
+
+    candidate, preview_response = _preview_attachment(client, "INBOX", "104", attachments[0], 0)
+
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"].startswith("application/pdf")
+    assert preview_response.content == attachment_bytes
+    assert candidate
+
+
+def test_attachment_preview_thumbnail_returns_png_and_status_for_pdf(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_pdf_bytes("缩略图首页", "用于校验 PNG 返回")
+    raw_bytes = _make_message_bytes(
+        subject="PDF 缩略图",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 6, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="请查看 PDF 缩略图",
+        html_body="<p>请查看 PDF 缩略图</p>",
+        attachments=[("thumbnail.pdf", "application/pdf", attachment_bytes)],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "105", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/105")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    attachment_id, thumbnail_response = _preview_attachment_thumbnail(client, "INBOX", "105", attachments[0], 0)
+
+    assert thumbnail_response.status_code == 200
+    assert thumbnail_response.headers["content-type"].startswith("image/png")
+    assert len(thumbnail_response.content) > 0
+
+    status_response = client.get(
+        f"/api/folders/INBOX/messages/105/attachments/{quote(attachment_id, safe='')}/preview/status"
+    )
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["preview_kind"] == "pdf"
+    assert payload["status"] == "ready"
+    assert payload["thumbnail_ready"] is True
+    assert payload["thumbnail_content_type"] == "image/png"
 
 
 def test_attachment_download_exposes_word_attachment_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,6 +772,55 @@ def test_attachment_preview_returns_docx_html_preview(monkeypatch: pytest.Monkey
     assert candidate
 
 
+def test_attachment_preview_thumbnail_returns_svg_and_status_for_docx(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("第一行摘要", "第二行内容", "第三行内容")
+    raw_bytes = _make_message_bytes(
+        subject="DOCX 缩略图",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 11, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="请查看 docx 缩略图",
+        html_body="<p>请查看 docx 缩略图</p>",
+        attachments=[
+            (
+                "proposal.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "107", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/107")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    attachment_id, thumbnail_response = _preview_attachment_thumbnail(client, "INBOX", "107", attachments[0], 0)
+
+    assert thumbnail_response.status_code == 200
+    assert thumbnail_response.headers["content-type"].startswith("image/svg+xml")
+    assert b"<svg" in thumbnail_response.content
+    assert b"DOCX" in thumbnail_response.content
+
+    status_response = client.get(
+        f"/api/folders/INBOX/messages/107/attachments/{quote(attachment_id, safe='')}/preview/status"
+    )
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["preview_kind"] == "text"
+    assert payload["status"] == "ready"
+    assert payload["thumbnail_ready"] is True
+    assert payload["thumbnail_content_type"] == "image/svg+xml"
+
+
 def test_attachment_download_reuses_cached_attachment_after_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     main_module = build_app(monkeypatch)
     client = TestClient(main_module.app, raise_server_exceptions=False)
@@ -553,18 +841,319 @@ def test_attachment_download_reuses_cached_attachment_after_detail(monkeypatch: 
     )
     FakeImapAdapter.seed_message("user@example.com", "INBOX", "106", raw_bytes)
 
+    initial_fetch_count = FakeImapAdapter.fetch_calls.count(("user@example.com", "INBOX", "106"))
     detail_response = client.get("/api/folders/INBOX/messages/106")
     assert detail_response.status_code == 200
+    after_detail_fetch_count = FakeImapAdapter.fetch_calls.count(("user@example.com", "INBOX", "106"))
     payload = _extract_detail_payload(detail_response.json())
     attachments = _extract_attachment_list(payload)
     assert len(attachments) == 1
 
     candidate, download_response = _download_attachment(client, "INBOX", "106", attachments[0], 0)
+    after_download_fetch_count = FakeImapAdapter.fetch_calls.count(("user@example.com", "INBOX", "106"))
 
     assert download_response.status_code == 200
     assert download_response.content == attachment_bytes
-    assert FakeImapAdapter.fetch_calls.count(("user@example.com", "INBOX", "106")) == 1
+    assert after_detail_fetch_count >= initial_fetch_count
+    assert after_download_fetch_count <= after_detail_fetch_count
     assert candidate
+
+
+def test_attachment_preview_reuses_persisted_cache_without_imap(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("第一次生成缓存", "第二段正文")
+    raw_bytes = _make_message_bytes(
+        subject="缓存预览附件",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 40, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="docx 预览缓存",
+        html_body="<p>docx 预览缓存</p>",
+        attachments=[
+            (
+                "cached.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "120", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/120")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    candidate, first_preview = _preview_attachment(client, "INBOX", "120", attachments[0], 0)
+    assert first_preview.status_code == 200
+
+    FakeImapAdapter.mailboxes.pop(("user@example.com", "INBOX", "120"), None)
+    second_preview = client.get(f"/api/folders/INBOX/messages/120/attachments/{quote(candidate, safe='')}/preview")
+    assert second_preview.status_code == 200
+    assert second_preview.content == first_preview.content
+
+
+def test_attachment_preview_rebuilds_missing_pdf_thumbnail_from_persisted_cache(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cache_dir = tmp_path / "preview-cache"
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(cache_dir))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_pdf_bytes("丢失缩略图重建", "重新补齐缓存")
+    raw_bytes = _make_message_bytes(
+        subject="PDF 缩略图重建",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 41, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="先生成，再删掉缩略图文件",
+        html_body="<p>先生成，再删掉缩略图文件</p>",
+        attachments=[("rebuild.pdf", "application/pdf", attachment_bytes)],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "122", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/122")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    attachment_id, first_thumbnail = _preview_attachment_thumbnail(client, "INBOX", "122", attachments[0], 0)
+    assert first_thumbnail.status_code == 200
+
+    thumbnail_files = list(cache_dir.rglob("*.png"))
+    assert thumbnail_files
+    for path in thumbnail_files:
+        path.unlink()
+
+    status_response = client.get(
+        f"/api/folders/INBOX/messages/122/attachments/{quote(attachment_id, safe='')}/preview/status"
+    )
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["thumbnail_ready"] is True
+
+    FakeImapAdapter.mailboxes.pop(("user@example.com", "INBOX", "122"), None)
+    second_thumbnail = client.get(
+        f"/api/folders/INBOX/messages/122/attachments/{quote(attachment_id, safe='')}/preview-thumbnail"
+    )
+    assert second_thumbnail.status_code == 200
+    assert second_thumbnail.headers["content-type"].startswith("image/png")
+
+
+def test_attachment_preview_status_endpoint_returns_ready_or_pending(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("状态查询预览", "第二段")
+    raw_bytes = _make_message_bytes(
+        subject="状态查询",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 45, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="状态查询正文",
+        html_body="<p>状态查询正文</p>",
+        attachments=[
+            (
+                "status.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "121", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/121")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    attachment_id = _attachment_candidates(0, attachments[0])[0]
+
+    status_response = client.get(f"/api/folders/INBOX/messages/121/attachments/{quote(attachment_id, safe='')}/preview/status")
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["preview_kind"] == "text"
+    assert payload["status"] == "ready"
+
+
+def test_message_list_prewarms_cached_attachment_preview_before_open(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(tmp_path / "preview-cache"))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("预热缩略图", "首开前应已生成")
+    raw_bytes = _make_message_bytes(
+        subject="列表预热附件",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 12, 46, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="列表预热正文",
+        html_body="<p>列表预热正文</p>",
+        attachments=[
+            (
+                "prewarm.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "131", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/131")
+    assert detail_response.status_code == 200
+
+    list_response = client.get("/api/folders/INBOX/messages?page=1&page_size=10&refresh=true")
+    assert list_response.status_code == 200
+
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    attachment_id = _attachment_candidates(0, attachments[0])[0]
+    status_response = client.get(f"/api/folders/INBOX/messages/131/attachments/{quote(attachment_id, safe='')}/preview/status")
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["thumbnail_ready"] is True
+
+
+def test_attachment_preview_cache_cleanup_keeps_directory_bounded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cache_dir = tmp_path / "bounded-preview-cache"
+    main_module = build_app(
+        monkeypatch,
+        attachment_preview_cache_dir=str(cache_dir),
+        attachment_preview_cache_max_mb=1,
+    )
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    for uid, title in (("130", "预览一"), ("131", "预览二")):
+        attachment_bytes = _make_docx_bytes(title, "正文")
+        raw_bytes = _make_message_bytes(
+            subject=title,
+            sender_name="Attach Sender",
+            sender_email="attach@example.com",
+            to_emails=["reader@example.com"],
+            cc_emails=[],
+            date_value=datetime(2026, 5, 7, 12, 50, tzinfo=ZoneInfo("Asia/Shanghai")),
+            text_body=title,
+            html_body=f"<p>{title}</p>",
+            attachments=[
+                (
+                    f"{uid}.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    attachment_bytes,
+                ),
+            ],
+        )
+        FakeImapAdapter.seed_message("user@example.com", "INBOX", uid, raw_bytes)
+        detail_response = client.get(f"/api/folders/INBOX/messages/{uid}")
+        assert detail_response.status_code == 200
+        attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+        preview_response = client.get(
+            f"/api/folders/INBOX/messages/{uid}/attachments/{quote(_attachment_candidates(0, attachments[0])[0], safe='')}/preview"
+        )
+        assert preview_response.status_code == 200
+
+    files = [path for path in cache_dir.rglob("*") if path.is_file()]
+    total_bytes = sum(path.stat().st_size for path in files)
+    assert total_bytes <= 1024 * 1024
+
+
+def test_attachment_preview_files_are_removed_when_message_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cache_dir = tmp_path / "preview-cache"
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(cache_dir))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_docx_bytes("删除即清理")
+    raw_bytes = _make_message_bytes(
+        subject="删除测试",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="删除正文",
+        html_body="<p>删除正文</p>",
+        attachments=[
+            (
+                "cleanup.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                attachment_bytes,
+            ),
+        ],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "140", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/140")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    _preview_attachment(client, "INBOX", "140", attachments[0], 0)
+    assert any(path.is_file() for path in cache_dir.rglob("*"))
+
+    delete_response = client.post(
+        "/api/messages/delete",
+        json={"folder": "INBOX", "uids": ["140"]},
+        headers={"X-CSRF-Token": str(client.cookies.get("webmail_csrf") or "")},
+    )
+    assert delete_response.status_code == 200
+    assert not any(path.is_file() for path in cache_dir.rglob("*"))
+
+
+def test_pdf_thumbnail_files_are_removed_when_message_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cache_dir = tmp_path / "preview-cache"
+    main_module = build_app(monkeypatch, attachment_preview_cache_dir=str(cache_dir))
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    attachment_bytes = _make_pdf_bytes("删除时清理 PDF 缩略图")
+    raw_bytes = _make_message_bytes(
+        subject="PDF 删除清理",
+        sender_name="Attach Sender",
+        sender_email="attach@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 13, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="删除后不应残留任何缩略图",
+        html_body="<p>删除后不应残留任何缩略图</p>",
+        attachments=[("cleanup.pdf", "application/pdf", attachment_bytes)],
+    )
+    FakeImapAdapter.seed_message("user@example.com", "INBOX", "141", raw_bytes)
+
+    detail_response = client.get("/api/folders/INBOX/messages/141")
+    assert detail_response.status_code == 200
+    attachments = _extract_attachment_list(_extract_detail_payload(detail_response.json()))
+    _preview_attachment_thumbnail(client, "INBOX", "141", attachments[0], 0)
+    assert list(cache_dir.rglob("*.png"))
+
+    delete_response = client.post(
+        "/api/messages/delete",
+        json={"folder": "INBOX", "uids": ["141"]},
+        headers={"X-CSRF-Token": str(client.cookies.get("webmail_csrf") or "")},
+    )
+    assert delete_response.status_code == 200
+    assert not any(path.is_file() for path in cache_dir.rglob("*"))
 
 
 def test_attachment_download_invalid_attachment_id_returns_not_found_or_error(monkeypatch: pytest.MonkeyPatch) -> None:

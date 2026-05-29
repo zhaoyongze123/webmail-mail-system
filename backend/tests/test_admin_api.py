@@ -753,6 +753,75 @@ def test_parse_doveadm_quota_output_uses_storage_value_column(monkeypatch: pytes
     assert parsed == 12
 
 
+def test_search_mail_service_logs_groups_postfix_lines_by_queue_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    admin_system_module = importlib.import_module("app.admin_system")
+    monkeypatch.setattr(
+        admin_system_module,
+        "read_mail_service_log",
+        lambda key, line_limit=500: {
+            "key": key,
+            "label": "Postfix 错误日志",
+            "status": "ok",
+            "detail": "已读取 4 行日志",
+            "source": "file:/var/log/mail.log",
+            "lines": [
+                "May 19 00:00:00 mail postfix/cleanup[111]: ABC123: message-id=<demo@example.com>",
+                "May 19 00:00:01 mail postfix/qmgr[112]: ABC123: from=<sender@example.com>, size=2048, nrcpt=1 (queue active)",
+                "May 19 00:00:02 mail postfix/smtp[222]: ABC123: to=<target@example.com>, relay=mx.example.com[1.1.1.1]:25, delay=1.2, dsn=2.0.0, status=sent (250 2.0.0 Ok)",
+                "May 19 00:00:03 mail postfix/qmgr[112]: ABC123: removed",
+            ],
+        },
+    )
+
+    result = admin_system_module.search_mail_service_logs(log_key="postfix")
+
+    assert result["status"] == "ok"
+    assert result["summary"]["total"] == 1
+    assert result["summary"]["sent"] == 1
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["queue_id"] == "ABC123"
+    assert item["sender"] == "sender@example.com"
+    assert item["recipient"] == "target@example.com"
+    assert item["message_size"] == 2048
+    assert item["event_count"] == 4
+    assert item["events"][2]["status"] == "sent"
+    assert item["events"][2]["relay"] == "mx.example.com[1.1.1.1]:25"
+
+
+def test_search_mail_service_logs_groups_dovecot_lines_by_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    admin_system_module = importlib.import_module("app.admin_system")
+    monkeypatch.setattr(
+        admin_system_module,
+        "read_mail_service_log",
+        lambda key, line_limit=500: {
+            "key": key,
+            "label": "Dovecot 错误日志",
+            "status": "ok",
+            "detail": "已读取 2 行日志",
+            "source": "file:/var/log/dovecot.log",
+            "lines": [
+                "May 19 09:00:00 mail dovecot: imap-login: Login: user=<alice@example.com>, method=PLAIN, rip=10.0.0.8, lip=10.0.0.2, mpid=201, TLS, session=<IMAPSESS1>",
+                "May 19 09:05:00 mail dovecot: imap(alice@example.com)<201><IMAPSESS1>: Disconnected: Logged out in=245 out=1834 deleted=0 expunged=0 trashed=0 hdr_count=0 hdr_bytes=0 body_count=12 body_bytes=8096",
+            ],
+        },
+    )
+
+    result = admin_system_module.search_mail_service_logs(log_key="imap")
+
+    assert result["status"] == "ok"
+    assert result["summary"]["total"] == 1
+    assert result["summary"]["completed"] == 1
+    item = result["items"][0]
+    assert item["queue_id"] == "IMAPSESS1"
+    assert item["user"] == "alice@example.com"
+    assert item["client_ip"] == "10.0.0.8"
+    assert item["auth_method"] == "PLAIN"
+    assert item["status"] == "completed"
+    assert item["operation_summary"]["in"] == 245
+    assert item["operation_summary"]["out"] == 1834
+
+
 def test_admin_created_user_can_login_with_local_password(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     payload = admin_login(client)

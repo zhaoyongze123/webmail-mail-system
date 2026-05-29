@@ -199,7 +199,7 @@ function renderPage(element: React.ReactElement) {
         success: true,
         data: {
           format: 'csv',
-          content: 'id,log_key,label,status,source,line_number,summary,raw\n"1","postfix","postfix","info","postfix","1","queued message accepted","queued message accepted"',
+          content: 'queue_id,created_at,updated_at,sender,recipients,message_size,status,status_detail,event_count\n"ABC123","2026-05-19T00:00:00Z","2026-05-19T00:01:00Z","sender@example.com","target@example.com","2048","sent","status=sent (250 2.0.0 Ok)","2"',
           media_type: 'text/csv',
           filename: 'mail-logs.csv',
         },
@@ -207,19 +207,117 @@ function renderPage(element: React.ReactElement) {
       }));
     }
     if (url.includes('/api/admin/logs')) {
+      const parsedUrl = new URL(url, 'http://localhost');
+      const protocol = parsedUrl.searchParams.get('domain_id') || 'smtp';
+      if (protocol === 'imap') {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            summary: { total: 1, completed: 1, failed: 0, login: 0, warning: 0 },
+            items: [
+              {
+                id: 'IMAPSESS1',
+                queue_id: 'IMAPSESS1',
+                source: 'imap',
+                sender: 'alice@example.com',
+                recipient: 'alice@example.com',
+                recipients: ['alice@example.com'],
+                message_size: 0,
+                status: 'completed',
+                status_detail: 'Disconnected: Logged out in=245 out=1834',
+                created_at: '2026-05-19T09:00:00Z',
+                updated_at: '2026-05-19T09:05:00Z',
+                event_count: 2,
+                protocol: 'imap',
+                user: 'alice@example.com',
+                auth_method: 'PLAIN',
+                client_ip: '10.0.0.8',
+                server_ip: '10.0.0.2',
+                operation_summary: { in: 245, out: 1834 },
+                events: [
+                  {
+                    time: '2026-05-19T09:00:00Z',
+                    status: 'login',
+                    summary: '账号 alice@example.com，状态 login，登录成功，客户端 10.0.0.8',
+                    recipient: 'alice@example.com',
+                    relay: '10.0.0.8',
+                    delay: null,
+                    dsn: 'PLAIN',
+                    raw: 'May 19 09:00:00 mail dovecot: imap-login: Login: user=<alice@example.com>, method=PLAIN, rip=10.0.0.8, lip=10.0.0.2, mpid=201, TLS, session=<IMAPSESS1>',
+                  },
+                  {
+                    time: '2026-05-19T09:05:00Z',
+                    status: 'completed',
+                    summary: '账号 alice@example.com，状态 completed，会话断开，客户端 10.0.0.8',
+                    recipient: 'alice@example.com',
+                    relay: '10.0.0.8',
+                    delay: null,
+                    dsn: 'PLAIN',
+                    raw: 'May 19 09:05:00 mail dovecot: imap(alice@example.com)<201><IMAPSESS1>: Disconnected: Logged out in=245 out=1834',
+                  },
+                ],
+                raw_lines: [],
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 10,
+            total_pages: 1,
+            updated_at: '2026-05-19T09:05:00Z',
+            detail: '已返回 1 条 IMAP 会话追踪',
+          },
+          error: null,
+        }));
+      }
       return new Response(JSON.stringify({
         success: true,
         data: {
+          summary: { total: 1, sent: 1, deferred: 0, bounced: 0, rejected: 0 },
           items: [
-            { id: 'log-1', source: 'postfix', level: 'info', message: 'queued message accepted', created_at: '2026-05-19T00:00:00Z', actor: 'postfix', target: 'queue-1' },
-            { id: 'log-2', source: 'audit', level: 'warning', message: 'admin config updated', created_at: '2026-05-19T01:00:00Z', actor: 'admin', target: 'system-config' },
+            {
+              id: 'ABC123',
+              queue_id: 'ABC123',
+              source: 'postfix',
+              sender: 'sender@example.com',
+              recipient: 'target@example.com',
+              recipients: ['target@example.com'],
+              message_size: 2048,
+              status: 'sent',
+              status_detail: 'status=sent (250 2.0.0 Ok)',
+              created_at: '2026-05-19T00:00:00Z',
+              updated_at: '2026-05-19T00:01:00Z',
+              event_count: 2,
+              events: [
+                {
+                  time: '2026-05-19T00:00:00Z',
+                  status: 'queued',
+                  summary: '收件人 target@example.com，状态 queued，cleanup 入队',
+                  recipient: 'target@example.com',
+                  relay: null,
+                  delay: null,
+                  dsn: null,
+                  raw: 'May 19 00:00:00 mail postfix/cleanup[111]: ABC123: message-id=<demo@example.com>',
+                },
+                {
+                  time: '2026-05-19T00:01:00Z',
+                  status: 'sent',
+                  summary: '收件人 target@example.com，状态 sent，投递点 mx.example.com[1.1.1.1]:25',
+                  recipient: 'target@example.com',
+                  relay: 'mx.example.com[1.1.1.1]:25',
+                  delay: '1.2',
+                  dsn: '2.0.0',
+                  raw: 'May 19 00:01:00 mail postfix/smtp[222]: ABC123: to=<target@example.com>, relay=mx.example.com[1.1.1.1]:25, delay=1.2, dsn=2.0.0, status=sent (250 2.0.0 Ok)',
+                },
+              ],
+              raw_lines: [],
+            },
           ],
-          total: 2,
+          total: 1,
           page: 1,
-          page_size: 20,
+          page_size: 10,
           total_pages: 1,
           updated_at: '2026-05-19T01:00:00Z',
-          detail: '已返回 2 条日志',
+          detail: '已返回 1 条投递追踪',
         },
         error: null,
       }));
@@ -417,14 +515,28 @@ describe('admin stage A pages', () => {
     expect(screen.getAllByRole('button', { name: '重投' }).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('日志页渲染筛选与日志表格入口', async () => {
+  it('日志页渲染投递追踪列表与详情展开', async () => {
     renderPage(<AdminLogsPage />);
-    expect(await screen.findByRole('heading', { name: '日志筛选' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'SMTP 投递追踪' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '关键字' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '状态' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '发件人' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出日志文件' })).toBeInTheDocument();
-    expect(await screen.findByText('queued message accepted')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出投递追踪' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'ABC123' })).toBeInTheDocument();
+    expect(screen.getByText('sender@example.com')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'ABC123' }));
+    expect(await screen.findByText(/投递点：mx.example.com/)).toBeInTheDocument();
+  });
+
+  it('日志页支持切换到 IMAP 会话追踪', async () => {
+    renderPage(<AdminLogsPage />);
+    expect(await screen.findByRole('heading', { name: 'SMTP 投递追踪' })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: '协议' }), { target: { value: 'imap' } });
+    expect(await screen.findByRole('heading', { name: 'IMAP 会话追踪' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'IMAPSESS1' })).toBeInTheDocument();
+    expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'IMAPSESS1' }));
+    expect(await screen.findByText(/认证方式：PLAIN/)).toBeInTheDocument();
   });
 
   it('审计页接入后端筛选与导出', async () => {

@@ -44,6 +44,11 @@ class FakeSettings:
         self.attachment_ttl_seconds = 3600
         self.attachment_temp_ttl_seconds = 3600
         self.attachments_ttl_seconds = 3600
+        self.attachment_preview_cache_dir = "/tmp/webmail-preview-cache-test"
+        self.attachment_preview_cache_ttl_seconds = 3600
+        self.attachment_preview_cache_max_mb = 32
+        self.attachment_preview_housekeeping_interval_seconds = 1
+        self.attachment_preview_processing_timeout_seconds = 30
 
     @property
     def cors_origin_list(self) -> list[str]:

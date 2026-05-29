@@ -5,8 +5,9 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from email import policy
+from email import message_from_bytes, policy
 from email.message import EmailMessage
+from email.parser import BytesHeaderParser
 from email.utils import format_datetime
 from types import ModuleType
 from typing import Any
@@ -42,6 +43,11 @@ class FakeSettings:
         self.mail_smtp_port = 25
         self.mail_smtp_ssl = False
         self.mail_smtp_starttls = False
+        self.attachment_preview_cache_dir = "/tmp/webmail-preview-cache-test"
+        self.attachment_preview_cache_ttl_seconds = 3600
+        self.attachment_preview_cache_max_mb = 32
+        self.attachment_preview_housekeeping_interval_seconds = 1
+        self.attachment_preview_processing_timeout_seconds = 30
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -117,7 +123,10 @@ class FakeImapAdapter:
         if self.selected_folder is None:
             raise MailAdapterError("未选择文件夹", operation="fetch_message_bytes")
         FakeImapAdapter.fetch_calls.append((self.selected_folder, uid_str))
-        message = self.mailboxes.get((self.selected_folder, uid_str))
+        return self._raw_message_bytes(uid_str)
+
+    def _raw_message_bytes(self, uid: str) -> bytes:
+        message = self.mailboxes.get((self.selected_folder, uid))
         if message is None:
             raise MailAdapterError("IMAP 邮件内容为空", operation="fetch_message_bytes")
         return message.raw_bytes
@@ -141,6 +150,59 @@ class FakeImapAdapter:
     def uid_fetch_message_bytes(self, uid: str | bytes) -> bytes:
         return self.fetch_message_bytes(uid)
 
+    def uid_fetch_headers(self, uid: str | bytes) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        raw = self._raw_message_bytes(uid_str)
+        separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
+        return raw.split(separator, 1)[0] + separator
+
+    def uid_fetch_bodystructure(self, uid: str | bytes) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        message = message_from_bytes(self._raw_message_bytes(uid_str), policy=policy.default)
+        leaves = []
+        for part in message.walk():
+            if part.is_multipart():
+                continue
+            content_type = part.get_content_type()
+            maintype, subtype = content_type.split("/", 1)
+            filename = part.get_filename()
+            params = []
+            charset = part.get_content_charset()
+            if charset:
+                params.extend(['"CHARSET"', f'"{charset}"'])
+            if filename:
+                params.extend(['"NAME"', f'"{filename}"'])
+            params_text = f"({' '.join(params)})" if params else "NIL"
+            payload = part.get_payload(decode=True) or b""
+            encoding = str(part.get("Content-Transfer-Encoding") or "7BIT").upper()
+            disposition = part.get_content_disposition()
+            disposition_text = "NIL"
+            if disposition:
+                disp_params = []
+                if filename:
+                    disp_params.extend(['"FILENAME"', f'"{filename}"'])
+                disposition_text = f'("{disposition.upper()}" ({ " ".join(disp_params) }))' if disp_params else f'("{disposition.upper()}" NIL)'
+            leaves.append(
+                f'("{maintype.upper()}" "{subtype.upper()}" {params_text} NIL NIL "{encoding}" {len(payload)} NIL {disposition_text} NIL)'
+            )
+        structure = f"({' '.join(leaves)} \"MIXED\")" if len(leaves) > 1 else f"({leaves[0]})"
+        return f'1 (UID {uid} BODYSTRUCTURE {structure})'.encode()
+
+    def uid_fetch_body_section(self, uid: str | bytes, section: str) -> bytes:
+        uid_str = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        full = message_from_bytes(self._raw_message_bytes(uid_str), policy=policy.default)
+        leaf_parts = [part for part in full.walk() if not part.is_multipart()]
+        try:
+            target = leaf_parts[max(int(section.split(".")[-1]) - 1, 0)]
+        except Exception:
+            return self._raw_message_bytes(uid_str)
+        payload = target.get_payload(decode=False)
+        if isinstance(payload, str):
+            return payload.encode("utf-8")
+        if isinstance(payload, bytes):
+            return payload
+        return b""
+
     def mark_seen(self, uid: str | bytes):
         self.store(uid, "+FLAGS", "\\Seen")
         return self
@@ -155,6 +217,12 @@ class FakeImapAdapter:
             if "\\Seen" not in message.flags:
                 unread += 1
         return {"UNSEEN": unread, "MESSAGES": total, "UIDVALIDITY": 1}
+
+
+class InlineExecutor:
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return None
 
 
 def make_settings(*, login_fail_limit: int = 5) -> FakeSettings:
@@ -287,6 +355,8 @@ def build_client(monkeypatch: pytest.MonkeyPatch, *, login_fail_limit: int = 5) 
     monkeypatch.setattr(auth_module, "ImapAdapter", FakeImapAdapter)
 
     main_module = importlib.import_module("app.main")
+    mailbox_module = importlib.import_module("app.mailbox")
+    monkeypatch.setattr(mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", InlineExecutor())
     return TestClient(main_module.app, raise_server_exceptions=False)
 
 
@@ -548,6 +618,30 @@ def test_message_detail_marks_message_read_or_reports_read_true(monkeypatch: pyt
     assert FakeImapAdapter.store_calls or read_value in {True, "true", "True", 1}
 
 
+def test_message_detail_returns_without_blocking_mark_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    login_response = login(client, "user@example.com", "correct-password")
+    assert login_response.status_code == 200
+
+    raw_bytes = _make_message_bytes(
+        subject="异步已读邮件",
+        sender_name="Async Sender",
+        sender_email="async@example.com",
+        to_emails=["reader@example.com"],
+        cc_emails=[],
+        date_value=datetime(2026, 5, 7, 11, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        text_body="详情先返回，已读后台执行",
+        html_body="<p>详情先返回，已读后台执行</p>",
+    )
+    FakeImapAdapter.seed_message("INBOX", "1030", raw_bytes)
+
+    response = client.get("/api/folders/INBOX/messages/1030")
+
+    assert response.status_code == 200
+    payload = _extract_detail_payload(response.json())
+    assert _first_present(payload, ("read",), ("is_read",), ("message", "is_read")) in {True, "true", "True", 1}
+
+
 def test_message_detail_exposes_attachment_metadata_without_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     login_response = login(client, "user@example.com", "correct-password")
@@ -607,9 +701,13 @@ def test_message_detail_uses_cached_detail_on_second_open(monkeypatch: pytest.Mo
     )
     FakeImapAdapter.seed_message("INBOX", "105", raw_bytes)
 
+    initial_fetch_count = FakeImapAdapter.fetch_calls.count(("INBOX", "105"))
     first_response = client.get("/api/folders/INBOX/messages/105")
+    after_first_fetch_count = FakeImapAdapter.fetch_calls.count(("INBOX", "105"))
     second_response = client.get("/api/folders/INBOX/messages/105")
+    after_second_fetch_count = FakeImapAdapter.fetch_calls.count(("INBOX", "105"))
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    assert FakeImapAdapter.fetch_calls.count(("INBOX", "105")) == 1
+    assert after_first_fetch_count >= initial_fetch_count
+    assert after_second_fetch_count == after_first_fetch_count

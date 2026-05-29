@@ -10,7 +10,10 @@ import {
   renameFolder,
   deleteFolder,
   fetchFolderMessages,
+  fetchAttachmentPreviewStatus,
   fetchMessageDetail,
+  primeMessageAttachmentPreviewCache,
+  primeMessageDetailCache,
   searchFolderMessages,
   updateMessageOperation,
   moveMessages,
@@ -29,6 +32,14 @@ import { readComposeDraftCache } from './mail/composeDraftCache';
 import SignatureSettings from './mail/SignatureSettings';
 import { MessageBodyView, sanitizeMessageHtml } from './mail/MessageReader';
 import { USER_LOCALE_STORAGE_KEY, setRuntimeLocale } from './i18n/runtime';
+import {
+  DEFAULT_NOTIFICATION_STATE,
+  disableSystemNotifications,
+  enableSystemNotifications,
+  loadNotificationStatus,
+  parseNotificationTargetFromUrl,
+  type NotificationState,
+} from './mail/notifications';
 import type {
   AuthCredentials,
   ContactItem,
@@ -39,6 +50,7 @@ import type {
   SystemSettingsPreferences,
   UserSettingsPreferences,
   MessageAttachment,
+  AttachmentPreviewStatusPayload,
 } from './mail/types';
 
 type AttachmentPreviewState = {
@@ -46,10 +58,21 @@ type AttachmentPreviewState = {
   name: string;
   url: string;
   contentType: string;
+  loading?: boolean;
+  error?: boolean;
+  retryKey?: number;
+  kind?: 'image' | 'pdf' | 'text' | 'file';
+  folder?: string;
+  uid?: string;
+  attachmentId?: string;
 };
 
 function buildAttachmentPreviewUrl(folder: string, uid: string, attachmentId: string) {
   return `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(attachmentId)}/preview`;
+}
+
+function buildAttachmentPreviewThumbnailUrl(folder: string, uid: string, attachmentId: string) {
+  return `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(attachmentId)}/preview-thumbnail`;
 }
 
 function AppIcon({
@@ -373,6 +396,8 @@ export default function App() {
   const [accountEmail, setAccountEmail] = useState('user@localhost');
   const [hasAccountContext, setHasAccountContext] = useState(false);
   const [isInitialDataReady, setIsInitialDataReady] = useState(false);
+  const [notificationState, setNotificationState] = useState<NotificationState>(DEFAULT_NOTIFICATION_STATE);
+  const [notificationLoading, setNotificationLoading] = useState(false);
 
   // Compose State
   const [isComposing, setIsComposing] = useState(false);
@@ -380,12 +405,15 @@ export default function App() {
   const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: MailMessageSummary; submenu: 'move' | null } | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
+  const [attachmentPreviewStatuses, setAttachmentPreviewStatuses] = useState<Record<string, AttachmentPreviewStatusPayload>>({});
   const [hoveredMessageUid, setHoveredMessageUid] = useState<string | null>(null);
   const suppressAutoMarkReadRef = useRef<string | null>(null);
+  const hoverPrefetchTimerRef = useRef<number | null>(null);
   const generalSettingsRef = useRef<HTMLElement | null>(null);
   const appearanceSettingsRef = useRef<HTMLElement | null>(null);
   const securitySettingsRef = useRef<HTMLFormElement | null>(null);
   const accountSettingsRef = useRef<HTMLElement | null>(null);
+  const notificationTargetRef = useRef(parseNotificationTargetFromUrl(window.location));
 
   const normalizePreferences = (value: Partial<UserSettingsPreferences> | null | undefined): UserSettingsPreferences => ({
     system: {
@@ -486,6 +514,7 @@ export default function App() {
     const id = attachmentId(attachment);
     return id ? buildAttachmentPreviewUrl(folder, uid, id) : '';
   };
+  const ATTACHMENT_PREVIEW_POLL_MS = 250;
 
   const formatSize = (value?: number | null) => {
     if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -502,14 +531,42 @@ export default function App() {
 
   const openAttachmentPreview = (attachment: MessageAttachment) => {
     if (!selectedMessage) return;
+    const id = attachmentId(attachment);
     const url = attachmentPreviewUrl(currentFolder, selectedMessage.uid, attachment);
-    if (!url) return;
+    if (!url || !id) return;
+    const knownStatus = attachmentPreviewStatuses[id] || attachment.preview_status || null;
+    const previewReady = Boolean(attachment.preview_ready || knownStatus?.ready);
+    const previewUnavailable = knownStatus?.status === 'failed' || knownStatus?.status === 'unsupported';
     setAttachmentPreview({
       open: true,
       name: attachment.filename || '未命名附件',
       url,
       contentType: attachment.content_type || '',
+      loading: !previewReady && !previewUnavailable,
+      error: previewUnavailable,
+      retryKey: Date.now(),
+      kind: attachmentPreviewKind(attachment),
+      folder: currentFolder,
+      uid: selectedMessage.uid,
+      attachmentId: id,
     });
+  };
+
+  const markAttachmentPreviewLoaded = () => {
+    setAttachmentPreview((current) => current ? { ...current, loading: false, error: false } : current);
+  };
+
+  const markAttachmentPreviewFailed = () => {
+    setAttachmentPreview((current) => current ? { ...current, loading: false, error: true } : current);
+  };
+
+  const retryAttachmentPreview = () => {
+    setAttachmentPreview((current) => current ? {
+      ...current,
+      loading: true,
+      error: false,
+      retryKey: Date.now(),
+    } : current);
   };
 
   const contactStorageKey = (scope: string) => `webmail-contacts:${scope.trim().toLowerCase() || 'default'}`;
@@ -638,14 +695,42 @@ export default function App() {
     setRuntimeLocale(locale);
   }, [preferences.system.language]);
 
+  useEffect(() => {
+    let cancelled = false;
+    loadNotificationStatus()
+      .then((state) => {
+        if (!cancelled) {
+          setNotificationState(state);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNotificationState({
+            ...DEFAULT_NOTIFICATION_STATE,
+            capability: 'supported',
+            permission: typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+            status: 'error',
+            message: '系统通知状态读取失败，请稍后重试。',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
   // Load Folders & Settings
   useEffect(() => {
     let cancelled = false;
     setIsInitialDataReady(false);
+    const initialTarget = notificationTargetRef.current;
     fetchFolders().then((res) => {
       if (cancelled) return;
       setIsAuthenticated(true);
       applyFolders(res.folders || []);
+      if (initialTarget.folder && res.folders.some((folder) => folder.name === initialTarget.folder)) {
+        setCurrentFolder(initialTarget.folder);
+      }
     }).catch((error) => {
       const message = handleApiError(error);
       const typedError = error as Error & { code?: string };
@@ -770,6 +855,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedMessage) {
       setMessageBody({ html: null, text: '', attachments: [] });
+      setAttachmentPreviewStatuses({});
       return;
     }
 
@@ -806,6 +892,164 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedMessage, currentFolder, preferences.system.mark_read_on_open]);
+
+  useEffect(() => {
+    if (!selectedMessage) {
+      setAttachmentPreviewStatuses({});
+      return;
+    }
+
+    const previewableAttachments = (messageBody.attachments || [])
+      .filter((attachment) => canPreviewAttachment(attachment))
+      .map((attachment) => ({ attachment, id: attachmentId(attachment) }))
+      .filter((item) => item.id);
+
+    if (!previewableAttachments.length) {
+      setAttachmentPreviewStatuses({});
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const loadStatuses = async () => {
+      const pairs = await Promise.all(
+        previewableAttachments.map(async ({ attachment, id }) => {
+          try {
+            const status = await fetchAttachmentPreviewStatus(currentFolder, selectedMessage.uid, id);
+            return [id, status] as const;
+          } catch {
+            return [
+              id,
+              {
+                attachment_id: id,
+                filename: attachment.filename,
+                content_type: attachment.content_type || '',
+                preview_kind: attachmentPreviewKind(attachment) === 'file' ? null : attachmentPreviewKind(attachment),
+                status: 'failed' as const,
+                ready: false,
+                error_message: '预览状态获取失败',
+              },
+            ] as const;
+          }
+        }),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      const nextStatuses: Record<string, AttachmentPreviewStatusPayload> = Object.fromEntries(pairs);
+      setAttachmentPreviewStatuses(nextStatuses);
+
+      if (Object.values(nextStatuses).some((item) => item.status === 'missing' || item.status === 'pending' || item.status === 'processing')) {
+        timer = window.setTimeout(() => {
+          void loadStatuses();
+        }, ATTACHMENT_PREVIEW_POLL_MS);
+      }
+    };
+
+    void loadStatuses();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [selectedMessage?.uid, currentFolder, messageBody.attachments]);
+
+  useEffect(() => {
+    if (!attachmentPreview?.open || !attachmentPreview.loading || !attachmentPreview.folder || !attachmentPreview.uid || !attachmentPreview.attachmentId) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const pollStatus = async () => {
+      try {
+        const status = await fetchAttachmentPreviewStatus(
+          attachmentPreview.folder!,
+          attachmentPreview.uid!,
+          attachmentPreview.attachmentId!,
+        );
+        if (cancelled) {
+          return;
+        }
+        setAttachmentPreviewStatuses((current) => ({
+          ...current,
+          [attachmentPreview.attachmentId!]: status,
+        }));
+        if (status.ready) {
+          setAttachmentPreview((current) => current ? { ...current, loading: false, error: false } : current);
+          return;
+        }
+        if (status.status === 'failed' || status.status === 'unsupported') {
+          setAttachmentPreview((current) => current ? { ...current, loading: false, error: true } : current);
+          return;
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+      }
+
+      timer = window.setTimeout(() => {
+        void pollStatus();
+      }, ATTACHMENT_PREVIEW_POLL_MS);
+    };
+
+    void pollStatus();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [attachmentPreview?.open, attachmentPreview?.loading, attachmentPreview?.retryKey, attachmentPreview?.folder, attachmentPreview?.uid, attachmentPreview?.attachmentId]);
+
+  useEffect(() => {
+    const target = notificationTargetRef.current;
+    if (!target.uid || !messages.length) {
+      return;
+    }
+    const matched = messages.find((message) => (
+      message.uid === target.uid || (target.messageId && message.message_id === target.messageId)
+    ));
+    if (!matched) {
+      return;
+    }
+    setSelectedMessage(matched);
+    notificationTargetRef.current = { folder: null, uid: null, messageId: null };
+    const nextUrl = `${window.location.pathname}${window.location.hash || ''}`;
+    window.history.replaceState({}, '', nextUrl);
+  }, [messages]);
+
+  useEffect(() => {
+    if (!hoveredMessageUid || !currentFolder) {
+      if (hoverPrefetchTimerRef.current !== null) {
+        window.clearTimeout(hoverPrefetchTimerRef.current);
+        hoverPrefetchTimerRef.current = null;
+      }
+      return;
+    }
+    if (selectedMessage?.uid === hoveredMessageUid) {
+      return;
+    }
+    hoverPrefetchTimerRef.current = window.setTimeout(() => {
+      void primeMessageDetailCache(currentFolder, hoveredMessageUid).catch(() => undefined);
+      void primeMessageAttachmentPreviewCache(currentFolder, hoveredMessageUid).catch(() => undefined);
+      hoverPrefetchTimerRef.current = null;
+    }, 180);
+    return () => {
+      if (hoverPrefetchTimerRef.current !== null) {
+        window.clearTimeout(hoverPrefetchTimerRef.current);
+        hoverPrefetchTimerRef.current = null;
+      }
+    };
+  }, [hoveredMessageUid, currentFolder, selectedMessage?.uid]);
 
   useEffect(() => {
     if (!showContacts || !hasAccountContext) {
@@ -1174,6 +1418,24 @@ export default function App() {
     }
   };
 
+  const handleToggleNotifications = async (enabled: boolean) => {
+    setNotificationLoading(true);
+    try {
+      const nextState = enabled
+        ? await enableSystemNotifications()
+        : await disableSystemNotifications();
+      setNotificationState(nextState);
+    } catch (error) {
+      setNotificationState((current) => ({
+        ...current,
+        status: 'error',
+        message: (error as Error).message || '系统通知操作失败，请稍后重试。',
+      }));
+    } finally {
+      setNotificationLoading(false);
+    }
+  };
+
   const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
@@ -1323,6 +1585,10 @@ export default function App() {
         if (settingsResult.account?.email) setAccountEmail(settingsResult.account.email);
         if (settingsResult.preferences) setPreferences(normalizePreferences(settingsResult.preferences));
       });
+      const target = notificationTargetRef.current;
+      if (target.folder) {
+        setCurrentFolder(target.folder);
+      }
     } catch (error) {
       setAuthError((error as Error).message || '认证失败');
     } finally {
@@ -1368,6 +1634,7 @@ export default function App() {
       dateTo: '',
       hasAttachments: false,
     });
+    setNotificationState(DEFAULT_NOTIFICATION_STATE);
   };
 
   const buildReplyQuote = (message: MailMessageSummary, body: { html: string | null; text: string }): ComposeValues => {
@@ -2123,33 +2390,85 @@ export default function App() {
                         const id = attachmentId(attachment);
                         const downloadHref = id ? buildAttachmentUrl(currentFolder, selectedMessage.uid, id) : '#';
                         const previewHref = id ? buildAttachmentPreviewUrl(currentFolder, selectedMessage.uid, id) : '#';
+                        const thumbnailHref = id ? buildAttachmentPreviewThumbnailUrl(currentFolder, selectedMessage.uid, id) : '#';
                         const attachmentType = attachment.content_type || '未知类型';
                         const size = formatSize(attachment.size_bytes ?? attachment.size ?? null);
                         const previewKind = attachmentPreviewKind(attachment);
                         const previewable = canPreviewAttachment(attachment);
+                        const previewStatus = id ? attachmentPreviewStatuses[id] : null;
+                        const previewReady = Boolean(attachment.preview_ready || previewStatus?.ready);
+                        const thumbnailReady = Boolean(attachment.thumbnail_ready || previewStatus?.thumbnail_ready);
+                        const previewLoading = previewable && !previewReady && previewStatus?.status !== 'failed' && previewStatus?.status !== 'unsupported';
+                        const previewFailed = previewStatus?.status === 'failed';
                         return (
                           <li key={id || attachment.filename}>
                             <div className="reading-attachment-card">
                               <div className="reading-attachment-card__preview">
-                                {previewable ? (
-                                  previewKind === 'image' ? (
+                                {previewable && thumbnailReady && (previewKind === 'pdf' || previewKind === 'text') ? (
+                                  <>
                                     <img
-                                      src={previewHref}
-                                      alt={attachment.filename || '附件预览'}
-                                      className="reading-attachment-card__preview-media"
+                                      src={thumbnailHref}
+                                      alt={`${attachment.filename || '附件'} 缩略图`}
+                                      className="reading-attachment-card__preview-media reading-attachment-card__preview-media--pdf"
+                                      loading="lazy"
+                                      onError={(event) => {
+                                        const target = event.currentTarget;
+                                        target.style.display = 'none';
+                                        const fallback = target.parentElement?.querySelector('.reading-attachment-card__preview-soft');
+                                        if (fallback instanceof HTMLElement) {
+                                          fallback.hidden = false;
+                                        }
+                                      }}
                                     />
+                                    <div className="reading-attachment-card__preview-soft" hidden>
+                                      <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                      <span>预览生成中</span>
+                                    </div>
+                                  </>
+                                ) : previewable && previewReady ? (
+                                  previewKind === 'image' ? (
+                                    <>
+                                      <img
+                                        src={previewHref}
+                                        alt={attachment.filename || '附件预览'}
+                                        className="reading-attachment-card__preview-media"
+                                        loading="lazy"
+                                        onError={(event) => {
+                                          const target = event.currentTarget;
+                                          target.dataset.previewFailed = 'true';
+                                          target.style.display = 'none';
+                                          const fallback = target.parentElement?.querySelector('.reading-attachment-card__preview-soft');
+                                          if (fallback instanceof HTMLElement) {
+                                            fallback.hidden = false;
+                                          }
+                                        }}
+                                      />
+                                      <div className="reading-attachment-card__preview-soft" hidden>
+                                        <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                        <span>预览生成中</span>
+                                      </div>
+                                    </>
                                   ) : previewKind === 'pdf' ? (
-                                    <iframe
-                                      src={previewHref}
-                                      title={`${attachment.filename || '附件'} 预览`}
-                                      className="reading-attachment-card__preview-frame"
-                                    />
+                                    <div className="reading-attachment-card__preview-soft">
+                                      <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                      <span>预览生成中</span>
+                                    </div>
                                   ) : (
                                     <div className="reading-attachment-card__preview-fallback">
                                       <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
                                       <span>可预览附件</span>
                                     </div>
                                   )
+                                ) : previewLoading ? (
+                                  <div className="reading-attachment-card__preview-soft">
+                                    <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                    <span>预览生成中</span>
+                                  </div>
+                                ) : previewFailed ? (
+                                  <div className="reading-attachment-card__preview-fallback">
+                                    <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                    <span>预览生成失败</span>
+                                  </div>
                                 ) : (
                                   <div className="reading-attachment-card__preview-fallback">
                                     <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
@@ -2159,8 +2478,11 @@ export default function App() {
                               </div>
                               <div className="reading-attachment-card__footer">
                                 <div className="reading-attachment-card__meta">
-                                  <strong>{attachment.filename || '未命名附件'}</strong>
-                                  <span>{attachmentType} · {size}</span>
+                                  <AttachmentKindIcon contentType={attachmentType} filename={attachment.filename || ''} />
+                                  <div className="reading-attachment-card__meta-text">
+                                    <strong>{attachment.filename || '未命名附件'}</strong>
+                                    <span className="reading-attachment-card__detail">{attachmentType} · {size}</span>
+                                  </div>
                                 </div>
                                 <div className="reading-attachment-card__actions">
                                   {previewable ? (
@@ -2168,13 +2490,22 @@ export default function App() {
                                       type="button"
                                       className="attachment-action"
                                       aria-label={`预览 ${attachment.filename || '附件'}`}
+                                      title="预览"
                                       onClick={() => openAttachmentPreview(attachment)}
                                     >
-                                      预览
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                      </svg>
                                     </button>
                                   ) : null}
-                                  <a href={downloadHref} download={attachment.filename || undefined} aria-disabled={!id}>
-                                    下载
+                                  <a href={downloadHref} download={attachment.filename || undefined} aria-disabled={!id} title="下载">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M12 3v11"></path>
+                                      <path d="m7 10 5 5 5-5"></path>
+                                      <path d="M5 21h14"></path>
+                                    </svg>
+                                    <span className="visually-hidden">下载</span>
                                   </a>
                                 </div>
                               </div>
@@ -2209,11 +2540,40 @@ export default function App() {
               </AppIcon>
             </div>
             <div className="attachment-preview-body">
-              {attachmentPreview.contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachmentPreview.name) ? (
-                <img src={attachmentPreview.url} alt={attachmentPreview.name} className="attachment-preview-media" />
-              ) : (
-                <iframe src={attachmentPreview.url} title={attachmentPreview.name} className="attachment-preview-frame" />
-              )}
+              {attachmentPreview.loading ? (
+                <div className="attachment-preview-loading" aria-live="polite">
+                  <AttachmentKindIcon contentType={attachmentPreview.contentType} filename={attachmentPreview.name} />
+                  <strong>正在准备预览</strong>
+                  <span>后台正在静默加载附件内容，请稍候。</span>
+                </div>
+              ) : null}
+              {attachmentPreview.error && attachmentPreview.kind === 'image' ? (
+                <div className="attachment-preview-error" aria-live="polite">
+                  <AttachmentKindIcon contentType={attachmentPreview.contentType} filename={attachmentPreview.name} />
+                  <strong>预览暂时不可用</strong>
+                  <span>附件仍可下载，或稍后重试预览。</span>
+                  <button type="button" className="attachment-preview-retry" onClick={retryAttachmentPreview}>重新加载</button>
+                </div>
+              ) : null}
+              {!attachmentPreview.loading && (attachmentPreview.contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachmentPreview.name)) ? (
+                <img
+                  src={`${attachmentPreview.url}${attachmentPreview.retryKey ? `?v=${attachmentPreview.retryKey}` : ''}`}
+                  alt={attachmentPreview.name}
+                  className="attachment-preview-media"
+                  style={{ display: attachmentPreview.error ? 'none' : 'block' }}
+                  onLoad={markAttachmentPreviewLoaded}
+                  onError={markAttachmentPreviewFailed}
+                />
+              ) : null}
+              {!attachmentPreview.loading && !(attachmentPreview.contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachmentPreview.name)) ? (
+                <iframe
+                  src={`${attachmentPreview.url}${attachmentPreview.retryKey ? `?v=${attachmentPreview.retryKey}` : ''}`}
+                  title={attachmentPreview.name}
+                  className="attachment-preview-frame"
+                  style={{ opacity: 1 }}
+                  onLoad={markAttachmentPreviewLoaded}
+                />
+              ) : null}
             </div>
           </div>
         </div>
@@ -2377,6 +2737,35 @@ export default function App() {
                     value={preferences.user.bio}
                     onChange={(event) => setPreferences((current) => ({ ...current, user: { ...current.user, bio: event.target.value } }))}
                   />
+                </div>
+                <div className="settings-field settings-field-full">
+                  <div className="settings-utility-card">
+                    <div>
+                      <strong>新邮件系统通知</strong>
+                      <p>{notificationState.message || '启用后可在浏览器标签页关闭时接收系统级新邮件提醒。'}</p>
+                    </div>
+                    {notificationState.capability === 'supported' ? (
+                      <label className="settings-switch">
+                        <input
+                          type="checkbox"
+                          aria-label="新邮件系统通知"
+                          checked={notificationState.status === 'enabled'}
+                          onChange={(event) => {
+                            void handleToggleNotifications(event.target.checked);
+                          }}
+                          disabled={notificationLoading || notificationState.status === 'checking'}
+                        />
+                        <span>{notificationLoading ? '处理中...' : notificationState.status === 'enabled' ? '已启用' : '未启用'}</span>
+                      </label>
+                    ) : (
+                      <span className="settings-pill settings-pill--muted">当前浏览器不支持</span>
+                    )}
+                  </div>
+                  {notificationState.subscriptionEndpoint ? (
+                    <span className="settings-help-text">
+                      当前订阅：{notificationState.subscriptionEndpoint}
+                    </span>
+                  ) : null}
                 </div>
               </div>
             </section>

@@ -59,6 +59,42 @@ DEFAULT_DKIM_SELECTOR = "default"
 DEFAULT_LOG_TAIL_LINES = 40
 DEFAULT_LOG_EXPORT_LIMIT = 500
 CONFIG_PREVIEW_LINE_LIMIT = 120
+SYSLOG_TIMESTAMP_RE = re.compile(r"^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+")
+POSTFIX_QUEUE_LINE_RE = re.compile(
+    r"^(?P<prefix>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+postfix/[^:]+:\s+)"
+    r"(?P<queue_id>[A-F0-9]+):\s+(?P<message>.+)$"
+)
+POSTFIX_FROM_RE = re.compile(r"\bfrom=<([^>]*)>")
+POSTFIX_TO_RE = re.compile(r"\bto=<([^>]*)>")
+POSTFIX_STATUS_RE = re.compile(r"\bstatus=([a-z_]+)")
+POSTFIX_SIZE_RE = re.compile(r"\bsize=(\d+)")
+POSTFIX_RELAY_RE = re.compile(r"\brelay=([^,\s]+)")
+POSTFIX_DELAY_RE = re.compile(r"\bdelay=([^,\s]+)")
+POSTFIX_DSN_RE = re.compile(r"\bdsn=([^,\s]+)")
+DOVECOT_LOGIN_RE = re.compile(
+    r"^(?P<prefix>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+dovecot:\s+)"
+    r"(?P<protocol>imap|pop3)-login:\s+Login:\s+user=<(?P<user>[^>]*)>,\s+method=(?P<method>[^,]+),\s+"
+    r"rip=(?P<rip>[^,]+),\s+lip=(?P<lip>[^,]+).*?session=<(?P<session>[^>]+)>"
+)
+DOVECOT_SESSION_RE = re.compile(
+    r"^(?P<prefix>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+dovecot:\s+)"
+    r"(?P<protocol>imap|pop3)\((?P<user>[^)]*)\)<(?P<pid>\d+)><(?P<session>[^>]+)>:\s+(?P<message>.+)$"
+)
+DOVECOT_COUNTER_RE = re.compile(r"\b(in|out|deleted|expunged|trashed|top|retr|size)=([0-9]+)")
+MONTH_LOOKUP = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
 
 SERVICE_UNITS = {
     "postfix": ["postfix", "postfix.service"],
@@ -1427,6 +1463,404 @@ def _line_matches_log_query(
     return True
 
 
+def _parse_syslog_datetime(value: str) -> datetime | None:
+    """将 syslog 前缀时间解析为当前年份的 UTC 时间。"""
+    matched = SYSLOG_TIMESTAMP_RE.match(value)
+    if not matched:
+        return None
+    month = MONTH_LOOKUP.get(matched.group("month"))
+    if month is None:
+        return None
+    now = datetime.now(UTC)
+    return datetime(
+        year=now.year,
+        month=month,
+        day=int(matched.group("day")),
+        hour=int(matched.group("time")[0:2]),
+        minute=int(matched.group("time")[3:5]),
+        second=int(matched.group("time")[6:8]),
+        tzinfo=UTC,
+    )
+
+
+def _normalize_log_status(status: str | None) -> str:
+    """将 Postfix 状态映射为前端可读的有限集合。"""
+    normalized = (status or "").strip().lower()
+    mapping = {
+        "sent": "sent",
+        "deferred": "deferred",
+        "bounced": "bounced",
+        "reject": "rejected",
+        "rejected": "rejected",
+        "warning": "warning",
+    }
+    return mapping.get(normalized, normalized or "processing")
+
+
+def _status_label_for_message(message: str) -> str:
+    """从无 status 字段的日志语句推断阶段状态。"""
+    lowered = message.lower()
+    if "queued as" in lowered or "message-id=" in lowered:
+        return "queued"
+    if " connect from " in lowered or " client=" in lowered:
+        return "accepted"
+    if " removed" in lowered:
+        return "removed"
+    if "warning" in lowered:
+        return "warning"
+    return "processing"
+
+
+def _build_event_summary(*, to_address: str | None, status: str, relay: str | None, detail: str) -> str:
+    """生成运维列表中可直接扫读的事件摘要。"""
+    parts = []
+    if to_address:
+        parts.append(f"收件人 {to_address}")
+    parts.append(f"状态 {status}")
+    if relay:
+        parts.append(f"投递点 {relay}")
+    if detail:
+        parts.append(detail[:160])
+    return "，".join(parts)
+
+
+def _build_dovecot_event_summary(*, user: str, status: str, action: str, rip: str | None) -> str:
+    """生成 Dovecot 会话事件摘要。"""
+    parts = [f"账号 {user}" if user else "账号未知", f"状态 {status}", action]
+    if rip:
+        parts.append(f"客户端 {rip}")
+    return "，".join(parts)
+
+
+def _parse_dovecot_status(message: str) -> str:
+    """将 Dovecot 会话消息归一化成有限状态。"""
+    lowered = message.lower()
+    if "login:" in lowered:
+        return "login"
+    if "disconnected:" in lowered and "logged out" in lowered:
+        return "completed"
+    if "disconnected:" in lowered and ("aborted login" in lowered or "auth failed" in lowered or "no auth attempts" in lowered):
+        return "failed"
+    if "disconnected:" in lowered:
+        return "disconnected"
+    if "warning:" in lowered or "error:" in lowered:
+        return "warning"
+    return "processing"
+
+
+def _parse_postfix_delivery_logs(
+    lines: list[str],
+    *,
+    query: str | None,
+    status_filter: str | None,
+    sender: str | None,
+    recipient: str | None,
+    date_from: str | None,
+    date_to: str | None,
+) -> dict[str, object]:
+    """将 Postfix 多行日志聚合为按邮件维度的追踪记录。"""
+    grouped: dict[str, dict[str, object]] = {}
+    start_at = datetime.fromisoformat(date_from) if date_from else None
+    end_at = datetime.fromisoformat(date_to) if date_to else None
+    if start_at and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=UTC)
+    if end_at and end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=UTC)
+
+    for line in lines:
+        matched = POSTFIX_QUEUE_LINE_RE.match(line)
+        if not matched:
+            continue
+        queue_id = matched.group("queue_id")
+        message = matched.group("message")
+        event_time = _parse_syslog_datetime(line)
+        item = grouped.setdefault(
+            queue_id,
+            {
+                "id": queue_id,
+                "queue_id": queue_id,
+                "source": "postfix",
+                "sender": "",
+                "recipients": [],
+                "message_size": 0,
+                "status": "processing",
+                "status_detail": "",
+                "created_at": None,
+                "updated_at": None,
+                "events": [],
+                "raw_lines": [],
+                "event_count": 0,
+            },
+        )
+        sender_match = POSTFIX_FROM_RE.search(message)
+        recipient_match = POSTFIX_TO_RE.search(message)
+        status_match = POSTFIX_STATUS_RE.search(message)
+        size_match = POSTFIX_SIZE_RE.search(message)
+        relay_match = POSTFIX_RELAY_RE.search(message)
+        delay_match = POSTFIX_DELAY_RE.search(message)
+        dsn_match = POSTFIX_DSN_RE.search(message)
+        current_status = _normalize_log_status(status_match.group(1) if status_match else _status_label_for_message(message))
+        current_sender = sender_match.group(1).strip() if sender_match else ""
+        current_recipient = recipient_match.group(1).strip() if recipient_match else ""
+        if current_sender:
+            item["sender"] = current_sender
+        if current_recipient and current_recipient not in item["recipients"]:
+            item["recipients"].append(current_recipient)
+        if size_match:
+            item["message_size"] = int(size_match.group(1))
+        if event_time:
+            current_created = item.get("created_at")
+            current_updated = item.get("updated_at")
+            if current_created is None or event_time < current_created:
+                item["created_at"] = event_time
+            if current_updated is None or event_time > current_updated:
+                item["updated_at"] = event_time
+        detail = message
+        event = {
+            "time": event_time.isoformat() if event_time else None,
+            "status": current_status,
+            "summary": _build_event_summary(
+                to_address=current_recipient or None,
+                status=current_status,
+                relay=relay_match.group(1) if relay_match else None,
+                detail=detail,
+            ),
+            "recipient": current_recipient or None,
+            "relay": relay_match.group(1) if relay_match else None,
+            "delay": delay_match.group(1) if delay_match else None,
+            "dsn": dsn_match.group(1) if dsn_match else None,
+            "raw": line,
+        }
+        item["events"].append(event)
+        item["raw_lines"].append(line)
+        item["event_count"] = int(item["event_count"]) + 1
+        item["status"] = current_status
+        item["status_detail"] = detail[:200]
+
+    keyword = (query or "").strip().lower()
+    normalized_sender = (sender or "").strip().lower()
+    normalized_recipient = (recipient or "").strip().lower()
+    normalized_status = _normalize_log_status(status_filter) if status_filter else ""
+
+    items: list[dict[str, object]] = []
+    for item in grouped.values():
+        created_at = item.get("created_at")
+        updated_at = item.get("updated_at")
+        effective_time = updated_at or created_at
+        if start_at and (effective_time is None or effective_time < start_at):
+            continue
+        if end_at and (effective_time is None or effective_time > end_at):
+            continue
+        if normalized_status and item["status"] != normalized_status:
+            continue
+        if normalized_sender and normalized_sender not in str(item.get("sender") or "").lower():
+            continue
+        recipients = [str(value) for value in item.get("recipients", [])]
+        if normalized_recipient and not any(normalized_recipient in value.lower() for value in recipients):
+            continue
+        searchable_parts = [
+            str(item.get("queue_id") or ""),
+            str(item.get("sender") or ""),
+            " ".join(recipients),
+            " ".join(str(event.get("raw") or "") for event in item.get("events", [])),
+        ]
+        if keyword and keyword not in " ".join(searchable_parts).lower():
+            continue
+        normalized_item = dict(item)
+        normalized_item["created_at"] = created_at.isoformat() if created_at else None
+        normalized_item["updated_at"] = updated_at.isoformat() if updated_at else None
+        normalized_item["recipient"] = recipients[0] if recipients else ""
+        normalized_item["recipients"] = recipients
+        items.append(normalized_item)
+
+    items.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    summary = {
+        "total": len(items),
+        "sent": sum(1 for item in items if item.get("status") == "sent"),
+        "deferred": sum(1 for item in items if item.get("status") == "deferred"),
+        "bounced": sum(1 for item in items if item.get("status") == "bounced"),
+        "rejected": sum(1 for item in items if item.get("status") == "rejected"),
+    }
+    return {
+        "status": "ok",
+        "detail": f"共聚合 {len(items)} 封邮件投递记录",
+        "items": items,
+        "summary": summary,
+    }
+
+
+def _parse_dovecot_session_logs(
+    lines: list[str],
+    *,
+    log_key: str,
+    query: str | None,
+    status_filter: str | None,
+    sender: str | None,
+    recipient: str | None,
+    date_from: str | None,
+    date_to: str | None,
+) -> dict[str, object]:
+    """将 Dovecot IMAP/POP3 多行日志聚合为按会话维度的追踪记录。"""
+    grouped: dict[str, dict[str, object]] = {}
+    start_at = datetime.fromisoformat(date_from) if date_from else None
+    end_at = datetime.fromisoformat(date_to) if date_to else None
+    if start_at and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=UTC)
+    if end_at and end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=UTC)
+
+    for line in lines:
+        login_match = DOVECOT_LOGIN_RE.match(line)
+        session_match = DOVECOT_SESSION_RE.match(line)
+        if not login_match and not session_match:
+            continue
+        matched = login_match or session_match
+        assert matched is not None
+        protocol = matched.group("protocol")
+        session_id = matched.group("session")
+        event_time = _parse_syslog_datetime(line)
+        item = grouped.setdefault(
+            session_id,
+            {
+                "id": session_id,
+                "queue_id": session_id,
+                "source": protocol,
+                "sender": matched.groupdict().get("user", "") or "",
+                "recipients": [],
+                "message_size": 0,
+                "status": "processing",
+                "status_detail": "",
+                "created_at": None,
+                "updated_at": None,
+                "events": [],
+                "raw_lines": [],
+                "event_count": 0,
+                "protocol": protocol,
+                "user": matched.groupdict().get("user", "") or "",
+                "auth_method": matched.groupdict().get("method"),
+                "client_ip": matched.groupdict().get("rip"),
+                "server_ip": matched.groupdict().get("lip"),
+                "operation_summary": {},
+            },
+        )
+        user = matched.groupdict().get("user", "") or str(item.get("user") or "")
+        if user:
+            item["sender"] = user
+            item["user"] = user
+        rip = matched.groupdict().get("rip")
+        lip = matched.groupdict().get("lip")
+        if rip:
+            item["client_ip"] = rip
+        if lip:
+            item["server_ip"] = lip
+        message = line
+        event_action = "登录建立"
+        if login_match:
+            detail = f"Login: user=<{user}>"
+            event_status = "login"
+            event_action = "登录成功"
+        else:
+            detail = session_match.group("message")
+            event_status = _parse_dovecot_status(detail)
+            if detail.lower().startswith("disconnected:"):
+                event_action = "会话断开"
+            elif detail.lower().startswith("fetch"):
+                event_action = "收信读取"
+            elif detail.lower().startswith("expunge"):
+                event_action = "删除邮件"
+            elif detail.lower().startswith("copy"):
+                event_action = "复制邮件"
+            elif detail.lower().startswith("select"):
+                event_action = "切换文件夹"
+        counters = {key: int(value) for key, value in DOVECOT_COUNTER_RE.findall(detail)}
+        if counters:
+            operation_summary = dict(item.get("operation_summary") or {})
+            operation_summary.update(counters)
+            item["operation_summary"] = operation_summary
+        if event_time:
+            current_created = item.get("created_at")
+            current_updated = item.get("updated_at")
+            if current_created is None or event_time < current_created:
+                item["created_at"] = event_time
+            if current_updated is None or event_time > current_updated:
+                item["updated_at"] = event_time
+        event = {
+            "time": event_time.isoformat() if event_time else None,
+            "status": event_status,
+            "summary": _build_dovecot_event_summary(
+                user=user,
+                status=event_status,
+                action=event_action,
+                rip=str(item.get("client_ip") or "") or None,
+            ),
+            "recipient": user or None,
+            "relay": str(item.get("client_ip") or "") or None,
+            "delay": None,
+            "dsn": str(item.get("auth_method") or "") or None,
+            "raw": message,
+        }
+        item["events"].append(event)
+        item["raw_lines"].append(message)
+        item["event_count"] = int(item["event_count"]) + 1
+        item["status"] = event_status
+        item["status_detail"] = detail[:200]
+
+    keyword = (query or "").strip().lower()
+    normalized_status = (status_filter or "").strip().lower()
+    normalized_sender = (sender or "").strip().lower()
+    normalized_recipient = (recipient or "").strip().lower()
+
+    items: list[dict[str, object]] = []
+    for item in grouped.values():
+        if log_key not in (None, "", "dovecot", str(item.get("protocol"))):
+            continue
+        created_at = item.get("created_at")
+        updated_at = item.get("updated_at")
+        effective_time = updated_at or created_at
+        if start_at and (effective_time is None or effective_time < start_at):
+            continue
+        if end_at and (effective_time is None or effective_time > end_at):
+            continue
+        if normalized_status and str(item.get("status") or "").lower() != normalized_status:
+            continue
+        user = str(item.get("user") or "")
+        if normalized_sender and normalized_sender not in user.lower():
+            continue
+        if normalized_recipient and normalized_recipient not in user.lower():
+            continue
+        searchable = " ".join([
+            str(item.get("queue_id") or ""),
+            user,
+            str(item.get("client_ip") or ""),
+            str(item.get("auth_method") or ""),
+            " ".join(str(event.get("raw") or "") for event in item.get("events", [])),
+        ]).lower()
+        if keyword and keyword not in searchable:
+            continue
+        normalized_item = dict(item)
+        normalized_item["created_at"] = created_at.isoformat() if created_at else None
+        normalized_item["updated_at"] = updated_at.isoformat() if updated_at else None
+        normalized_item["recipient"] = user
+        normalized_item["recipients"] = [user] if user else []
+        items.append(normalized_item)
+
+    items.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    summary = {
+        "total": len(items),
+        "completed": sum(1 for item in items if item.get("status") == "completed"),
+        "failed": sum(1 for item in items if item.get("status") == "failed"),
+        "login": sum(1 for item in items if item.get("status") == "login"),
+        "warning": sum(1 for item in items if item.get("status") == "warning"),
+    }
+    label = "收信会话" if log_key in ("dovecot", "imap", "pop3", None, "") else log_key
+    return {
+        "status": "ok",
+        "detail": f"共聚合 {len(items)} 条{label}追踪记录",
+        "items": items,
+        "summary": summary,
+    }
+
+
 def search_mail_service_logs(
     *,
     log_key: str | None = None,
@@ -1434,9 +1868,35 @@ def search_mail_service_logs(
     status_filter: str | None = None,
     sender: str | None = None,
     recipient: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     line_limit: int = DEFAULT_LOG_EXPORT_LIMIT,
 ) -> dict[str, object]:
     """按后台常用条件检索邮件日志。"""
+    normalized_log_key = (log_key or "").strip().lower()
+    if normalized_log_key in ("", "postfix", "smtp"):
+        snapshot = read_mail_service_log("postfix", line_limit=line_limit)
+        return _parse_postfix_delivery_logs(
+            list(snapshot.get("lines", [])),
+            query=query,
+            status_filter=status_filter,
+            sender=sender,
+            recipient=recipient,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    if normalized_log_key in ("dovecot", "imap", "pop3"):
+        snapshot = read_mail_service_log("dovecot", line_limit=line_limit)
+        return _parse_dovecot_session_logs(
+            list(snapshot.get("lines", [])),
+            log_key=normalized_log_key,
+            query=query,
+            status_filter=status_filter,
+            sender=sender,
+            recipient=recipient,
+            date_from=date_from,
+            date_to=date_to,
+        )
     log_keys = [log_key] if log_key else list(LOG_CANDIDATE_PATHS.keys())
     items: list[dict[str, object]] = []
     for current_key in log_keys:
@@ -1476,18 +1936,19 @@ def export_log_items(items: list[dict[str, object]], *, format_name: str) -> dic
         content = json.dumps(items, ensure_ascii=False, indent=2)
         media_type = "application/json"
     elif normalized_format == "csv":
-        header = "id,log_key,label,status,source,line_number,summary,raw"
+        header = "queue_id,created_at,updated_at,sender,recipients,message_size,status,status_detail,event_count"
         rows = [header]
         for item in items:
             values = [
-                str(item.get("id", "")),
-                str(item.get("log_key", "")),
-                str(item.get("label", "")),
+                str(item.get("queue_id", item.get("id", ""))),
+                str(item.get("created_at", "")),
+                str(item.get("updated_at", "")),
+                str(item.get("sender", "")),
+                ";".join(str(value) for value in item.get("recipients", [])),
+                str(item.get("message_size", "")),
                 str(item.get("status", "")),
-                str(item.get("source", "")),
-                str(item.get("line_number", "")),
-                str(item.get("summary", "")).replace('"', '""'),
-                str(item.get("raw", "")).replace('"', '""'),
+                str(item.get("status_detail", "")).replace('"', '""'),
+                str(item.get("event_count", "")),
             ]
             rows.append(",".join(f'"{value}"' for value in values))
         content = "\n".join(rows)

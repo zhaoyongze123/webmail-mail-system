@@ -17,3 +17,5 @@ python-multipart==0.0.20
 passlib[bcrypt]==1.7.4
 PyJWT==2.10.1
 pyotp==2.9.0
+pywebpush==2.1.0
+PyMuPDF==1.27.2

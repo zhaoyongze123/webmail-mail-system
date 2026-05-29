@@ -4,6 +4,7 @@
 """
 
 import base64
+from contextlib import asynccontextmanager
 from datetime import date
 from urllib.parse import quote
 
@@ -43,12 +44,24 @@ from app.config import get_settings
 from app.drafts import DraftPayload, delete_draft, get_draft, save_draft, update_draft
 from app.errors import AppError
 from app.mail_preferences import get_user_preferences, update_user_preferences
+from app.notifications import (
+    delete_push_subscription_record,
+    get_notification_status,
+    get_push_subscription_status,
+    save_push_subscription_record,
+    sync_notification_mailbox_secret,
+    start_notification_worker,
+    stop_notification_worker,
+    update_notification_preferences,
+)
 from app.mailbox import (
     MessageOperationRequest,
     create_folder,
     delete_folder,
     get_message_attachment,
     get_message_attachment_preview,
+    get_message_attachment_preview_thumbnail,
+    get_message_attachment_preview_status,
     get_message_detail,
     list_folders,
     list_messages,
@@ -84,7 +97,16 @@ def _system_preferences(preferences: dict[str, object]) -> dict[str, object]:
         return system_preferences
     return {}
 
-app = FastAPI(title="Webmail MVP API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    start_notification_worker()
+    try:
+        yield
+    finally:
+        stop_notification_worker()
+
+
+app = FastAPI(title="Webmail MVP API", version="0.1.0", lifespan=lifespan)
 app.middleware("http")(request_id_middleware)
 app.add_middleware(
     CORSMiddleware,
@@ -169,6 +191,13 @@ class SettingsUpdateRequest(BaseModel):
         if mode is not None and mode not in {"light", "dark"}:
             raise ValueError("主题模式无效")
         return value
+
+
+class NotificationPreferenceUpdateRequest(BaseModel):
+    """通知偏好更新请求体。"""
+
+    enabled: bool
+    permission_state: str | None = None
 
 
 @app.exception_handler(AppError)
@@ -325,6 +354,65 @@ def get_settings_api(request: Request) -> dict[str, object]:
     )
 
 
+@app.get(
+    "/api/notifications/push-subscription",
+    tags=["notifications"],
+    response_model=ApiResponse,
+    summary="读取当前推送订阅状态",
+)
+def fetch_push_subscription(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, get_push_subscription_status(session))
+
+
+@app.post(
+    "/api/notifications/push-subscription",
+    tags=["notifications"],
+    response_model=ApiResponse,
+    summary="保存当前浏览器推送订阅",
+)
+async def save_push_subscription(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    payload = await request.json()
+    return success_response(request, save_push_subscription_record(session, payload, request))
+
+
+@app.delete(
+    "/api/notifications/push-subscription",
+    tags=["notifications"],
+    response_model=ApiResponse,
+    summary="删除当前账号推送订阅",
+)
+def remove_push_subscription(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, delete_push_subscription_record(session))
+
+
+@app.get(
+    "/api/notifications/status",
+    tags=["notifications"],
+    response_model=ApiResponse,
+    summary="读取新邮件系统通知状态",
+)
+def fetch_notification_status(request: Request) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, get_notification_status(session))
+
+
+@app.put(
+    "/api/notifications/preferences",
+    tags=["notifications"],
+    response_model=ApiResponse,
+    summary="更新新邮件系统通知偏好",
+)
+def save_notification_preferences_api(
+    request: Request,
+    payload: NotificationPreferenceUpdateRequest,
+) -> dict[str, object]:
+    session = get_current_session(request)
+    return success_response(request, update_notification_preferences(session, payload.model_dump()))
+
+
 @app.put(
     "/api/settings",
     tags=["settings"],
@@ -424,6 +512,7 @@ def change_password_api(request: Request, payload: ChangePasswordRequest) -> dic
     else:
         verify_mailbox_password(session.email, payload.new_password)
     update_session_password(session.session_id, payload.new_password)
+    sync_notification_mailbox_secret(session.email, payload.new_password)
     record_audit_event(
         request,
         "settings.change_password",
@@ -729,6 +818,20 @@ def download_attachment(request: Request, folder: str, uid: str, attachment_id: 
 
 
 @app.get(
+    "/api/folders/{folder}/messages/{uid}/attachments/{attachment_id}/preview/status",
+    tags=["mailbox"],
+    response_model=ApiResponse,
+    summary="查询附件预览状态",
+    response_description="附件预览的异步生成状态",
+)
+def preview_attachment_status(request: Request, folder: str, uid: str, attachment_id: str) -> dict[str, object]:
+    """返回附件预览当前是否已准备完成，并在需要时触发后台生成。"""
+    session = get_current_session(request)
+    validate_attachment_id(attachment_id)
+    return success_response(request, get_message_attachment_preview_status(session, folder, uid, attachment_id))
+
+
+@app.get(
     "/api/folders/{folder}/messages/{uid}/attachments/{attachment_id}/preview",
     tags=["mailbox"],
     summary="预览邮件附件",
@@ -739,6 +842,29 @@ def preview_attachment(request: Request, folder: str, uid: str, attachment_id: s
     session = get_current_session(request)
     validate_attachment_id(attachment_id)
     preview = get_message_attachment_preview(session, folder, uid, attachment_id)
+    filename = str(preview["filename"])
+    response = Response(
+        content=preview["content"],
+        media_type=str(preview["content_type"]),
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+            "X-Attachment-Id": attachment_id,
+        },
+    )
+    return add_security_headers(response, allow_same_origin_frame=True)
+
+
+@app.get(
+    "/api/folders/{folder}/messages/{uid}/attachments/{attachment_id}/preview-thumbnail",
+    tags=["mailbox"],
+    summary="读取附件缩略图",
+    response_description="附件首屏缩略图内容",
+)
+def preview_attachment_thumbnail(request: Request, folder: str, uid: str, attachment_id: str) -> Response:
+    """返回附件缩略图，供列表卡片优先展示。"""
+    session = get_current_session(request)
+    validate_attachment_id(attachment_id)
+    preview = get_message_attachment_preview_thumbnail(session, folder, uid, attachment_id)
     filename = str(preview["filename"])
     response = Response(
         content=preview["content"],

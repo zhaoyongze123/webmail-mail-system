@@ -37,6 +37,25 @@ export type MessageAttachment = {
   content_type?: string | null;
   size?: number | null;
   size_bytes?: number | null;
+  preview_kind?: 'image' | 'pdf' | 'text' | null;
+  preview_ready?: boolean;
+  thumbnail_ready?: boolean;
+  preview_status?: AttachmentPreviewStatusPayload | null;
+};
+
+export type AttachmentPreviewStatusPayload = {
+  attachment_id?: string;
+  filename?: string;
+  content_type?: string | null;
+  preview_content_type?: string | null;
+  preview_kind?: 'image' | 'pdf' | 'text' | null;
+  status: 'missing' | 'pending' | 'processing' | 'ready' | 'failed' | 'unsupported';
+  ready: boolean;
+  thumbnail_ready?: boolean;
+  thumbnail_content_type?: string | null;
+  error_message?: string | null;
+  generated_at?: string | null;
+  last_accessed_at?: string | null;
 };
 
 export type MailMessageSummary = {
@@ -124,6 +143,36 @@ export type UserSettingsPreferences = {
   system: SystemSettingsPreferences;
   user: UserProfileSettings;
   theme: ThemeSettings;
+};
+
+export type PushSubscriptionKeys = {
+  p256dh: string;
+  auth: string;
+};
+
+export type PushSubscriptionPayload = {
+  endpoint: string;
+  expiration_time: number | null;
+  keys: PushSubscriptionKeys;
+};
+
+export type PushSubscriptionRecord = {
+  endpoint: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type NotificationSubscriptionStatusPayload = {
+  vapid_public_key: string | null;
+  subscription: PushSubscriptionRecord | null;
+};
+
+export type NotificationStatusPayload = {
+  enabled: boolean;
+  permission_state: string;
+  last_error: string | null;
+  has_subscription: boolean;
+  vapid_public_key: string | null;
 };
 
 export type SettingsPayload = {

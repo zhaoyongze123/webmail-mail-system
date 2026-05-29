@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     mail_smtp_starttls: bool = Field(default=False, alias="MAIL_SMTP_STARTTLS")
     attachment_max_mb: int = Field(default=9, alias="ATTACHMENT_MAX_MB")
     attachment_ttl_seconds: int = Field(default=3600, alias="ATTACHMENT_TTL_SECONDS")
+    attachment_preview_cache_dir: str = Field(default="/tmp/webmail-preview-cache", alias="ATTACHMENT_PREVIEW_CACHE_DIR")
+    attachment_preview_cache_ttl_seconds: int = Field(default=86400, alias="ATTACHMENT_PREVIEW_CACHE_TTL_SECONDS")
+    attachment_preview_cache_max_mb: int = Field(default=512, alias="ATTACHMENT_PREVIEW_CACHE_MAX_MB")
+    attachment_preview_housekeeping_interval_seconds: int = Field(
+        default=300,
+        alias="ATTACHMENT_PREVIEW_HOUSEKEEPING_INTERVAL_SECONDS",
+    )
+    attachment_preview_processing_timeout_seconds: int = Field(
+        default=900,
+        alias="ATTACHMENT_PREVIEW_PROCESSING_TIMEOUT_SECONDS",
+    )
     cors_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
@@ -64,6 +75,14 @@ class Settings(BaseSettings):
     admin_audit_retention_days: int = Field(default=90, alias="ADMIN_AUDIT_RETENTION_DAYS")
     admin_ip_allowlist: str = Field(default="", alias="ADMIN_IP_ALLOWLIST")
     admin_ip_blocklist: str = Field(default="", alias="ADMIN_IP_BLOCKLIST")
+    web_push_enabled: bool = Field(default=False, alias="WEB_PUSH_ENABLED")
+    web_push_vapid_public_key: str | None = Field(default=None, alias="WEB_PUSH_VAPID_PUBLIC_KEY")
+    web_push_vapid_private_key: str | None = Field(default=None, alias="WEB_PUSH_VAPID_PRIVATE_KEY")
+    web_push_vapid_claims_subject: str = Field(default="mailto:admin@localhost", alias="WEB_PUSH_VAPID_CLAIMS_SUBJECT")
+    mail_notification_poll_enabled: bool = Field(default=False, alias="MAIL_NOTIFICATION_POLL_ENABLED")
+    mail_notification_poll_interval_seconds: int = Field(default=45, alias="MAIL_NOTIFICATION_POLL_INTERVAL_SECONDS")
+    mail_notification_batch_size: int = Field(default=10, alias="MAIL_NOTIFICATION_BATCH_SIZE")
+    mail_notification_imap_timeout_seconds: int = Field(default=15, alias="MAIL_NOTIFICATION_IMAP_TIMEOUT_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -109,6 +128,16 @@ class Settings(BaseSettings):
     def use_sqlite_mail_directory(self) -> bool:
         """返回当前是否启用基于 vmail.db 的邮件目录真源。"""
         return self.mail_directory_backend.strip().lower() == "sqlite_vmail"
+
+    @property
+    def web_push_ready(self) -> bool:
+        """返回 Web Push 所需关键配置是否齐备。"""
+        return bool(
+            self.web_push_enabled
+            and self.web_push_vapid_public_key
+            and self.web_push_vapid_private_key
+            and self.web_push_vapid_claims_subject
+        )
 
 
 @lru_cache

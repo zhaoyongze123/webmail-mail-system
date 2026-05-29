@@ -242,14 +242,38 @@ export type AdminActionHistoryItem = AdminAuditLogItem & {
   payload?: Record<string, unknown> | null;
 };
 
+export type AdminLogEvent = {
+  time?: string | null;
+  status: string;
+  summary: string;
+  recipient?: string | null;
+  relay?: string | null;
+  delay?: string | null;
+  dsn?: string | null;
+  raw: string;
+};
+
 export type AdminLogEntry = {
   id: string;
+  queue_id: string;
   source: string;
-  level: string;
-  message: string;
-  created_at: string;
-  actor?: string | null;
-  target?: string | null;
+  sender: string;
+  recipient: string;
+  recipients: string[];
+  message_size: number;
+  status: string;
+  status_detail?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  event_count: number;
+  events: AdminLogEvent[];
+  raw_lines?: string[];
+  protocol?: string;
+  user?: string;
+  auth_method?: string | null;
+  client_ip?: string | null;
+  server_ip?: string | null;
+  operation_summary?: Record<string, number>;
 };
 
 export type AdminLogSnapshotPage = {
@@ -260,6 +284,7 @@ export type AdminLogSnapshotPage = {
   total_pages: number;
   updated_at?: string;
   detail?: string;
+  summary?: Record<string, number>;
 };
 
 export type AdminHealthItem = {

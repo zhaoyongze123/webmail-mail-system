@@ -410,6 +410,10 @@ export async function exportAdminAuditLogs(payload: {
 export async function fetchAdminLogs(query: ListQuery & {
   sender?: string;
   recipient?: string;
+  status?: string;
+  domain_id?: string;
+  date_from?: string;
+  date_to?: string;
 } = {}): Promise<AdminLogSnapshotPage> {
   return requestAdminApi<AdminLogSnapshotPage>(`/api/admin/logs${buildQuery(query)}`, { method: 'GET' });
 }
@@ -420,6 +424,8 @@ export async function exportAdminLogs(payload: {
   status?: string;
   sender?: string;
   recipient?: string;
+  date_from?: string;
+  date_to?: string;
   format?: 'csv' | 'json';
 }) {
   return requestAdminApi<{ format: string; content: string; media_type: string; filename: string }>('/api/admin/logs/export', {

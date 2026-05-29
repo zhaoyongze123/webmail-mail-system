@@ -15,6 +15,9 @@ from app.models import (
     MailDraft,
     MailFolder,
     MailMessage,
+    MailNotificationCursor,
+    MailNotificationPreference,
+    MailPushSubscription,
     MailSignature,
     MailUserPreference,
     QuotaPolicy,
@@ -28,6 +31,9 @@ def test_table_names() -> None:
     assert MailDraft.__tablename__ == "mail_drafts"
     assert MailSignature.__tablename__ == "mail_signatures"
     assert MailUserPreference.__tablename__ == "mail_user_preferences"
+    assert MailNotificationPreference.__tablename__ == "mail_notification_preferences"
+    assert MailPushSubscription.__tablename__ == "mail_push_subscriptions"
+    assert MailNotificationCursor.__tablename__ == "mail_notification_cursors"
     assert MailAttachment.__tablename__ == "mail_attachments"
     assert AuditLog.__tablename__ == "audit_logs"
     assert MailDomain.__tablename__ == "mail_domains"
@@ -44,6 +50,9 @@ def test_key_columns_exist() -> None:
     draft_columns = set(MailDraft.__table__.columns.keys())
     signature_columns = set(MailSignature.__table__.columns.keys())
     preference_columns = set(MailUserPreference.__table__.columns.keys())
+    notification_preference_columns = set(MailNotificationPreference.__table__.columns.keys())
+    push_subscription_columns = set(MailPushSubscription.__table__.columns.keys())
+    notification_cursor_columns = set(MailNotificationCursor.__table__.columns.keys())
     contact_columns = set(MailContact.__table__.columns.keys())
     tag_columns = set(MailContactTag.__table__.columns.keys())
     attachment_columns = set(MailAttachment.__table__.columns.keys())
@@ -75,6 +84,39 @@ def test_key_columns_exist() -> None:
         "created_at",
         "updated_at",
     } <= preference_columns
+    assert {
+        "id",
+        "account_id",
+        "enabled",
+        "permission_state",
+        "mailbox_secret_encrypted",
+        "last_error",
+        "created_at",
+        "updated_at",
+    } <= notification_preference_columns
+    assert {
+        "id",
+        "account_id",
+        "endpoint",
+        "endpoint_hash",
+        "p256dh",
+        "auth",
+        "expiration_time",
+        "user_agent",
+        "last_seen_at",
+        "created_at",
+        "updated_at",
+    } <= push_subscription_columns
+    assert {
+        "id",
+        "account_id",
+        "folder_name",
+        "last_uid",
+        "last_message_id",
+        "last_checked_at",
+        "created_at",
+        "updated_at",
+    } <= notification_cursor_columns
     assert {
         "id",
         "account_id",
@@ -139,6 +181,39 @@ def test_mail_user_preference_constraints_and_timezone_columns_are_valid() -> No
     )
     assert MailUserPreference.__table__.c.created_at.type.timezone is True
     assert MailUserPreference.__table__.c.updated_at.type.timezone is True
+
+
+def test_notification_model_constraints_and_timezone_columns_are_valid() -> None:
+    preference_constraints = [
+        constraint
+        for constraint in MailNotificationPreference.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    subscription_constraints = [
+        constraint
+        for constraint in MailPushSubscription.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    cursor_constraints = [
+        constraint
+        for constraint in MailNotificationCursor.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    assert any({column.name for column in constraint.columns} == {"account_id"} for constraint in preference_constraints)
+    assert any(
+        {column.name for column in constraint.columns} == {"account_id", "endpoint"}
+        for constraint in subscription_constraints
+    )
+    assert any(
+        {column.name for column in constraint.columns} == {"account_id", "folder_name"}
+        for constraint in cursor_constraints
+    )
+    assert MailNotificationPreference.__table__.c.created_at.type.timezone is True
+    assert MailNotificationPreference.__table__.c.updated_at.type.timezone is True
+    assert MailPushSubscription.__table__.c.created_at.type.timezone is True
+    assert MailPushSubscription.__table__.c.updated_at.type.timezone is True
+    assert MailNotificationCursor.__table__.c.created_at.type.timezone is True
+    assert MailNotificationCursor.__table__.c.updated_at.type.timezone is True
 
 
 def test_contact_unique_constraint_and_tag_indexes_exist() -> None:

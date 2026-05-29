@@ -5,6 +5,7 @@ import './styles.css';
 import { AdminAuthProvider } from './admin/auth';
 import { createAppRouter } from './router';
 import { RuntimeI18nBridge, setRuntimeLocale, DEFAULT_LOCALE } from './i18n/runtime';
+import { registerNotificationServiceWorker } from './mail/notifications';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,3 +29,5 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
 );
 
 setRuntimeLocale(window.localStorage.getItem('webmail-admin-locale') || window.localStorage.getItem('webmail-user-locale') || DEFAULT_LOCALE);
+
+void registerNotificationServiceWorker().catch(() => undefined);

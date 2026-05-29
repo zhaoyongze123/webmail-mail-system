@@ -8,16 +8,22 @@ from __future__ import annotations
 
 import html
 import io
+import json
+import hashlib
 import re
 import zipfile
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email import message_from_bytes
+from email.parser import BytesHeaderParser
 from email.header import decode_header, make_header
 from email.message import Message
 from email.policy import default
 from email.utils import getaddresses, parsedate_to_datetime
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Lock
 from typing import Any
 from xml.etree import ElementTree
 import quopri
@@ -28,6 +34,10 @@ from fastapi import status
 from premailer import transform
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, select
+try:
+    import fitz
+except ModuleNotFoundError:  # pragma: no cover - 运行环境缺依赖时走能力降级
+    fitz = None
 
 from app.auth import AuthSession
 from app.cache import JsonCache
@@ -37,9 +47,20 @@ from app.errors import AppError
 from app import mail_adapters, redis_client
 from app.mail_adapters import ImapSettings, MailAdapterError, _parse_status_response
 from app.db import get_session_factory
-from app.models import MailAccount, MailFolder, MailMessage
+from app.models import MailAccount, MailAttachmentPreview, MailFolder, MailMessage
 from app.mail_state import ensure_mail_account, persist_message_read_state, sync_folders, sync_message_summaries
 from app.security import validate_attachment_id
+
+
+MAILBOX_BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mailbox-bg")
+DETAIL_PREWARM_LIMIT = 5
+ATTACHMENT_PREWARM_LIMIT = 3
+PREVIEW_CACHE_LOCK = Lock()
+PREVIEW_TASK_LOCK = Lock()
+PREVIEW_RUNNING_TASKS: set[str] = set()
+PREVIEW_HOUSEKEEPING_LOCK = Lock()
+PREVIEW_HOUSEKEEPING_STATE = {"last_run_ts": 0.0, "running": False}
+ATTACHMENT_THUMBNAIL_CACHE_VERSION = "2026-05-26-thumbnail-v2"
 
 
 SYSTEM_FOLDERS = [
@@ -397,6 +418,7 @@ def _remove_message_records(email: str, folder_name: str, uids: list[str]) -> No
     uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
     if not uid_values:
         return
+    _remove_preview_records_for_messages(normalized_email, folder_name, uids)
     session_factory = get_session_factory()
     with session_factory() as db_session:
         account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
@@ -706,6 +728,284 @@ def _body_parts(message: Message, *, include_content: bool = False) -> tuple[str
     return html_body, text_body, attachments
 
 
+def _bodystructure_tokenize(raw: str) -> list[str]:
+    """把 IMAP BODYSTRUCTURE 原始字符串切成可递归解析的 token。"""
+    tokens: list[str] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char in "()":
+            tokens.append(char)
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            buffer: list[str] = []
+            while index < len(raw):
+                current = raw[index]
+                if current == "\\" and index + 1 < len(raw):
+                    buffer.append(raw[index + 1])
+                    index += 2
+                    continue
+                if current == '"':
+                    index += 1
+                    break
+                buffer.append(current)
+                index += 1
+            tokens.append("".join(buffer))
+            continue
+        start = index
+        while index < len(raw) and not raw[index].isspace() and raw[index] not in "()":
+            index += 1
+        tokens.append(raw[start:index])
+    return tokens
+
+
+def _bodystructure_parse_tokens(tokens: list[str], start: int = 0) -> tuple[Any, int]:
+    """把 token 列表递归解析成嵌套 list。"""
+    result: list[Any] = []
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "(":
+            nested, index = _bodystructure_parse_tokens(tokens, index + 1)
+            result.append(nested)
+            continue
+        if token == ")":
+            return result, index + 1
+        if token.upper() == "NIL":
+            result.append(None)
+        else:
+            result.append(token)
+        index += 1
+    return result, index
+
+
+def _bodystructure_params(value: Any) -> dict[str, str]:
+    """把 BODYSTRUCTURE 参数列表转换成字典。"""
+    if not isinstance(value, list):
+        return {}
+    result: dict[str, str] = {}
+    for index in range(0, len(value) - 1, 2):
+        key = str(value[index] or "").lower()
+        result[key] = str(value[index + 1] or "")
+    return result
+
+
+def _bodystructure_disposition(value: Any) -> tuple[str, dict[str, str]]:
+    """解析 disposition 及其参数。"""
+    if not isinstance(value, list) or not value:
+        return "", {}
+    kind = str(value[0] or "").lower()
+    params = _bodystructure_params(value[1] if len(value) > 1 else None)
+    return kind, params
+
+
+def _bodystructure_to_parts(node: Any, section_prefix: str = "") -> list[dict[str, Any]]:
+    """把 BODYSTRUCTURE 解析结果展开成带 section 编号的部件列表。"""
+    if not isinstance(node, list) or not node:
+        return []
+    multipart = bool(node and isinstance(node[0], list))
+    if multipart:
+        parts: list[dict[str, Any]] = []
+        child_nodes: list[Any] = []
+        for item in node:
+            if isinstance(item, list):
+                child_nodes.append(item)
+            else:
+                break
+        for index, child in enumerate(child_nodes, start=1):
+            section = f"{section_prefix}.{index}" if section_prefix else str(index)
+            parts.extend(_bodystructure_to_parts(child, section))
+        return parts
+
+    mime_type = str(node[0] or "").lower()
+    mime_subtype = str(node[1] or "").lower() if len(node) > 1 else "octet-stream"
+    params = _bodystructure_params(node[2] if len(node) > 2 else None)
+    encoding = str(node[5] or "").lower() if len(node) > 5 and node[5] is not None else ""
+    size_bytes = int(str(node[6])) if len(node) > 6 and str(node[6]).isdigit() else 0
+    disposition_kind, disposition_params = _bodystructure_disposition(node[8] if len(node) > 8 else None)
+    filename = (
+        disposition_params.get("filename")
+        or params.get("name")
+        or disposition_params.get("name")
+        or "attachment"
+    )
+    return [
+        {
+            "section": section_prefix or "1",
+            "content_type": f"{mime_type}/{mime_subtype}",
+            "params": params,
+            "encoding": encoding,
+            "size_bytes": size_bytes,
+            "disposition": disposition_kind,
+            "filename": _safe_filename(_decode_header_value(filename)),
+        }
+    ]
+
+
+def _parse_bodystructure_parts(raw: bytes) -> list[dict[str, Any]]:
+    """从 IMAP BODYSTRUCTURE 原文中提取各部件 section 与元数据。"""
+    text = raw.decode("utf-8", errors="replace")
+    marker = "BODYSTRUCTURE"
+    marker_index = text.upper().find(marker)
+    if marker_index == -1:
+        return []
+    body = text[marker_index + len(marker):].strip()
+    if not body.startswith("("):
+        return []
+    tokens = _bodystructure_tokenize(body)
+    parsed, _ = _bodystructure_parse_tokens(tokens)
+    if not parsed:
+        return []
+    root = parsed[0] if len(parsed) == 1 and isinstance(parsed[0], list) else parsed
+    return _bodystructure_to_parts(root)
+
+
+def _decode_section_bytes(content: bytes, content_type: str, charset: str | None = None) -> str:
+    """把 section 抓取到的正文 bytes 解码成字符串。"""
+    resolved_charset = charset or "utf-8"
+    try:
+        return content.decode(resolved_charset, errors="replace")
+    except LookupError:
+        return content.decode("utf-8", errors="replace")
+
+
+def _looks_like_base64_section(content: bytes) -> bool:
+    """尽量判断当前 section 是否仍然是 base64 传输编码文本。"""
+    compact = re.sub(rb"\s+", b"", content)
+    if not compact or len(compact) % 4 != 0:
+        return False
+    if re.fullmatch(rb"[A-Za-z0-9+/=]+", compact) is None:
+        return False
+    return True
+
+
+def _decode_section_transfer_bytes(content: bytes, transfer_encoding: str | None = None) -> bytes:
+    """按 Content-Transfer-Encoding 把 IMAP section 原文还原成真实字节。"""
+    encoding = str(transfer_encoding or "").strip().lower()
+    if encoding == "base64":
+        if not _looks_like_base64_section(content):
+            return content
+        compact = re.sub(rb"\s+", b"", content)
+        try:
+            return b64decode(compact, validate=False)
+        except Exception:
+            return content
+    if encoding == "quoted-printable":
+        if b"=" not in content:
+            return content
+        try:
+            return quopri.decodestring(content)
+        except Exception:
+            return content
+    return content
+
+
+def _message_detail_from_sections(adapter: Any, uid: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """优先通过 HEADER + BODYSTRUCTURE + BODY section 生成摘要和详情。"""
+    if not all(hasattr(adapter, method) for method in ("uid_fetch_headers", "uid_fetch_bodystructure", "uid_fetch_body_section")):
+        return None
+    headers_raw = adapter.uid_fetch_headers(uid)
+    structure_raw = adapter.uid_fetch_bodystructure(uid)
+    parts = _parse_bodystructure_parts(structure_raw)
+    if not headers_raw or not parts:
+        return None
+
+    header_message = BytesHeaderParser(policy=default).parsebytes(headers_raw)
+    text_part = next(
+        (
+            item for item in parts
+            if item.get("content_type") == "text/plain" and item.get("disposition") != "attachment"
+        ),
+        None,
+    )
+    html_part = next(
+        (
+            item for item in parts
+            if item.get("content_type") == "text/html" and item.get("disposition") != "attachment"
+        ),
+        None,
+    )
+    text_body = ""
+    html_body = ""
+    if text_part:
+        text_body = _decode_section_bytes(
+            _decode_section_transfer_bytes(
+                adapter.uid_fetch_body_section(uid, str(text_part["section"])),
+                str(text_part.get("encoding") or ""),
+            ),
+            str(text_part.get("content_type") or "text/plain"),
+            str(text_part.get("params", {}).get("charset") or "utf-8"),
+        )
+    if html_part:
+        html_body = _decode_section_bytes(
+            _decode_section_transfer_bytes(
+                adapter.uid_fetch_body_section(uid, str(html_part["section"])),
+                str(html_part.get("encoding") or ""),
+            ),
+            str(html_part.get("content_type") or "text/html"),
+            str(html_part.get("params", {}).get("charset") or "utf-8"),
+        )
+
+    attachment_candidates = [
+        item
+        for item in parts
+        if item.get("disposition") == "attachment"
+        or (item.get("filename") not in {"", "attachment"} and not str(item.get("content_type", "")).startswith("text/"))
+    ]
+    attachments = [
+        {
+            "attachment_id": _attachment_id(index),
+            "filename": str(item.get("filename") or "attachment"),
+            "content_type": str(item.get("content_type") or "application/octet-stream"),
+            "size_bytes": int(item.get("size_bytes") or 0),
+            "section": str(item.get("section") or ""),
+            "encoding": str(item.get("encoding") or ""),
+        }
+        for index, item in enumerate(attachment_candidates)
+    ]
+
+    sent_at = _message_datetime(header_message)
+    sender = _addresses(header_message.get("From"))
+    recipients = _addresses(header_message.get("To"))
+    cc_recipients = _addresses(header_message.get("Cc"))
+    subject = _decode_header_value(header_message.get("Subject")) or "(无主题)"
+    safe_html = _clean_html(html_body) if html_body else _text_to_html(text_body)
+    summary = {
+        "uid": str(uid),
+        "message_id": header_message.get("Message-ID"),
+        "subject": subject,
+        "sender": sender[0] if sender else {"name": "", "email": ""},
+        "to": recipients,
+        "cc": cc_recipients,
+        "date": sent_at.isoformat() if sent_at else None,
+        "read": _read_flag(header_message),
+        "has_attachments": bool(attachments),
+        "attachment_types": sorted({_attachment_category(str(item["content_type"])) for item in attachments if item.get("content_type")}),
+        "snippet": _snippet(html_body, text_body),
+        "html_body": html_body,
+        "text_body": text_body,
+    }
+    detail = {
+        "uid": str(uid),
+        "message_id": header_message.get("Message-ID"),
+        "subject": subject,
+        "from": sender,
+        "to": recipients,
+        "cc": cc_recipients,
+        "date": sent_at.isoformat() if sent_at else None,
+        "html_body": safe_html,
+        "text_body": text_body,
+        "read": _read_flag(header_message),
+        "attachments": attachments,
+    }
+    return summary, detail
+
+
 def _clean_html(value: str) -> str:
     """对 HTML 邮件正文做安全清洗，同时尽量保留样式表现。"""
     value = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", value)
@@ -958,8 +1258,18 @@ def _cached_message_detail(session: AuthSession, folder: str, uid: str) -> dict[
         "html_body": str(cached.get("html_body") or ""),
         "text_body": str(cached.get("text_body") or ""),
         "read": bool(cached.get("read")),
-        "attachments": [item for item in attachments if isinstance(item, dict)],
+        "attachments": _annotate_attachment_preview_state(
+            session,
+            folder,
+            uid,
+            [item for item in attachments if isinstance(item, dict)],
+        ),
     }
+
+
+def _build_message_detail_from_raw(uid: str, raw: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
+    """从原始邮件一次性生成摘要和详情，避免重复解析。"""
+    return _message_summary(uid, raw), _message_detail(uid, raw)
 
 
 def _load_cached_attachment(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any] | None:
@@ -980,6 +1290,7 @@ def _load_cached_attachment(session: AuthSession, folder: str, uid: str, attachm
         "filename": str(cached.get("filename") or "attachment"),
         "content_type": str(cached.get("content_type") or "application/octet-stream"),
         "size_bytes": int(cached.get("size_bytes") or len(content)),
+        "section": str(cached.get("section") or ""),
         "content": content,
     }
 
@@ -1013,10 +1324,843 @@ def _cache_attachment_contents(session: AuthSession, folder: str, uid: str, atta
                 "filename": str(item.get("filename") or "attachment"),
                 "content_type": str(item.get("content_type") or "application/octet-stream"),
                 "size_bytes": int(item.get("size_bytes") or len(content)),
+                "section": str(item.get("section") or ""),
                 "content_b64": b64encode(bytes(content)).decode("ascii"),
             },
             ttl_seconds=3600,
         )
+
+
+def _schedule_attachment_preview_generation(session: AuthSession, folder: str, uid: str, attachment: dict[str, Any]) -> None:
+    """为单个可预览附件异步生成预览产物，并做进程内去重。"""
+    attachment_id = str(attachment.get("attachment_id") or "")
+    filename = str(attachment.get("filename") or "attachment")
+    content_type = str(attachment.get("content_type") or "application/octet-stream")
+    if not attachment_id or _preview_kind(filename, content_type) is None:
+        return
+
+    record = _ensure_preview_record(session, folder, uid, attachment, status_hint="pending")
+    if record is None or record.status == "ready":
+        return
+
+    task_key = _preview_task_key(session.email, folder, uid, attachment_id)
+    with PREVIEW_TASK_LOCK:
+        if task_key in PREVIEW_RUNNING_TASKS:
+            return
+        PREVIEW_RUNNING_TASKS.add(task_key)
+
+    def run() -> None:
+        try:
+            _build_preview_record_payload(session, folder, uid, attachment_id)
+        except AppError as exc:
+            _mark_preview_record_failed(session.email, folder, uid, attachment_id, exc.message)
+        except Exception as exc:  # pragma: no cover - 后台线程异常以状态回写为主
+            _mark_preview_record_failed(session.email, folder, uid, attachment_id, f"预览生成失败: {exc.__class__.__name__}")
+        finally:
+            with PREVIEW_TASK_LOCK:
+                PREVIEW_RUNNING_TASKS.discard(task_key)
+
+    MAILBOX_BACKGROUND_EXECUTOR.submit(run)
+
+
+def _schedule_attachment_preview_generation_from_detail(
+    session: AuthSession,
+    folder: str,
+    uid: str,
+    detail: dict[str, Any],
+) -> None:
+    """批量调度当前邮件中可预览附件的预热任务。"""
+    attachments = detail.get("attachments") if isinstance(detail.get("attachments"), list) else []
+    for item in attachments:
+        if isinstance(item, dict):
+            _schedule_attachment_preview_generation(session, folder, uid, item)
+    _schedule_preview_housekeeping()
+
+
+def _annotate_attachment_preview_state(session: AuthSession, folder: str, uid: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把预览状态附着到附件元数据上，供前端静默加载和轮询。"""
+    normalized_email = session.email.strip().lower()
+    attachment_ids = [str(item.get("attachment_id") or "") for item in attachments if isinstance(item, dict)]
+    status_map: dict[str, dict[str, Any]] = {}
+    if attachment_ids:
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            account, _message_row = _find_message_cache_row(db_session, normalized_email, folder, uid)
+            if account is not None:
+                records = db_session.scalars(
+                    select(MailAttachmentPreview).where(
+                        MailAttachmentPreview.account_id == account.id,
+                        MailAttachmentPreview.folder_name == folder,
+                        MailAttachmentPreview.imap_uid == int(str(uid)),
+                        MailAttachmentPreview.attachment_id.in_(attachment_ids),
+                    )
+                ).all()
+                status_map = {record.attachment_id: _preview_status_payload(record) for record in records}
+
+    annotated: list[dict[str, Any]] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        attachment_id = str(copied.get("attachment_id") or "")
+        filename = str(copied.get("filename") or "attachment")
+        content_type = str(copied.get("content_type") or "application/octet-stream")
+        copied["preview_kind"] = _preview_kind(filename, content_type)
+        copied["preview_status"] = status_map.get(attachment_id, {"status": "missing", "ready": False})
+        copied["preview_ready"] = bool(copied["preview_status"].get("ready"))
+        annotated.append(copied)
+    return annotated
+
+
+def _prewarm_message_details(session: AuthSession, folder: str, uids: list[str]) -> None:
+    """后台预热一批邮件详情缓存，不阻塞列表返回。"""
+    target_uids = [str(uid) for uid in uids if str(uid)]
+    if not target_uids:
+        return
+    adapter = _connect_imap(session)
+    try:
+        adapter.select_folder(folder)
+        for uid in target_uids:
+            if _cached_message_detail(session, folder, uid) is not None:
+                continue
+            raw = _uid_fetch_message_bytes(adapter, uid)
+            summary, detail = _build_message_detail_from_raw(uid, raw)
+            _cache_attachment_sections_from_detail(session, adapter, folder, uid, detail)
+            _persist_message_cache(session, folder, summary, detail, raw_message=raw)
+            _schedule_attachment_preview_generation_from_detail(session, folder, uid, detail)
+    except Exception:
+        return
+    finally:
+        try:
+            adapter.logout()
+        except Exception:
+            return
+
+
+def _prewarm_attachment_sections_from_cached_detail(session: AuthSession, folder: str, uids: list[str]) -> None:
+    """基于已缓存详情优先预热前几封附件邮件的正文 section 和附件内容。"""
+    target_uids = [str(uid) for uid in uids if str(uid)]
+    if not target_uids:
+        return
+    adapter = _connect_imap(session)
+    try:
+        adapter.select_folder(folder)
+        for uid in target_uids:
+            cached_detail = _cached_message_detail(session, folder, uid)
+            if cached_detail is None:
+                continue
+            _cache_attachment_sections_from_detail(session, adapter, folder, uid, cached_detail)
+    except Exception:
+        return
+    finally:
+        try:
+            adapter.logout()
+        except Exception:
+            return
+
+
+def _schedule_detail_prewarm(session: AuthSession, folder: str, uids: list[str], *, limit: int = DETAIL_PREWARM_LIMIT) -> None:
+    """异步预热当前页最可能被打开的若干封邮件详情。"""
+    candidate_uids: list[str] = []
+    attachment_candidate_uids: list[str] = []
+    for uid in uids:
+        uid_text = str(uid)
+        if not uid_text:
+            continue
+        cached_detail = _cached_message_detail(session, folder, uid_text)
+        if cached_detail is None:
+            candidate_uids.append(uid_text)
+            continue
+        attachments = cached_detail.get("attachments") if isinstance(cached_detail.get("attachments"), list) else []
+        if any(
+            isinstance(item, dict) and _preview_kind(str(item.get("filename") or "attachment"), str(item.get("content_type") or ""))
+            for item in attachments
+        ):
+            attachment_candidate_uids.append(uid_text)
+    if not candidate_uids and not attachment_candidate_uids:
+        return
+    prioritized_uids: list[str] = []
+    for uid in attachment_candidate_uids:
+        if uid not in prioritized_uids:
+            prioritized_uids.append(uid)
+        if len(prioritized_uids) >= ATTACHMENT_PREWARM_LIMIT:
+            break
+    for uid in candidate_uids:
+        if uid not in prioritized_uids:
+            prioritized_uids.append(uid)
+        if len(prioritized_uids) >= limit:
+            break
+    if prioritized_uids:
+        MAILBOX_BACKGROUND_EXECUTOR.submit(_prewarm_message_details, session, folder, prioritized_uids)
+    if attachment_candidate_uids:
+        MAILBOX_BACKGROUND_EXECUTOR.submit(
+            _prewarm_attachment_sections_from_cached_detail,
+            session,
+            folder,
+            attachment_candidate_uids[:ATTACHMENT_PREWARM_LIMIT],
+        )
+    if attachment_candidate_uids:
+        MAILBOX_BACKGROUND_EXECUTOR.submit(_prewarm_cached_attachment_previews, session, folder, attachment_candidate_uids)
+
+
+def _prewarm_cached_attachment_previews(session: AuthSession, folder: str, uids: list[str]) -> None:
+    """基于已缓存详情直接前置触发附件预览生成，避免首点才排队。"""
+    for uid in uids:
+        uid_text = str(uid)
+        if not uid_text:
+            break
+        cached_detail = _cached_message_detail(session, folder, uid_text)
+        if cached_detail is None:
+            continue
+        _schedule_attachment_preview_generation_from_detail(session, folder, uid_text, cached_detail)
+
+
+def _mark_message_read_async(session: AuthSession, folder: str, uid: str) -> None:
+    """后台执行打开即已读，避免阻塞正文详情返回。"""
+    try:
+        adapter = _connect_imap(session)
+        try:
+            adapter.select_folder(folder)
+            adapter.mark_seen(uid)
+            persist_message_read_state(session.email, folder, [uid], is_read=True)
+            _sync_folder_snapshot(session.email, adapter)
+            _invalidate_message_cache(session.email, [folder])
+        finally:
+            adapter.logout()
+    except Exception:
+        return
+
+
+def _schedule_mark_message_read(session: AuthSession, folder: str, uid: str) -> None:
+    """异步调度打开即已读任务。"""
+    MAILBOX_BACKGROUND_EXECUTOR.submit(_mark_message_read_async, session, folder, uid)
+
+
+def _cache_attachment_sections_from_detail(session: AuthSession, adapter: Any, folder: str, uid: str, detail: dict[str, Any]) -> None:
+    """基于详情中的 section 元数据预热附件内容缓存。"""
+    attachments = detail.get("attachments") if isinstance(detail.get("attachments"), list) else []
+    cached_items: list[dict[str, Any]] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        section = str(item.get("section") or "")
+        if not section:
+            continue
+        try:
+            content = _decode_section_transfer_bytes(
+                adapter.uid_fetch_body_section(uid, section),
+                str(item.get("encoding") or ""),
+            )
+        except Exception:
+            continue
+        cached_items.append(
+            {
+                "attachment_id": str(item.get("attachment_id") or ""),
+                "filename": str(item.get("filename") or "attachment"),
+                "content_type": str(item.get("content_type") or "application/octet-stream"),
+                "size_bytes": int(item.get("size_bytes") or len(content)),
+                "section": section,
+                "encoding": str(item.get("encoding") or ""),
+                "content": content,
+            }
+        )
+    if cached_items:
+        _cache_attachment_contents(session, folder, uid, cached_items)
+
+
+def _preview_kind(filename: str, content_type: str) -> str | None:
+    """根据附件类型判断是否支持预览，以及应走哪种预览形态。"""
+    lower_name = filename.lower()
+    lower_type = content_type.lower()
+    if lower_type.startswith("image/") or re.search(r"\.(png|jpe?g|gif|webp|bmp|svg)$", lower_name):
+        return "image"
+    if lower_type == "application/pdf" or lower_name.endswith(".pdf"):
+        return "pdf"
+    if (
+        lower_type.startswith("text/")
+        or lower_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or re.search(r"\.(txt|md|json|docx)$", lower_name)
+    ):
+        return "text"
+    return None
+
+
+def _attachment_supports_thumbnail(filename: str, content_type: str) -> bool:
+    """判断附件卡片是否应该生成首屏封面缩略图。"""
+    lower_name = filename.lower()
+    lower_type = content_type.lower()
+    return (
+        lower_type == "application/pdf"
+        or lower_name.endswith(".pdf")
+        or lower_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or lower_name.endswith(".docx")
+    )
+
+
+def _preview_storage_key(
+    email: str,
+    folder: str,
+    uid: str,
+    attachment_id: str,
+    filename: str,
+    content_type: str,
+) -> str:
+    """为附件预览生成稳定的存储键。"""
+    kind = _preview_kind(filename, content_type) or "file"
+    extension = ".html" if (
+        content_type.lower() == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or filename.lower().endswith(".docx")
+    ) else ".bin"
+    digest = hashlib.sha256(
+        "::".join(
+            [
+                email.strip().lower(),
+                folder,
+                uid,
+                attachment_id,
+                filename,
+                content_type,
+                kind,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"{digest}{extension}"
+
+
+def _preview_thumbnail_storage_key(
+    email: str,
+    folder: str,
+    uid: str,
+    attachment_id: str,
+    filename: str,
+    content_type: str,
+    thumbnail_content_type: str,
+) -> str:
+    """为附件缩略图生成稳定的存储键。"""
+    extension = ".svg" if thumbnail_content_type == "image/svg+xml" else ".png"
+    digest = hashlib.sha256(
+        "::".join(
+            [
+                email.strip().lower(),
+                folder,
+                uid,
+                attachment_id,
+                filename,
+                content_type,
+                "thumbnail",
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"{digest}{extension}"
+
+
+def _preview_cache_root() -> Path:
+    """返回附件预览产物缓存目录。"""
+    return Path(get_settings().attachment_preview_cache_dir).expanduser()
+
+
+def _preview_cache_path_from_storage_key(storage_key: str) -> tuple[Path, Path]:
+    """根据稳定存储键解析产物文件和元数据文件路径。"""
+    root = _preview_cache_root()
+    digest = storage_key.split(".", 1)[0]
+    directory = root / digest[:2] / digest[2:4]
+    return directory / storage_key, directory / f"{digest}.json"
+
+
+def _preview_cache_path(
+    session: AuthSession,
+    folder: str,
+    uid: str,
+    attachment_id: str,
+    filename: str,
+    content_type: str,
+) -> tuple[Path, Path]:
+    """兼容旧调用方式，根据附件上下文生成缓存路径。"""
+    storage_key = _preview_storage_key(session.email, folder, uid, attachment_id, filename, content_type)
+    return _preview_cache_path_from_storage_key(storage_key)
+
+
+def _preview_source_hash(folder: str, uid: str, attachment_id: str, filename: str, content_type: str, size_bytes: int) -> str:
+    """生成附件源内容的稳定签名，用于识别是否需要重建预览。"""
+    return hashlib.sha256(
+        "::".join(
+            [
+                folder,
+                uid,
+                attachment_id,
+                filename,
+                content_type,
+                str(size_bytes),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_preview_time(value: datetime | None) -> datetime:
+    """把数据库里可能混杂的 naive/aware 时间统一规范为 UTC aware。"""
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _cleanup_preview_cache_if_needed() -> None:
+    """按 TTL、容量和孤儿记录清理附件预览缓存目录与索引。"""
+    settings = get_settings()
+    root = _preview_cache_root()
+    if not root.exists():
+        return
+
+    ttl_seconds = max(int(settings.attachment_preview_cache_ttl_seconds), 0)
+    max_bytes = max(int(settings.attachment_preview_cache_max_mb), 1) * 1024 * 1024
+    processing_timeout = max(int(settings.attachment_preview_processing_timeout_seconds), 1)
+    now = datetime.now(timezone.utc)
+    session_factory = get_session_factory()
+
+    with session_factory() as db_session:
+        records = db_session.scalars(select(MailAttachmentPreview)).all()
+        referenced_stems: set[str] = set()
+        ready_candidates: list[tuple[datetime, int, MailAttachmentPreview, Path]] = []
+        total_bytes = 0
+
+        for record in records:
+            digest = record.storage_key.split(".", 1)[0]
+            path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+            referenced_stems.add(digest)
+            preview_meta = _load_cached_preview(path, meta_path) if path.exists() and meta_path.exists() else None
+            thumbnail_storage_key = (
+                preview_meta.get("thumbnail_storage_key")
+                if isinstance(preview_meta, dict) and isinstance(preview_meta.get("thumbnail_storage_key"), str)
+                else None
+            )
+            thumb_path: Path | None = None
+            thumb_meta_path: Path | None = None
+            if thumbnail_storage_key:
+                thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+                referenced_stems.add(thumbnail_storage_key.split(".", 1)[0])
+            if record.status == "processing" and (now - record.updated_at).total_seconds() > processing_timeout:
+                record.status = "failed"
+                record.error_message = "后台生成超时，下次访问会重新触发"
+
+            reference_time = _normalize_preview_time(record.last_accessed_at or record.generated_at or record.updated_at or record.created_at)
+            is_expired = ttl_seconds > 0 and (now - reference_time).total_seconds() > ttl_seconds
+            if is_expired or (record.status == "failed" and ttl_seconds > 0 and (now - record.updated_at).total_seconds() > ttl_seconds):
+                try:
+                    path.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    if thumb_path is not None and thumb_meta_path is not None:
+                        thumb_path.unlink(missing_ok=True)
+                        thumb_meta_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                db_session.delete(record)
+                continue
+
+            if record.status == "ready" and path.exists():
+                if _attachment_supports_thumbnail(record.filename, record.source_content_type) and not _preview_thumbnail_is_ready(record):
+                    record.status = "pending"
+                    record.error_message = "附件缩略图缺失，将在下次访问时重建"
+                    continue
+                try:
+                    size = int(path.stat().st_size)
+                except OSError:
+                    size = int(record.preview_size_bytes or 0)
+                if thumb_path is not None and thumb_path.exists():
+                    try:
+                        size += int(thumb_path.stat().st_size)
+                    except OSError:
+                        pass
+                total_bytes += size
+                ready_candidates.append((_normalize_preview_time(record.last_accessed_at or record.generated_at or record.updated_at), size, record, path))
+            elif record.status == "ready" and not path.exists():
+                record.status = "pending"
+                record.error_message = "预览文件缺失，将在下次访问时重建"
+        if total_bytes > max_bytes:
+            ready_candidates.sort(key=lambda item: item[0])
+            for _accessed_at, size, record, path in ready_candidates:
+                if total_bytes <= max_bytes:
+                    break
+                meta_path = _preview_cache_path_from_storage_key(record.storage_key)[1]
+                preview_meta = _load_cached_preview(path, meta_path) if path.exists() and meta_path.exists() else None
+                thumbnail_storage_key = (
+                    preview_meta.get("thumbnail_storage_key")
+                    if isinstance(preview_meta, dict) and isinstance(preview_meta.get("thumbnail_storage_key"), str)
+                    else None
+                )
+                try:
+                    path.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    if thumbnail_storage_key:
+                        thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+                        thumb_path.unlink(missing_ok=True)
+                        thumb_meta_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                total_bytes -= size
+                db_session.delete(record)
+
+        db_session.commit()
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix == ".tmp":
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        stem = path.stem
+        if stem not in referenced_stems:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _load_cached_preview(path: Path, meta_path: Path) -> dict[str, Any] | None:
+    """读取已生成的附件预览产物。"""
+    if not path.exists() or not meta_path.exists():
+        return None
+    try:
+        payload = path.read_bytes()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return {
+        "content": payload,
+        "content_type": str(meta.get("content_type") or "application/octet-stream"),
+        "filename": str(meta.get("filename") or path.name),
+        "thumbnail_storage_key": meta.get("thumbnail_storage_key"),
+        "thumbnail_content_type": meta.get("thumbnail_content_type"),
+        "thumbnail_cache_version": meta.get("thumbnail_cache_version"),
+    }
+
+
+def _persist_preview_cache(
+    path: Path,
+    meta_path: Path,
+    *,
+    filename: str,
+    content_type: str,
+    content: bytes,
+    thumbnail_storage_key: str | None = None,
+    thumbnail_content_type: str | None = None,
+    thumbnail_cache_version: str | None = None,
+) -> None:
+    """把预览产物及其元数据落盘。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_meta_path = meta_path.with_suffix(".tmp")
+    temp_path.write_bytes(content)
+    temp_meta_path.write_text(
+        json.dumps(
+            {
+                "filename": filename,
+                "content_type": content_type,
+                "thumbnail_storage_key": thumbnail_storage_key,
+                "thumbnail_content_type": thumbnail_content_type,
+                "thumbnail_cache_version": thumbnail_cache_version,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+    temp_meta_path.replace(meta_path)
+
+
+def _find_message_cache_row(db_session: Any, email: str, folder: str, uid: str) -> tuple[MailAccount | None, MailMessage | None]:
+    """按邮箱、文件夹和 UID 查找本地缓存的账户和消息行。"""
+    normalized_email = email.strip().lower()
+    account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+    if account is None:
+        return None, None
+    folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
+    if folder_row is None:
+        return account, None
+    message_row = db_session.scalar(
+        select(MailMessage).where(
+            MailMessage.account_id == account.id,
+            MailMessage.folder_id == folder_row.id,
+            MailMessage.imap_uid == int(str(uid)),
+        )
+    )
+    return account, message_row
+
+
+def _lookup_preview_record(db_session: Any, email: str, folder: str, uid: str, attachment_id: str) -> MailAttachmentPreview | None:
+    """读取单个附件对应的预览索引记录。"""
+    account, _message_row = _find_message_cache_row(db_session, email, folder, uid)
+    if account is None:
+        return None
+    return db_session.scalar(
+        select(MailAttachmentPreview).where(
+            MailAttachmentPreview.account_id == account.id,
+            MailAttachmentPreview.folder_name == folder,
+            MailAttachmentPreview.imap_uid == int(str(uid)),
+            MailAttachmentPreview.attachment_id == attachment_id,
+        )
+    )
+
+
+def _ensure_preview_record(
+    session: AuthSession,
+    folder: str,
+    uid: str,
+    attachment: dict[str, Any],
+    *,
+    status_hint: str = "pending",
+) -> MailAttachmentPreview | None:
+    """确保数据库里存在对应附件的预览索引记录。"""
+    attachment_id = str(attachment.get("attachment_id") or "")
+    filename = str(attachment.get("filename") or "attachment")
+    content_type = str(attachment.get("content_type") or "application/octet-stream")
+    preview_kind = _preview_kind(filename, content_type)
+    if not attachment_id or preview_kind is None:
+        return None
+
+    normalized_email = session.email.strip().lower()
+    ensure_mail_account(normalized_email)
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        account, message_row = _find_message_cache_row(db_session, normalized_email, folder, uid)
+        if account is None:
+            return None
+        record = _lookup_preview_record(db_session, normalized_email, folder, uid, attachment_id)
+        storage_key = _preview_storage_key(normalized_email, folder, uid, attachment_id, filename, content_type)
+        source_hash = _preview_source_hash(
+            folder,
+            uid,
+            attachment_id,
+            filename,
+            content_type,
+            int(attachment.get("size_bytes") or 0),
+        )
+        if record is None:
+            record = MailAttachmentPreview(
+                account_id=account.id,
+                message_id=message_row.id if message_row is not None else None,
+                folder_name=folder,
+                imap_uid=int(str(uid)),
+                attachment_id=attachment_id,
+                filename=filename,
+                source_content_type=content_type,
+                preview_kind=preview_kind,
+                storage_key=storage_key,
+                source_hash=source_hash,
+                status=status_hint,
+                size_bytes=int(attachment.get("size_bytes") or 0),
+            )
+            db_session.add(record)
+        else:
+            record.message_id = message_row.id if message_row is not None else record.message_id
+            record.filename = filename
+            record.source_content_type = content_type
+            record.preview_kind = preview_kind
+            record.storage_key = storage_key
+            record.size_bytes = int(attachment.get("size_bytes") or 0)
+            if record.source_hash != source_hash and record.status == "ready":
+                record.status = "pending"
+            if record.status in {"failed", "pending"} and status_hint == "processing":
+                record.status = "processing"
+            record.source_hash = source_hash
+        db_session.commit()
+        db_session.refresh(record)
+        return record
+
+
+def _attachment_from_cached_detail(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any] | None:
+    """从详情缓存里提取指定附件元数据，避免为了状态查询再次拉完整附件内容。"""
+    cached_detail = _cached_message_detail(session, folder, uid)
+    if cached_detail is None:
+        try:
+            cached_detail = get_message_detail(session, folder, uid)
+        except Exception:
+            return None
+    attachments = cached_detail.get("attachments") if isinstance(cached_detail.get("attachments"), list) else []
+    for item in attachments:
+        if isinstance(item, dict) and str(item.get("attachment_id") or "") == attachment_id:
+            return item
+    return None
+
+
+def _preview_status_payload(record: MailAttachmentPreview | None) -> dict[str, Any]:
+    """把预览索引记录转换成前端可消费的状态对象。"""
+    if record is None:
+        return {
+            "status": "missing",
+            "ready": False,
+            "thumbnail_ready": False,
+        }
+    thumbnail_ready = False
+    thumbnail_content_type: str | None = None
+    thumbnail_storage_key: str | None = None
+    cached_preview = _load_preview_record_payload(record)
+    if cached_preview is not None:
+        thumbnail_storage_key = cached_preview.get("thumbnail_storage_key") if isinstance(cached_preview.get("thumbnail_storage_key"), str) else None
+        thumbnail_content_type = cached_preview.get("thumbnail_content_type") if isinstance(cached_preview.get("thumbnail_content_type"), str) else None
+        if thumbnail_storage_key:
+            thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+            thumbnail_ready = _load_cached_preview(thumb_path, thumb_meta_path) is not None
+    return {
+        "attachment_id": record.attachment_id,
+        "filename": record.filename,
+        "content_type": record.source_content_type,
+        "preview_content_type": record.preview_content_type,
+        "preview_kind": record.preview_kind,
+        "status": record.status,
+        "ready": record.status == "ready",
+        "thumbnail_ready": thumbnail_ready,
+        "thumbnail_content_type": thumbnail_content_type,
+        "error_message": record.error_message,
+        "generated_at": record.generated_at.isoformat() if record.generated_at else None,
+        "last_accessed_at": record.last_accessed_at.isoformat() if record.last_accessed_at else None,
+    }
+
+
+def _load_preview_record_payload(record: MailAttachmentPreview) -> dict[str, Any] | None:
+    """从索引记录关联的文件中读取预览内容。"""
+    path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+    cached = _load_cached_preview(path, meta_path)
+    if cached is None:
+        return None
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        db_record = db_session.get(MailAttachmentPreview, record.id)
+        if db_record is not None:
+            db_record.last_accessed_at = datetime.now(timezone.utc)
+            db_session.commit()
+    return cached
+
+
+def _preview_thumbnail_is_ready(record: MailAttachmentPreview) -> bool:
+    """判断 PDF 预览记录是否已经具备可直接展示的缩略图文件。"""
+    if not _attachment_supports_thumbnail(record.filename, record.source_content_type):
+        return True
+    path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+    cached = _load_cached_preview(path, meta_path)
+    if cached is None:
+        return False
+    thumbnail_storage_key = cached.get("thumbnail_storage_key")
+    if not isinstance(thumbnail_storage_key, str) or not thumbnail_storage_key:
+        return False
+    thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+    thumb_cached = _load_cached_preview(thumb_path, thumb_meta_path)
+    return (
+        thumb_cached is not None
+        and thumb_cached.get("thumbnail_cache_version") == ATTACHMENT_THUMBNAIL_CACHE_VERSION
+    )
+
+
+def _preview_thumbnail_filename(filename: str, thumbnail_content_type: str) -> str:
+    """按缩略图真实内容类型生成下载/预览文件名。"""
+    extension = ".svg" if thumbnail_content_type == "image/svg+xml" else ".png"
+    return f"{filename}.thumbnail{extension}"
+
+
+def _load_preview_thumbnail_payload(record: MailAttachmentPreview) -> dict[str, Any] | None:
+    """从预览记录元数据中读取已生成的缩略图文件。"""
+    path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+    cached = _load_cached_preview(path, meta_path)
+    if cached is None:
+        return None
+    thumbnail_storage_key = cached.get("thumbnail_storage_key")
+    if not isinstance(thumbnail_storage_key, str) or not thumbnail_storage_key:
+        return None
+    thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+    thumb_cached = _load_cached_preview(thumb_path, thumb_meta_path)
+    if thumb_cached is None:
+        return None
+    if thumb_cached.get("thumbnail_cache_version") != ATTACHMENT_THUMBNAIL_CACHE_VERSION:
+        return None
+    thumb_cached["filename"] = _preview_thumbnail_filename(record.filename, str(thumb_cached["content_type"]))
+    return thumb_cached
+
+
+def _remove_preview_records_for_messages(email: str, folder_name: str, uids: list[str]) -> None:
+    """按邮箱、文件夹和 UID 清理对应邮件的预览索引及产物文件。"""
+    normalized_email = email.strip().lower()
+    uid_values = [int(str(uid)) for uid in uids if str(uid).isdigit()]
+    if not uid_values:
+        return
+
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+        if account is None:
+            return
+        records = db_session.scalars(
+            select(MailAttachmentPreview).where(
+                MailAttachmentPreview.account_id == account.id,
+                MailAttachmentPreview.folder_name == folder_name,
+                MailAttachmentPreview.imap_uid.in_(uid_values),
+            )
+        ).all()
+        for record in records:
+            path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+            preview_meta = _load_cached_preview(path, meta_path) if path.exists() and meta_path.exists() else None
+            try:
+                path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                thumbnail_storage_key = (
+                    preview_meta.get("thumbnail_storage_key")
+                    if isinstance(preview_meta, dict) and isinstance(preview_meta.get("thumbnail_storage_key"), str)
+                    else None
+                )
+                if thumbnail_storage_key:
+                    thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+                    thumb_path.unlink(missing_ok=True)
+                    thumb_meta_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            db_session.delete(record)
+        db_session.commit()
+
+
+def _mark_preview_record_failed(email: str, folder: str, uid: str, attachment_id: str, error_message: str) -> None:
+    """把单个附件预览记录标记为失败，避免后台任务异常后状态悬挂。"""
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        record = _lookup_preview_record(db_session, email, folder, uid, attachment_id)
+        if record is None:
+            return
+        record.status = "failed"
+        record.error_message = error_message
+        db_session.commit()
+
+
+def _preview_task_key(email: str, folder: str, uid: str, attachment_id: str) -> str:
+    """生成单个附件预览后台任务的去重键。"""
+    return "::".join([email.strip().lower(), folder, uid, attachment_id])
+
+
+def _schedule_preview_housekeeping(*, force: bool = False) -> None:
+    """按周期调度一次预览缓存整理任务。"""
+    settings = get_settings()
+    interval = max(int(settings.attachment_preview_housekeeping_interval_seconds), 1)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with PREVIEW_HOUSEKEEPING_LOCK:
+        if PREVIEW_HOUSEKEEPING_STATE["running"]:
+            return
+        if not force and now_ts - float(PREVIEW_HOUSEKEEPING_STATE["last_run_ts"]) < interval:
+            return
+        PREVIEW_HOUSEKEEPING_STATE["running"] = True
+        PREVIEW_HOUSEKEEPING_STATE["last_run_ts"] = now_ts
+
+    def run() -> None:
+        try:
+            with PREVIEW_CACHE_LOCK:
+                _cleanup_preview_cache_if_needed()
+        except Exception:
+            return
+        finally:
+            with PREVIEW_HOUSEKEEPING_LOCK:
+                PREVIEW_HOUSEKEEPING_STATE["running"] = False
+
+    MAILBOX_BACKGROUND_EXECUTOR.submit(run)
 
 
 def _invalidate_message_cache(email: str, folders: list[str]) -> None:
@@ -1299,6 +2443,7 @@ def list_messages(
             "messages": response_messages,
         }
         cache.set(key, payload, ttl_seconds=60)
+        _schedule_detail_prewarm(session, folder, [message["uid"] for message in response_messages])
         return MailboxPage(cached=False, **payload)
     except MailAdapterError as exc:
         raise AppError(
@@ -1381,6 +2526,7 @@ def search_messages(
             "messages": response_messages,
         }
         cache.set(key, payload, ttl_seconds=60)
+        _schedule_detail_prewarm(session, folder, [message["uid"] for message in response_messages])
         return MailboxPage(cached=False, **payload)
     except MailAdapterError as exc:
         raise AppError(
@@ -1401,21 +2547,30 @@ def get_message_detail(session: AuthSession, folder: str, uid: str) -> dict[str,
     adapter = _connect_imap(session)
     try:
         adapter.select_folder(folder)
-        raw = _uid_fetch_message_bytes(adapter, uid)
-        summary = _message_summary(uid, raw)
-        detail = _message_detail(uid, raw)
+        raw: bytes | None = None
+        section_result = _message_detail_from_sections(adapter, uid)
+        if section_result is not None:
+            summary, detail = section_result
+            _cache_attachment_sections_from_detail(session, adapter, folder, uid, detail)
+        else:
+            raw = _uid_fetch_message_bytes(adapter, uid)
+            summary, detail = _build_message_detail_from_raw(uid, raw)
         system_preferences = session.preferences.get("system")
         mark_read_on_open = True
         if isinstance(system_preferences, dict):
             mark_read_on_open = bool(system_preferences.get("mark_read_on_open", True))
         if mark_read_on_open:
-            adapter.mark_seen(uid)
-            persist_message_read_state(session.email, folder, [uid], is_read=True)
             summary["read"] = True
-            _sync_folder_snapshot(session.email, adapter)
-            _invalidate_message_cache(session.email, [folder])
             detail["read"] = True
+            _schedule_mark_message_read(session, folder, uid)
         _persist_message_cache(session, folder, summary, detail, raw_message=raw)
+        _schedule_attachment_preview_generation_from_detail(session, folder, uid, detail)
+        detail["attachments"] = _annotate_attachment_preview_state(
+            session,
+            folder,
+            uid,
+            detail.get("attachments") if isinstance(detail.get("attachments"), list) else [],
+        )
         return detail
     except MailAdapterError as exc:
         raise AppError(
@@ -1434,6 +2589,43 @@ def get_message_attachment(session: AuthSession, folder: str, uid: str, attachme
     cached_attachment = _load_cached_attachment(session, folder, uid, attachment_id)
     if cached_attachment is not None:
         return cached_attachment
+    cached_detail = _cached_message_detail(session, folder, uid)
+    if cached_detail is not None:
+        attachments = cached_detail.get("attachments") if isinstance(cached_detail.get("attachments"), list) else []
+        attachment_meta = next(
+            (
+                item for item in attachments
+                if isinstance(item, dict) and str(item.get("attachment_id") or "") == attachment_id
+            ),
+            None,
+        )
+        section = str(attachment_meta.get("section") or "") if isinstance(attachment_meta, dict) else ""
+        if section:
+            adapter = _connect_imap(session)
+            try:
+                adapter.select_folder(folder)
+                content = _decode_section_transfer_bytes(
+                    adapter.uid_fetch_body_section(uid, section),
+                    str(attachment_meta.get("encoding") or "") if isinstance(attachment_meta, dict) else "",
+                )
+                attachment = {
+                    "attachment_id": attachment_id,
+                    "filename": str(attachment_meta.get("filename") or "attachment"),
+                    "content_type": str(attachment_meta.get("content_type") or "application/octet-stream"),
+                    "size_bytes": int(attachment_meta.get("size_bytes") or len(content)),
+                    "section": section,
+                    "encoding": str(attachment_meta.get("encoding") or ""),
+                    "content": content,
+                }
+                _cache_attachment_contents(session, folder, uid, [attachment])
+                return attachment
+            except Exception:
+                pass
+            finally:
+                try:
+                    adapter.logout()
+                except Exception:
+                    pass
     cached_raw = _load_cached_message_raw(session, folder, uid)
     if cached_raw is not None:
         message = message_from_bytes(cached_raw, policy=default)
@@ -1519,36 +2711,355 @@ def _docx_preview_html(content: bytes, filename: str) -> bytes:
     return preview_html.encode("utf-8")
 
 
-def get_message_attachment_preview(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
-    """按可预览类型返回附件预览内容。"""
+def _docx_thumbnail_svg(content: bytes, filename: str) -> bytes:
+    """把 docx 前几段正文渲染成一张轻量 SVG 缩略图。"""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        ) from exc
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        ) from exc
+
+    paragraphs: list[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        text_parts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        paragraph_text = re.sub(r"\s+", " ", "".join(text_parts)).strip()
+        if paragraph_text:
+            paragraphs.append(paragraph_text)
+
+    if not paragraphs:
+        paragraphs.append("该 Word 附件暂无可提取的正文内容。")
+
+    def truncate_for_svg(value: str, max_width: int) -> str:
+        current = ""
+        width = 0
+        for char in value:
+            char_width = 2 if ord(char) > 127 else 1
+            if width + char_width > max_width:
+                return current.rstrip() + "..."
+            current += char
+            width += char_width
+        return current
+
+    def wrap_for_svg(value: str, max_width: int) -> list[str]:
+        lines: list[str] = []
+        current = ""
+        width = 0
+        for char in value:
+            char_width = 2 if ord(char) > 127 else 1
+            if current and width + char_width > max_width:
+                lines.append(current.rstrip())
+                current = char
+                width = char_width
+                continue
+            current += char
+            width += char_width
+        if current.strip():
+            lines.append(current.rstrip())
+        return lines
+
+    preview_lines: list[str] = []
+    for paragraph in paragraphs:
+        preview_lines.extend(wrap_for_svg(paragraph, 56))
+        if len(preview_lines) >= 13:
+            break
+
+    safe_filename = html.escape(truncate_for_svg(filename, 52))
+    safe_lines = [html.escape(item) for item in preview_lines[:13]]
+    svg_lines = "".join(
+        f"<text x='112' y='{402 + index * 42}' font-size='22' fill='#1f2937'>{line}</text>"
+        for index, line in enumerate(safe_lines)
+    )
+    return (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='960' height='1280' viewBox='0 0 960 1280'>"
+        "<defs>"
+        "<linearGradient id='bg' x1='0' y1='0' x2='0' y2='1'>"
+        "<stop offset='0%' stop-color='#f8fbff'/>"
+        "<stop offset='100%' stop-color='#eef4ff'/>"
+        "</linearGradient>"
+        "<filter id='shadow' x='-20%' y='-20%' width='140%' height='140%'>"
+        "<feDropShadow dx='0' dy='20' stdDeviation='24' flood-color='#c7d2fe' flood-opacity='0.25'/>"
+        "</filter>"
+        "<clipPath id='bodyClip'><rect x='96' y='370' width='768' height='700' rx='18'/></clipPath>"
+        "</defs>"
+        "<rect width='960' height='1280' rx='40' fill='url(#bg)'/>"
+        "<rect x='72' y='72' width='816' height='180' rx='28' fill='#dbeafe' filter='url(#shadow)'/>"
+        "<text x='112' y='164' font-size='48' font-weight='700' fill='#1d4ed8'>DOCX</text>"
+        f"<text x='112' y='214' font-size='24' fill='#475569'>{safe_filename}</text>"
+        "<rect x='72' y='280' width='816' height='856' rx='32' fill='#ffffff' stroke='#dbe3f0'/>"
+        "<text x='88' y='344' font-size='22' font-weight='600' fill='#64748b'>正文预览</text>"
+        f"<g clip-path='url(#bodyClip)'>{svg_lines}</g>"
+        "</svg>"
+    ).encode("utf-8")
+
+
+def _pdf_thumbnail_png(content: bytes) -> bytes:
+    """使用 PyMuPDF 渲染 PDF 首屏缩略图。"""
+    if fitz is None:
+        raise AppError(
+            "ATTACHMENT_THUMBNAIL_UNAVAILABLE",
+            "当前环境缺少 PDF 缩略图依赖",
+            http_status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    with fitz.open(stream=content, filetype="pdf") as document:
+        if document.page_count <= 0:
+            raise AppError(
+                "ATTACHMENT_PREVIEW_FAILED",
+                "PDF 预览生成失败",
+                http_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        page = document.load_page(0)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(0.45, 0.45), alpha=False)
+        return pixmap.tobytes("png")
+
+
+def _build_preview_record_payload(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """同步构建并持久化单个附件的预览产物。"""
     attachment = get_message_attachment(session, folder, uid, attachment_id)
     filename = str(attachment["filename"])
     content_type = str(attachment["content_type"] or "application/octet-stream")
     content = bytes(attachment["content"])
-    lower_name = filename.lower()
-    lower_type = content_type.lower()
+    preview_kind = _preview_kind(filename, content_type)
+    if preview_kind is None:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        )
 
-    if lower_type.startswith("image/") or lower_type == "application/pdf" or lower_type.startswith("text/"):
-        return {
-            "content": content,
-            "content_type": content_type,
-            "filename": filename,
-        }
-
+    preview_content = content
+    preview_content_type = content_type
+    thumbnail_content: bytes | None = None
+    thumbnail_content_type: str | None = None
     if (
-        lower_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        or lower_name.endswith(".docx")
+        content_type.lower() == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or filename.lower().endswith(".docx")
     ):
+        preview_content = _docx_preview_html(content, filename)
+        preview_content_type = "text/html; charset=utf-8"
+        thumbnail_content = _docx_thumbnail_svg(content, filename)
+        thumbnail_content_type = "image/svg+xml"
+    elif content_type.lower() == "application/pdf" or filename.lower().endswith(".pdf"):
+        try:
+            thumbnail_content = _pdf_thumbnail_png(content)
+            thumbnail_content_type = "image/png"
+        except AppError:
+            raise
+        except Exception as exc:
+            raise AppError(
+                "ATTACHMENT_THUMBNAIL_FAILED",
+                f"PDF 缩略图生成失败: {exc.__class__.__name__}",
+                http_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            ) from exc
+
+    attachment_meta = {
+        "attachment_id": attachment_id,
+        "filename": filename,
+        "content_type": content_type,
+        "size_bytes": int(attachment.get("size_bytes") or len(content)),
+    }
+    record = _ensure_preview_record(session, folder, uid, attachment_meta, status_hint="processing")
+    if record is None:
+        raise AppError(
+            "ATTACHMENT_PREVIEW_UNSUPPORTED",
+            "当前附件暂不支持预览",
+            http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        )
+    path, meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+    thumbnail_storage_key: str | None = None
+    if thumbnail_content is not None and thumbnail_content_type is not None:
+        thumbnail_storage_key = _preview_thumbnail_storage_key(
+            session.email,
+            folder,
+            uid,
+            attachment_id,
+            filename,
+            content_type,
+            thumbnail_content_type,
+        )
+        thumb_path, thumb_meta_path = _preview_cache_path_from_storage_key(thumbnail_storage_key)
+        thumbnail_filename = _preview_thumbnail_filename(filename, thumbnail_content_type)
+
+    with PREVIEW_CACHE_LOCK:
+        try:
+            if thumbnail_content is not None and thumbnail_content_type is not None and thumbnail_storage_key is not None:
+                _persist_preview_cache(
+                    thumb_path,
+                    thumb_meta_path,
+                    filename=thumbnail_filename,
+                    content_type=thumbnail_content_type,
+                    content=thumbnail_content,
+                    thumbnail_cache_version=ATTACHMENT_THUMBNAIL_CACHE_VERSION,
+                )
+            _persist_preview_cache(
+                path,
+                meta_path,
+                filename=filename,
+                content_type=preview_content_type,
+                content=preview_content,
+                thumbnail_storage_key=thumbnail_storage_key,
+                thumbnail_content_type=thumbnail_content_type,
+            )
+        except OSError as exc:
+            session_factory = get_session_factory()
+            with session_factory() as db_session:
+                db_record = db_session.get(MailAttachmentPreview, record.id)
+                if db_record is not None:
+                    db_record.status = "failed"
+                    db_record.error_message = f"预览文件写入失败: {exc.__class__.__name__}"
+                    db_session.commit()
+            raise
+
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        db_record = db_session.get(MailAttachmentPreview, record.id)
+        if db_record is not None:
+            now = datetime.now(timezone.utc)
+            db_record.status = "ready"
+            db_record.preview_content_type = preview_content_type
+            db_record.preview_size_bytes = len(preview_content)
+            db_record.generated_at = now
+            db_record.last_accessed_at = now
+            db_record.error_message = None
+            db_session.commit()
+            db_session.refresh(db_record)
+            record = db_record
+
+    _schedule_preview_housekeeping(force=True)
+    return {
+        "content": preview_content,
+        "content_type": preview_content_type,
+        "filename": filename,
+        "thumbnail_content_type": thumbnail_content_type,
+        "thumbnail_storage_key": thumbnail_storage_key,
+    }
+
+
+def get_message_attachment_preview_status(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """返回附件预览当前状态，并在需要时异步触发生成。"""
+    validate_attachment_id(attachment_id)
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        existing_record = _lookup_preview_record(db_session, session.email.strip().lower(), folder, uid, attachment_id)
+        if existing_record is not None and existing_record.status == "ready":
+            path, _meta_path = _preview_cache_path_from_storage_key(existing_record.storage_key)
+            if path.exists() and _preview_thumbnail_is_ready(existing_record):
+                return _preview_status_payload(existing_record)
+            existing_record.status = "pending"
+            existing_record.error_message = (
+                "预览文件缺失，已重新排队生成"
+                if not path.exists()
+                else "附件缩略图缺失，已重新排队生成"
+            )
+            db_session.commit()
+            db_session.refresh(existing_record)
+
+    attachment = _attachment_from_cached_detail(session, folder, uid, attachment_id)
+    if attachment is None:
+        raise AppError(
+            "ATTACHMENT_NOT_FOUND",
+            "附件不存在",
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+
+    filename = str(attachment.get("filename") or "attachment")
+    content_type = str(attachment.get("content_type") or "application/octet-stream")
+    preview_kind = _preview_kind(filename, content_type)
+    if preview_kind is None:
         return {
-            "content": _docx_preview_html(content, filename),
-            "content_type": "text/html; charset=utf-8",
+            "attachment_id": attachment_id,
             "filename": filename,
+            "content_type": content_type,
+            "preview_kind": None,
+            "status": "unsupported",
+            "ready": False,
+            "error_message": "当前附件类型暂不支持预览",
         }
 
+    record = _ensure_preview_record(session, folder, uid, attachment, status_hint="pending")
+    if record is None:
+        return {
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "content_type": content_type,
+            "preview_kind": preview_kind,
+            "status": "pending",
+            "ready": False,
+        }
+
+    payload = _preview_status_payload(record)
+    if payload["status"] == "ready":
+        path, _meta_path = _preview_cache_path_from_storage_key(record.storage_key)
+        if path.exists() and (not _attachment_supports_thumbnail(record.filename, record.source_content_type) or bool(payload.get("thumbnail_ready"))):
+            return payload
+        with session_factory() as db_session:
+            db_record = db_session.get(MailAttachmentPreview, record.id)
+            if db_record is not None:
+                db_record.status = "pending"
+                db_record.error_message = (
+                    "预览文件缺失，已重新排队生成"
+                    if not path.exists()
+                    else "附件缩略图缺失，已重新排队生成"
+                )
+                db_session.commit()
+
+    _schedule_attachment_preview_generation(session, folder, uid, attachment)
+    with session_factory() as db_session:
+        refreshed = db_session.get(MailAttachmentPreview, record.id)
+        if refreshed is not None:
+            return _preview_status_payload(refreshed)
+    return payload
+
+
+def get_message_attachment_preview(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """按可预览类型返回附件预览内容。"""
+    validate_attachment_id(attachment_id)
+    status_payload = get_message_attachment_preview_status(session, folder, uid, attachment_id)
+    if status_payload.get("status") == "ready":
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            record = _lookup_preview_record(db_session, session.email, folder, uid, attachment_id)
+            if record is not None:
+                cached_preview = _load_preview_record_payload(record)
+                if cached_preview is not None:
+                    return cached_preview
+    return _build_preview_record_payload(session, folder, uid, attachment_id)
+
+
+def get_message_attachment_preview_thumbnail(session: AuthSession, folder: str, uid: str, attachment_id: str) -> dict[str, Any]:
+    """读取附件预览缩略图，没有则先同步触发预览构建。"""
+    validate_attachment_id(attachment_id)
+    session_factory = get_session_factory()
+    with session_factory() as db_session:
+        record = _lookup_preview_record(db_session, session.email.strip().lower(), folder, uid, attachment_id)
+        if record is not None:
+            cached_thumbnail = _load_preview_thumbnail_payload(record)
+            if cached_thumbnail is not None:
+                return cached_thumbnail
+    get_message_attachment_preview(session, folder, uid, attachment_id)
+    with session_factory() as db_session:
+        record = _lookup_preview_record(db_session, session.email.strip().lower(), folder, uid, attachment_id)
+        if record is not None:
+            cached_thumbnail = _load_preview_thumbnail_payload(record)
+            if cached_thumbnail is not None:
+                return cached_thumbnail
     raise AppError(
-        "ATTACHMENT_PREVIEW_UNSUPPORTED",
-        "当前附件暂不支持预览",
-        http_status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        "ATTACHMENT_THUMBNAIL_NOT_READY",
+        "附件缩略图暂未准备完成",
+        http_status=status.HTTP_425_TOO_EARLY,
     )
 
 
@@ -1585,6 +3096,7 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
             _invalidate_message_cache(session.email, [folder])
         if payload.action in {"delete", "move"}:
             adapter.expunge()
+            _remove_message_records(session.email, folder, payload.uids)
             _sync_folder_snapshot(session.email, adapter)
             affected_folders = [folder]
             if payload.action == "delete":
@@ -1592,6 +3104,7 @@ def operate_messages(session: AuthSession, folder: str, payload: MessageOperatio
             elif target_folder is not None:
                 affected_folders.append(target_folder)
             _invalidate_message_cache(session.email, affected_folders)
+            _schedule_preview_housekeeping(force=True)
         return {"action": payload.action, "folder": folder, "target_folder": target_folder, "uids": payload.uids}
     except MailAdapterError as exc:
         raise AppError(

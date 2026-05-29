@@ -2073,6 +2073,8 @@ def admin_logs(
     domain_id: str | None = None,
     sender: str | None = None,
     recipient: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     admin: AdminContext = Depends(get_current_admin),
 ) -> dict[str, Any]:
     """搜索邮件服务日志。"""
@@ -2083,26 +2085,18 @@ def admin_logs(
         status_filter=status_filter,
         sender=sender,
         recipient=recipient,
+        date_from=date_from,
+        date_to=date_to,
     )
     page, page_size = normalize_pagination(page, page_size)
     items = result["items"]
     total = len(items)
     start_index = (page - 1) * page_size
     paged_items = items[start_index : start_index + page_size]
-    payload = paginate(page=page, page_size=page_size, total=total, items=[
-        {
-            "id": item["id"],
-            "source": item["log_key"],
-            "level": status_filter or "info",
-            "message": item["summary"],
-            "created_at": datetime.now(UTC).isoformat(),
-            "actor": item["label"],
-            "target": item["source"],
-        }
-        for item in paged_items
-    ])
+    payload = paginate(page=page, page_size=page_size, total=total, items=paged_items)
     payload["updated_at"] = datetime.now(UTC).isoformat()
     payload["detail"] = result["detail"]
+    payload["summary"] = result.get("summary", {})
     return success_response(request, payload)
 
 
@@ -2120,6 +2114,8 @@ def admin_logs_export(
         status_filter=payload.status,
         sender=payload.sender,
         recipient=payload.recipient,
+        date_from=payload.date_from,
+        date_to=payload.date_to,
     )
     exported = export_log_items(result["items"], format_name=payload.format)
     record_admin_audit(

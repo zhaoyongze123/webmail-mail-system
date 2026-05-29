@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { clearMessageDetailCache } from './mail/api';
 import type { MessageDetailPayload } from './mail/types';
 
 const mockFetch = vi.fn();
@@ -81,9 +82,32 @@ let messageDetailPayload: MessageDetailPayload = {
   html_body: null as string | null,
 };
 
+const pushSubscriptionState = {
+  endpoint: null as string | null,
+  vapidPublicKey: 'BK-example-vapid-public-key',
+};
+
 function setupApi() {
   mockFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const resolveDetailAttachment = (attachmentId: string) => {
+      const attachments = Array.isArray(messageDetailPayload.attachments) ? messageDetailPayload.attachments : [];
+      return attachments.find((attachment, index) => {
+        const attachmentRecord = attachment as Record<string, unknown>;
+        const candidates = [
+          attachment.id,
+          attachment.attachment_id,
+          attachmentRecord.part_id,
+          attachmentRecord.part,
+          attachmentRecord.index,
+          String(index),
+          String(index + 1),
+        ]
+          .filter((value): value is string | number => value !== null && value !== undefined)
+          .map((value) => String(value));
+        return candidates.includes(attachmentId);
+      });
+    };
     if (url === '/api/folders' && init?.method === 'POST') {
       const payload = JSON.parse(String(init.body || '{}')) as { name?: string };
       folderPayload.folders = [
@@ -171,6 +195,69 @@ function setupApi() {
       }
       return Promise.resolve(mockApiResponse(success({ password_updated: true })));
     }
+    if (url === '/api/notifications/push-subscription' && (!init || init.method === 'GET')) {
+      return Promise.resolve(
+        mockApiResponse(
+          success({
+            vapid_public_key: pushSubscriptionState.vapidPublicKey,
+            subscription: pushSubscriptionState.endpoint
+              ? {
+                  endpoint: pushSubscriptionState.endpoint,
+                  created_at: '2026-05-25T10:00:00Z',
+                  updated_at: '2026-05-25T10:00:00Z',
+                }
+              : null,
+          }),
+        ),
+      );
+    }
+    if (url === '/api/notifications/status' && (!init || init.method === 'GET')) {
+      return Promise.resolve(
+        mockApiResponse(
+          success({
+            enabled: Boolean(pushSubscriptionState.endpoint),
+            permission_state: pushSubscriptionState.endpoint ? 'granted' : 'default',
+            last_error: null,
+            has_subscription: Boolean(pushSubscriptionState.endpoint),
+            vapid_public_key: pushSubscriptionState.vapidPublicKey,
+          }),
+        ),
+      );
+    }
+    if (url === '/api/notifications/push-subscription' && init?.method === 'POST') {
+      const payload = JSON.parse(String(init.body || '{}')) as { endpoint?: string };
+      pushSubscriptionState.endpoint = payload.endpoint || null;
+      return Promise.resolve(
+        mockApiResponse(
+          success({
+            subscription: pushSubscriptionState.endpoint
+              ? {
+                  endpoint: pushSubscriptionState.endpoint,
+                  created_at: '2026-05-25T10:00:00Z',
+                  updated_at: '2026-05-25T10:00:00Z',
+                }
+              : null,
+          }),
+        ),
+      );
+    }
+    if (url === '/api/notifications/preferences' && init?.method === 'PUT') {
+      return Promise.resolve(
+        mockApiResponse(
+          success({
+            enabled: Boolean(pushSubscriptionState.endpoint),
+            permission_state: pushSubscriptionState.endpoint ? 'granted' : 'default',
+            last_error: null,
+            has_subscription: Boolean(pushSubscriptionState.endpoint),
+            vapid_public_key: pushSubscriptionState.vapidPublicKey,
+          }),
+        ),
+      );
+    }
+    if (url === '/api/notifications/push-subscription' && init?.method === 'DELETE') {
+      pushSubscriptionState.endpoint = null;
+      return Promise.resolve(mockApiResponse(success({ deleted: true })));
+    }
     if (url === '/api/signatures' && (!init || init.method === 'GET')) {
       return Promise.resolve(mockApiResponse(success({ signatures: signatureState })));
     }
@@ -240,6 +327,28 @@ function setupApi() {
     if (url.startsWith('/api/folders/INBOX/messages?')) {
       return Promise.resolve(mockApiResponse(success(buildInboxMessages())));
     }
+    if (url.includes('/attachments/') && url.endsWith('/preview/status')) {
+      const attachmentId = decodeURIComponent(url.split('/attachments/')[1]?.split('/preview/status')[0] || '');
+      const attachment = resolveDetailAttachment(attachmentId);
+      const contentType = attachment?.content_type || '';
+      const filename = attachment?.filename || '附件';
+      const isPdf = contentType === 'application/pdf' || filename.toLowerCase().endsWith('.pdf');
+      const isDocx =
+        contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        filename.toLowerCase().endsWith('.docx');
+      return Promise.resolve(
+        mockApiResponse(
+          success({
+            status: 'ready',
+            ready: true,
+            preview_kind: isPdf ? 'pdf' : 'text',
+            preview_content_type: isPdf ? 'application/pdf' : 'text/html; charset=utf-8',
+            thumbnail_ready: isPdf || isDocx,
+            thumbnail_content_type: isPdf ? 'image/png' : isDocx ? 'image/svg+xml' : null,
+          }),
+        ),
+      );
+    }
     if (url === '/api/folders/INBOX/messages/101') {
       return Promise.resolve(mockApiResponse(success(messageDetailPayload)));
     }
@@ -267,6 +376,7 @@ describe('App 邮件工作台', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', mockFetch);
     mockFetch.mockReset();
+    clearMessageDetailCache();
     window.localStorage.clear();
     settingsPayload = structuredClone(baseSettingsPayload);
     folderPayload = {
@@ -291,6 +401,8 @@ describe('App 邮件工作台', () => {
       },
     ];
     defaultSignatureId = 'sig-1';
+    pushSubscriptionState.endpoint = null;
+    pushSubscriptionState.vapidPublicKey = 'BK-example-vapid-public-key';
     messageDetailPayload = {
       uid: '101',
       subject: '客户报价确认',
@@ -397,7 +509,29 @@ describe('App 邮件工作台', () => {
 
     expect(await screen.findByText('报价正文内容')).not.toBeNull();
     expect(mockFetch).toHaveBeenCalledWith('/api/folders/INBOX/messages/101', expect.any(Object));
-    expect(mockFetch).toHaveBeenCalledWith('/api/folders/INBOX/messages/operations', expect.objectContaining({ method: 'POST' }));
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith('/api/folders/INBOX/messages/operations', expect.objectContaining({ method: 'POST' }));
+    });
+  });
+
+  it('悬停邮件行会预取详情，点击后不重复请求详情', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const messageTitle = await screen.findByText('客户报价确认');
+    const messageRow = messageTitle.closest('.message-row') as HTMLElement;
+
+    fireEvent.mouseEnter(messageRow);
+    await waitFor(() => {
+      const detailCalls = mockFetch.mock.calls.filter(([url]) => String(url) === '/api/folders/INBOX/messages/101');
+      expect(detailCalls).toHaveLength(1);
+    });
+
+    await user.click(messageTitle);
+    expect(await screen.findByText('报价正文内容')).not.toBeNull();
+
+    const detailCalls = mockFetch.mock.calls.filter(([url]) => String(url) === '/api/folders/INBOX/messages/101');
+    expect(detailCalls).toHaveLength(1);
   });
 
   it('阅读区发件人优先展示联系人备注并保留邮箱地址', async () => {
@@ -596,9 +730,67 @@ describe('App 邮件工作台', () => {
 
     await user.click(previewButton);
     const previewDialog = await screen.findByRole('dialog', { name: '附件预览' });
+    await waitFor(() => {
+      expect(previewDialog.querySelector('iframe')).not.toBeNull();
+    });
     const previewFrame = previewDialog.querySelector('iframe') as HTMLIFrameElement | null;
-    expect(previewFrame).not.toBeNull();
-    expect(previewFrame?.getAttribute('src')).toBe('/api/folders/INBOX/messages/101/attachments/attachment-1/preview');
+    expect(previewFrame?.getAttribute('src')).toContain('/api/folders/INBOX/messages/101/attachments/attachment-1/preview');
+  });
+
+  it('阅读区展示 PDF 附件真实缩略图地址', async () => {
+    const user = userEvent.setup();
+    messageDetailPayload = {
+      uid: '101',
+      subject: 'PDF 附件邮件',
+      text_body: '请查看 PDF 附件',
+      html_body: null,
+      attachments: [
+        {
+          id: 'attachment-pdf',
+          filename: '报价单.pdf',
+          content_type: 'application/pdf',
+          size: 4096,
+        },
+      ],
+    };
+    render(<App />);
+
+    await user.click(await screen.findByText('客户报价确认'));
+
+    expect(await screen.findByText('报价单.pdf')).not.toBeNull();
+    const thumbnailImage = await screen.findByAltText('报价单.pdf 缩略图');
+    expect(thumbnailImage.tagName).toBe('IMG');
+    expect(thumbnailImage.getAttribute('src')).toContain(
+      '/api/folders/INBOX/messages/101/attachments/attachment-pdf/preview-thumbnail',
+    );
+  });
+
+  it('阅读区展示 DOCX 附件真实缩略图地址', async () => {
+    const user = userEvent.setup();
+    messageDetailPayload = {
+      uid: '101',
+      subject: 'DOCX 附件邮件',
+      text_body: '请查看 DOCX 附件',
+      html_body: null,
+      attachments: [
+        {
+          id: 'attachment-docx',
+          filename: '项目方案.docx',
+          content_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          size: 8192,
+        },
+      ],
+    };
+    render(<App />);
+
+    await user.click(await screen.findByText('客户报价确认'));
+
+    expect(await screen.findByText('项目方案.docx')).not.toBeNull();
+    const thumbnailImage = await screen.findByAltText('项目方案.docx 缩略图');
+    expect(thumbnailImage.tagName).toBe('IMG');
+    expect(thumbnailImage.getAttribute('src')).toContain(
+      '/api/folders/INBOX/messages/101/attachments/attachment-docx/preview-thumbnail',
+    );
   });
 
   it('纯文本邮件即使后端返回文本转 HTML 也会保持纯文本阅读', async () => {
@@ -662,6 +854,56 @@ describe('App 邮件工作台', () => {
     expect(defaultPreview.innerHTML).toContain('官网');
     expect(defaultPreview.innerHTML).toContain('img');
     expect(defaultPreview.innerHTML).not.toContain('<script');
+  });
+
+  it('设置中可以看到新邮件系统通知开关', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: '打开设置' }));
+    const dialog = await screen.findByRole('dialog', { name: '设置' });
+    expect(within(dialog).getByText('新邮件系统通知')).not.toBeNull();
+    expect(within(dialog).getByRole('checkbox', { name: '新邮件系统通知' })).not.toBeNull();
+  });
+
+  it('可以在设置中启用系统通知并保存订阅', async () => {
+    const user = userEvent.setup();
+    (window.Notification as typeof Notification & { permission: NotificationPermission }).permission = 'granted';
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: '打开设置' }));
+    const dialog = await screen.findByRole('dialog', { name: '设置' });
+    const toggle = within(dialog).getByRole('checkbox', { name: '新邮件系统通知' });
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect((window.Notification.requestPermission as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalledWith('/api/notifications/push-subscription', expect.objectContaining({ method: 'POST' }));
+    });
+    expect(await within(dialog).findByText(/已启用新邮件系统通知/)).not.toBeNull();
+  });
+
+  it('浏览器不支持时展示降级文案', async () => {
+    const originalNotification = window.Notification;
+    const originalPushManager = window.PushManager;
+    const originalServiceWorker = window.navigator.serviceWorker;
+    // @ts-expect-error 测试中故意移除能力
+    delete window.Notification;
+    // @ts-expect-error 测试中故意移除能力
+    delete window.PushManager;
+    // @ts-expect-error 测试中故意移除能力
+    delete window.navigator.serviceWorker;
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: '打开设置' }));
+    const dialog = await screen.findByRole('dialog', { name: '设置' });
+    expect(within(dialog).getByText('当前浏览器不支持')).not.toBeNull();
+
+    Object.defineProperty(window, 'Notification', { configurable: true, value: originalNotification });
+    Object.defineProperty(window, 'PushManager', { configurable: true, value: originalPushManager });
+    Object.defineProperty(window.navigator, 'serviceWorker', { configurable: true, value: originalServiceWorker });
   });
 
   it('收件箱右键邮件可以回复引用', async () => {

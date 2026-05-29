@@ -79,11 +79,28 @@ class MailAccount(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    notification_preference: Mapped["MailNotificationPreference | None"] = relationship(
+        back_populates="account",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    notification_subscriptions: Mapped[list["MailPushSubscription"]] = relationship(
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+    notification_cursors: Mapped[list["MailNotificationCursor"]] = relationship(
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
     contacts: Mapped[list["MailContact"]] = relationship(
         back_populates="account",
         cascade="all, delete-orphan",
     )
     attachments: Mapped[list["MailAttachment"]] = relationship(back_populates="account")
+    attachment_previews: Mapped[list["MailAttachmentPreview"]] = relationship(
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="account")
 
 
@@ -194,6 +211,10 @@ class MailMessage(Base):
     account: Mapped["MailAccount"] = relationship(back_populates="messages")
     folder: Mapped["MailFolder"] = relationship(back_populates="messages")
     attachments: Mapped[list["MailAttachment"]] = relationship(back_populates="message")
+    attachment_previews: Mapped[list["MailAttachmentPreview"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+    )
 
 
 class MailDraft(Base):
@@ -312,6 +333,111 @@ class MailUserPreference(Base):
     account: Mapped["MailAccount"] = relationship(back_populates="preferences")
 
 
+class MailNotificationPreference(Base):
+    """邮箱账号的新邮件通知偏好。"""
+
+    __tablename__ = "mail_notification_preferences"
+    __table_args__ = (
+        UniqueConstraint("account_id"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    permission_state: Mapped[str] = mapped_column(String(20), nullable=False, default="default")
+    mailbox_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    account: Mapped["MailAccount"] = relationship(back_populates="notification_preference")
+
+
+class MailPushSubscription(Base):
+    """浏览器 Web Push 订阅记录。"""
+
+    __tablename__ = "mail_push_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("account_id", "endpoint"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    expiration_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    account: Mapped["MailAccount"] = relationship(back_populates="notification_subscriptions")
+
+
+class MailNotificationCursor(Base):
+    """通知轮询的邮箱游标状态。"""
+
+    __tablename__ = "mail_notification_cursors"
+    __table_args__ = (
+        UniqueConstraint("account_id", "folder_name"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    folder_name: Mapped[str] = mapped_column(String(512), nullable=False, default="INBOX")
+    last_uid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    account: Mapped["MailAccount"] = relationship(back_populates="notification_cursors")
+
+
 class MailContact(Base):
     """通讯录联系人实体，保存联系人属性与黑白名单状态。"""
 
@@ -421,6 +547,61 @@ class MailAttachment(Base):
     account: Mapped["MailAccount"] = relationship(back_populates="attachments")
     message: Mapped["MailMessage | None"] = relationship(back_populates="attachments")
     draft: Mapped["MailDraft | None"] = relationship(back_populates="attachments")
+
+
+class MailAttachmentPreview(Base):
+    """附件预览索引实体，只在数据库中保存索引元数据，不保存大文件本体。"""
+
+    __tablename__ = "mail_attachment_previews"
+    __table_args__ = (
+        UniqueConstraint("account_id", "folder_name", "imap_uid", "attachment_id"),
+        Index("ix_mail_attachment_previews_status", "status"),
+        Index("ix_mail_attachment_previews_last_accessed_at", "last_accessed_at"),
+        Index("ix_mail_attachment_previews_source_hash", "source_hash"),
+    )
+
+    id: Mapped[UUIDType] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUIDType] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    message_id: Mapped[UUIDType | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mail_messages.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    folder_name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    imap_uid: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    attachment_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    source_content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    preview_content_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    preview_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    preview_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    account: Mapped["MailAccount"] = relationship(back_populates="attachment_previews")
+    message: Mapped["MailMessage | None"] = relationship(back_populates="attachment_previews")
 
 
 class AuditLog(Base):

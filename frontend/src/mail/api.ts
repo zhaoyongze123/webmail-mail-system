@@ -1,7 +1,9 @@
 import type {
   ApiResponse,
+  MessageAttachment,
   AuthCredentials,
   AuthPayload,
+  AttachmentPreviewStatusPayload,
   ContactListQuery,
   ContactListPayload,
   ContactPayload,
@@ -17,10 +19,14 @@ import type {
   ChangePasswordPayload,
   ChangePasswordResult,
   MailSignature,
+  NotificationSubscriptionStatusPayload,
+  NotificationStatusPayload,
   SignatureDefaultPayload,
   SignatureListPayload,
   SignatureUpdatePayload,
   SignatureUpsertPayload,
+  PushSubscriptionPayload,
+  PushSubscriptionRecord,
   SettingsPayload,
   UserSettingsPreferences,
 } from './types';
@@ -28,6 +34,12 @@ import { translateText } from '../i18n/runtime';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 const CSRF_COOKIE_NAME = 'webmail_csrf';
+const messageDetailCache = new Map<string, MessageDetailPayload>();
+const messageDetailPending = new Map<string, Promise<MessageDetailPayload>>();
+
+function messageDetailKey(folder: string, uid: string) {
+  return `${folder}::${uid}`;
+}
 
 function readCookie(name: string): string | null {
   const prefix = `${encodeURIComponent(name)}=`;
@@ -174,10 +186,114 @@ export async function updateMessageOperation(
   });
 }
 
-export async function fetchMessageDetail(folder: string, uid: string): Promise<MessageDetailPayload> {
-  return requestApi<MessageDetailPayload>(`/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}`, {
-    method: 'GET',
+export async function fetchMessageDetail(
+  folder: string,
+  uid: string,
+  options: { force?: boolean } = {},
+): Promise<MessageDetailPayload> {
+  const key = messageDetailKey(folder, uid);
+  if (!options.force) {
+    const cached = messageDetailCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const pending = messageDetailPending.get(key);
+    if (pending) {
+      return pending;
+    }
+  }
+  const request = requestApi<MessageDetailPayload>(
+    `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}`,
+    { method: 'GET' },
+  ).then((payload) => {
+    messageDetailCache.set(key, payload);
+    messageDetailPending.delete(key);
+    return payload;
+  }).catch((error) => {
+    messageDetailPending.delete(key);
+    throw error;
   });
+  messageDetailPending.set(key, request);
+  return request;
+}
+
+export async function fetchAttachmentPreviewStatus(
+  folder: string,
+  uid: string,
+  attachmentId: string,
+): Promise<AttachmentPreviewStatusPayload> {
+  return requestApi<AttachmentPreviewStatusPayload>(
+    `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(attachmentId)}/preview/status`,
+    { method: 'GET' },
+  );
+}
+
+export function primeMessageDetailCache(folder: string, uid: string): Promise<MessageDetailPayload> {
+  return fetchMessageDetail(folder, uid);
+}
+
+function canPreviewAttachmentForPrefetch(attachment: MessageAttachment) {
+  const lowerType = String(attachment.content_type || '').toLowerCase();
+  const lowerName = String(attachment.filename || '').toLowerCase();
+  return (
+    lowerType.startsWith('image/') ||
+    lowerType === 'application/pdf' ||
+    lowerType.startsWith('text/') ||
+    lowerType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    /\.(png|jpe?g|gif|webp|bmp|svg|pdf|txt|md|json|docx)$/i.test(lowerName)
+  );
+}
+
+function resolveAttachmentId(attachment: MessageAttachment) {
+  return String(attachment.attachment_id || attachment.id || '');
+}
+
+function buildAttachmentPreviewThumbnailUrl(folder: string, uid: string, attachmentId: string) {
+  return `/api/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(attachmentId)}/preview-thumbnail`;
+}
+
+export async function primeMessageAttachmentPreviewCache(folder: string, uid: string): Promise<void> {
+  const detail = await fetchMessageDetail(folder, uid);
+  const attachments = Array.isArray(detail.attachments) ? detail.attachments : [];
+  const previewableAttachments = attachments
+    .filter((attachment) => canPreviewAttachmentForPrefetch(attachment))
+    .slice(0, 3);
+  await Promise.all(previewableAttachments.map(async (attachment) => {
+    const attachmentId = resolveAttachmentId(attachment);
+    if (!attachmentId) {
+      return;
+    }
+    const status = await fetchAttachmentPreviewStatus(folder, uid, attachmentId);
+    if (status.thumbnail_ready) {
+      const image = new window.Image();
+      image.decoding = 'async';
+      image.src = buildAttachmentPreviewThumbnailUrl(folder, uid, attachmentId);
+    }
+  }));
+}
+
+export function clearMessageDetailCache(folder?: string, uid?: string): void {
+  if (folder && uid) {
+    const key = messageDetailKey(folder, uid);
+    messageDetailCache.delete(key);
+    messageDetailPending.delete(key);
+    return;
+  }
+  if (folder) {
+    for (const key of [...messageDetailCache.keys()]) {
+      if (key.startsWith(`${folder}::`)) {
+        messageDetailCache.delete(key);
+      }
+    }
+    for (const key of [...messageDetailPending.keys()]) {
+      if (key.startsWith(`${folder}::`)) {
+        messageDetailPending.delete(key);
+      }
+    }
+    return;
+  }
+  messageDetailCache.clear();
+  messageDetailPending.clear();
 }
 
 export async function fetchContacts(queryOrOptions: string | ContactListQuery = '', limit = 10): Promise<ContactListPayload> {
@@ -312,6 +428,43 @@ export function formatDateByTimezone(
 export async function changePassword(payload: ChangePasswordPayload): Promise<ChangePasswordResult> {
   return requestApi<ChangePasswordResult>('/api/settings/password', {
     method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchPushSubscriptionStatus(): Promise<NotificationSubscriptionStatusPayload> {
+  return requestApi<NotificationSubscriptionStatusPayload>('/api/notifications/push-subscription', {
+    method: 'GET',
+  });
+}
+
+export async function savePushSubscriptionRecord(
+  payload: PushSubscriptionPayload,
+): Promise<{ subscription: PushSubscriptionRecord | null }> {
+  return requestApi<{ subscription: PushSubscriptionRecord | null }>('/api/notifications/push-subscription', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deletePushSubscriptionRecord(): Promise<{ deleted: boolean }> {
+  return requestApi<{ deleted: boolean }>('/api/notifications/push-subscription', {
+    method: 'DELETE',
+  });
+}
+
+export async function fetchNotificationStatus(): Promise<NotificationStatusPayload> {
+  return requestApi<NotificationStatusPayload>('/api/notifications/status', {
+    method: 'GET',
+  });
+}
+
+export async function saveNotificationPreferences(payload: {
+  enabled: boolean;
+  permission_state?: string;
+}): Promise<NotificationStatusPayload> {
+  return requestApi<NotificationStatusPayload>('/api/notifications/preferences', {
+    method: 'PUT',
     body: JSON.stringify(payload),
   });
 }
