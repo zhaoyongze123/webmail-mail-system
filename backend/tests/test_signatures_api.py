@@ -108,11 +108,37 @@ def build_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
         lambda package_name: "2.0.0" if package_name == "email-validator" else original_version(package_name),
     )
 
+    for module_name in [
+        "app.config",
+        "app.cache",
+        "app.redis_client",
+        "app.db",
+        "app.models",
+        "app.observability",
+        "app.security",
+        "app.mail_directory",
+        "app.auth",
+        "app.main",
+        "app.signatures",
+        "app.mail_state",
+        "app.mail_preferences",
+        "app.mailbox",
+        "app.compose",
+        "app.attachments",
+        "app.drafts",
+        "app.contacts",
+    ]:
+        sys.modules.pop(module_name, None)
+
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
     db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
+
+    config_module.get_settings.cache_clear()
+    redis_client_module.get_redis_client.cache_clear()
+    db_module.get_engine.cache_clear()
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_settings", lambda: settings)

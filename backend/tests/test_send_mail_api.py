@@ -16,6 +16,7 @@ from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.cache import SessionStore
 from app.errors import AppError
@@ -375,11 +376,38 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
         lambda package_name: "2.0.0" if package_name == "email-validator" else original_version(package_name),
     )
 
+    for module_name in [
+        "app.config",
+        "app.cache",
+        "app.redis_client",
+        "app.db",
+        "app.models",
+        "app.observability",
+        "app.security",
+        "app.mail_directory",
+        "app.mail_state",
+        "app.mail_preferences",
+        "app.contacts",
+        "app.attachments",
+        "app.drafts",
+        "app.mailbox",
+        "app.notifications",
+        "app.responses",
+        "app.auth",
+        "app.main",
+        "app.compose",
+    ]:
+        sys.modules.pop(module_name, None)
+
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
     db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
+
+    config_module.get_settings.cache_clear()
+    redis_client_module.get_redis_client.cache_clear()
+    db_module.get_engine.cache_clear()
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
@@ -388,13 +416,15 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
     monkeypatch.setattr(mail_adapters_module, "SmtpAdapter", FakeSmtpAdapter)
 
-    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     monkeypatch.setattr(db_module, "get_engine", lambda database_url=None: engine)
     db_module.Base.metadata.drop_all(engine)
     db_module.Base.metadata.create_all(engine)
 
-    sys.modules.pop("app.auth", None)
-    sys.modules.pop("app.main", None)
     auth_module = importlib.import_module("app.auth")
     monkeypatch.setattr(auth_module, "get_settings", lambda: settings, raising=False)
     monkeypatch.setattr(auth_module, "get_redis_client", lambda: fake_redis, raising=False)
@@ -402,6 +432,10 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     main_module = importlib.import_module("app.main")
     monkeypatch.setattr(main_module, "get_settings", lambda: settings, raising=False)
+    observability_module = importlib.import_module("app.observability")
+    globals()["record_audit_event"] = observability_module.record_audit_event
+    globals()["get_recent_audit_events"] = observability_module.get_recent_audit_events
+    globals()["reset_observability_state"] = observability_module.reset_observability_state
 
     compose_module = importlib.import_module("app.compose")
     original_build_message = compose_module._build_message

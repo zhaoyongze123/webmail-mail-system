@@ -380,24 +380,15 @@ def build_app(
         lambda package_name: "2.0.0" if package_name == "email-validator" else original_version(package_name),
     )
 
-    config_module = importlib.import_module("app.config")
-    cache_module = importlib.import_module("app.cache")
-    redis_client_module = importlib.import_module("app.redis_client")
-    db_module = importlib.import_module("app.db")
-    mail_adapters_module = importlib.import_module("app.mail_adapters")
-
-    monkeypatch.setattr(config_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(cache_module, "get_redis_client", lambda: fake_redis)
-    monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
-    monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
-
-    old_mailbox_module = sys.modules.get("app.mailbox")
-    old_executor = getattr(old_mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", None) if old_mailbox_module else None
-    if old_executor is not None:
-        old_executor.shutdown(wait=True, cancel_futures=True)
-
     for module_name in [
+        "app.config",
+        "app.cache",
+        "app.redis_client",
+        "app.db",
+        "app.models",
+        "app.observability",
+        "app.security",
+        "app.mail_directory",
         "app.mail_state",
         "app.mail_preferences",
         "app.mailbox",
@@ -409,6 +400,27 @@ def build_app(
         "app.admin_api",
     ]:
         sys.modules.pop(module_name, None)
+
+    config_module = importlib.import_module("app.config")
+    cache_module = importlib.import_module("app.cache")
+    redis_client_module = importlib.import_module("app.redis_client")
+    db_module = importlib.import_module("app.db")
+    mail_adapters_module = importlib.import_module("app.mail_adapters")
+
+    config_module.get_settings.cache_clear()
+    redis_client_module.get_redis_client.cache_clear()
+    db_module.get_engine.cache_clear()
+
+    monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cache_module, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(redis_client_module, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(mail_adapters_module, "ImapAdapter", FakeImapAdapter)
+
+    old_mailbox_module = sys.modules.get("app.mailbox")
+    old_executor = getattr(old_mailbox_module, "MAILBOX_BACKGROUND_EXECUTOR", None) if old_mailbox_module else None
+    if old_executor is not None:
+        old_executor.shutdown(wait=True, cancel_futures=True)
 
     models_module = importlib.import_module("app.models")
     engine = create_engine(
