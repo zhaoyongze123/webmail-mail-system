@@ -2290,6 +2290,12 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
         for message in cached_messages:
             uid_text = str(message.imap_uid)
             detail_payload = detail_cache.get(_message_detail_cache_key(session.email, folder, uid_text)) or {}
+            row_payload = detail_cache.get(_message_row_cache_key(session.email, folder, uid_text)) or {}
+            cached_search_text = str(
+                detail_payload.get("search_text")
+                or row_payload.get("_search_text")
+                or ""
+            )
             rows[uid_text] = {
                 "uid": str(message.imap_uid),
                 "message_id": message.message_id,
@@ -2305,9 +2311,9 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
                 "has_attachments": bool(message.has_attachments),
                 "attachment_types": [],
                 "snippet": str(message.snippet or ""),
-                "html_body": str(detail_payload.get("html_body") or ""),
-                "text_body": str(detail_payload.get("text_body") or ""),
-                "_search_text": str(detail_payload.get("search_text") or ""),
+                "html_body": str(detail_payload.get("html_body") or row_payload.get("html_body") or ""),
+                "text_body": str(detail_payload.get("text_body") or row_payload.get("text_body") or ""),
+                "_search_text": cached_search_text,
             }
     except Exception:
         for uid in uids:

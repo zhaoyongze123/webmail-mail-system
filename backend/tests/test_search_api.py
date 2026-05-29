@@ -349,6 +349,7 @@ def _search_cache_key(
 
 def build_client(monkeypatch: pytest.MonkeyPatch, mailbox_state: dict[str, object]) -> TestClient:
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    FakeSearchImapAdapter.instances = []
     settings = make_settings()
     settings.mailbox_state = mailbox_state  # type: ignore[attr-defined]
     settings._mailbox_state = mailbox_state  # type: ignore[attr-defined]
@@ -404,11 +405,31 @@ def build_client(monkeypatch: pytest.MonkeyPatch, mailbox_state: dict[str, objec
         lambda package_name: "2.0.0" if package_name == "email-validator" else original_version(package_name),
     )
 
+    sys.modules.pop("app.config", None)
+    sys.modules.pop("app.cache", None)
+    sys.modules.pop("app.redis_client", None)
+    sys.modules.pop("app.db", None)
+    sys.modules.pop("app.mail_state", None)
+    sys.modules.pop("app.mail_preferences", None)
+    sys.modules.pop("app.notifications", None)
+    sys.modules.pop("app.attachments", None)
+    sys.modules.pop("app.compose", None)
+    sys.modules.pop("app.drafts", None)
+    sys.modules.pop("app.contacts", None)
+    sys.modules.pop("app.signatures", None)
+    sys.modules.pop("app.auth", None)
+    sys.modules.pop("app.mailbox", None)
+    sys.modules.pop("app.main", None)
+
     config_module = importlib.import_module("app.config")
     cache_module = importlib.import_module("app.cache")
     redis_client_module = importlib.import_module("app.redis_client")
     db_module = importlib.import_module("app.db")
     mail_adapters_module = importlib.import_module("app.mail_adapters")
+
+    config_module.get_settings.cache_clear()
+    redis_client_module.get_redis_client.cache_clear()
+    db_module.get_engine.cache_clear()
 
     monkeypatch.setattr(config_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cache_module, "get_settings", lambda: settings)
@@ -424,9 +445,6 @@ def build_client(monkeypatch: pytest.MonkeyPatch, mailbox_state: dict[str, objec
     db_module.Base.metadata.drop_all(engine)
     db_module.Base.metadata.create_all(engine)
 
-    sys.modules.pop("app.auth", None)
-    sys.modules.pop("app.mailbox", None)
-    sys.modules.pop("app.main", None)
     auth_module = importlib.import_module("app.auth")
     monkeypatch.setattr(auth_module, "get_settings", lambda: settings, raising=False)
     monkeypatch.setattr(auth_module, "get_redis_client", lambda: fake_redis, raising=False)
