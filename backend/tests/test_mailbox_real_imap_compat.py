@@ -10,6 +10,16 @@ from app.auth import AuthSession
 from app.mail_adapters import MailAdapterError
 
 
+class FakeSettings:
+    def __init__(self) -> None:
+        self.app_env = "test"
+        self.attachment_preview_cache_dir = "/tmp/webmail-preview-cache-test"
+        self.attachment_preview_cache_ttl_seconds = 3600
+        self.attachment_preview_cache_max_mb = 32
+        self.attachment_preview_housekeeping_interval_seconds = 1
+        self.attachment_preview_processing_timeout_seconds = 30
+
+
 @dataclass
 class FakeCompatMessage:
     uid: str
@@ -114,6 +124,11 @@ def _session() -> AuthSession:
         smtp={},
         preferences={},
     )
+
+
+@pytest.fixture(autouse=True)
+def patch_mailbox_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.mailbox.get_settings", lambda: FakeSettings())
 
 
 def test_search_messages_falls_back_to_local_filter_for_real_imap(monkeypatch: pytest.MonkeyPatch) -> None:

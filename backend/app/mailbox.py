@@ -1243,6 +1243,11 @@ def _message_detail_cache_key(email: str, folder: str, uid: str) -> str:
     return f"mail:detail:{email.strip().lower()}:{folder}:{uid}"
 
 
+def _message_row_cache_key(email: str, folder: str, uid: str) -> str:
+    """生成单封邮件摘要缓存键，供无数据库环境下回填搜索/列表。"""
+    return f"mail:row:{email.strip().lower()}:{folder}:{uid}"
+
+
 def _message_attachment_cache_key(email: str, folder: str, uid: str, attachment_id: str) -> str:
     """生成单个附件内容缓存键。"""
     return f"mail:attachment:{email.strip().lower()}:{folder}:{uid}:{attachment_id}"
@@ -1380,8 +1385,6 @@ def _schedule_attachment_preview_generation_from_detail(
     detail: dict[str, Any],
 ) -> None:
     """批量调度当前邮件中可预览附件的预热任务。"""
-    if _is_test_runtime():
-        return
     attachments = detail.get("attachments") if isinstance(detail.get("attachments"), list) else []
     for item in attachments:
         if isinstance(item, dict):
@@ -1391,19 +1394,6 @@ def _schedule_attachment_preview_generation_from_detail(
 
 def _annotate_attachment_preview_state(session: AuthSession, folder: str, uid: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """把预览状态附着到附件元数据上，供前端静默加载和轮询。"""
-    if _is_test_runtime():
-        annotated: list[dict[str, Any]] = []
-        for item in attachments:
-            if not isinstance(item, dict):
-                continue
-            copied = dict(item)
-            filename = str(copied.get("filename") or "attachment")
-            content_type = str(copied.get("content_type") or "application/octet-stream")
-            copied["preview_kind"] = _preview_kind(filename, content_type)
-            copied["preview_status"] = {"status": "missing", "ready": False}
-            copied["preview_ready"] = False
-            annotated.append(copied)
-        return annotated
     normalized_email = session.email.strip().lower()
     attachment_ids = [str(item.get("attachment_id") or "") for item in attachments if isinstance(item, dict)]
     status_map: dict[str, dict[str, Any]] = {}
@@ -2279,15 +2269,17 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
     if not uid_values:
         return {}
 
+    detail_cache = JsonCache(redis_client.get_redis_client())
+    rows: dict[str, dict[str, Any]] = {}
     try:
         session_factory = get_session_factory()
         with session_factory() as db_session:
             account = db_session.scalar(select(MailAccount).where(MailAccount.email == session.email.strip().lower()))
             if account is None:
-                return {}
+                raise LookupError("account-missing")
             folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
             if folder_row is None:
-                return {}
+                raise LookupError("folder-missing")
             cached_messages = db_session.scalars(
                 select(MailMessage).where(
                     MailMessage.account_id == account.id,
@@ -2295,33 +2287,34 @@ def _cached_message_rows(session: AuthSession, folder: str, uids: list[str]) -> 
                     MailMessage.imap_uid.in_(uid_values),
                 )
             ).all()
+        for message in cached_messages:
+            uid_text = str(message.imap_uid)
+            detail_payload = detail_cache.get(_message_detail_cache_key(session.email, folder, uid_text)) or {}
+            rows[uid_text] = {
+                "uid": str(message.imap_uid),
+                "message_id": message.message_id,
+                "subject": str(message.subject or "(无主题)"),
+                "sender": {
+                    "name": str(message.sender_name or ""),
+                    "email": str(message.sender_email or ""),
+                },
+                "to": [{"name": "", "email": email} for email in (message.to_emails or [])],
+                "cc": [{"name": "", "email": email} for email in (message.cc_emails or [])],
+                "date": _datetime_to_iso(message.sent_at),
+                "read": bool(message.is_read),
+                "has_attachments": bool(message.has_attachments),
+                "attachment_types": [],
+                "snippet": str(message.snippet or ""),
+                "html_body": str(detail_payload.get("html_body") or ""),
+                "text_body": str(detail_payload.get("text_body") or ""),
+                "_search_text": str(detail_payload.get("search_text") or ""),
+            }
     except Exception:
-        return {}
-
-    detail_cache = JsonCache(redis_client.get_redis_client())
-    rows: dict[str, dict[str, Any]] = {}
-    for message in cached_messages:
-        uid_text = str(message.imap_uid)
-        detail_payload = detail_cache.get(_message_detail_cache_key(session.email, folder, uid_text)) or {}
-        rows[uid_text] = {
-            "uid": str(message.imap_uid),
-            "message_id": message.message_id,
-            "subject": str(message.subject or "(无主题)"),
-            "sender": {
-                "name": str(message.sender_name or ""),
-                "email": str(message.sender_email or ""),
-            },
-            "to": [{"name": "", "email": email} for email in (message.to_emails or [])],
-            "cc": [{"name": "", "email": email} for email in (message.cc_emails or [])],
-            "date": _datetime_to_iso(message.sent_at),
-            "read": bool(message.is_read),
-            "has_attachments": bool(message.has_attachments),
-            "attachment_types": [],
-            "snippet": str(message.snippet or ""),
-            "html_body": str(detail_payload.get("html_body") or ""),
-            "text_body": str(detail_payload.get("text_body") or ""),
-            "_search_text": str(detail_payload.get("search_text") or ""),
-        }
+        for uid in uids:
+            uid_text = str(uid)
+            cached_row = detail_cache.get(_message_row_cache_key(session.email, folder, uid_text))
+            if isinstance(cached_row, dict):
+                rows[uid_text] = cached_row
     return rows
 
 
@@ -2336,63 +2329,66 @@ def _persist_message_cache(
     """把邮件摘要和详情分别落到数据库与 Redis 缓存。"""
     normalized_email = session.email.strip().lower()
     settings = get_settings()
-    session_factory = get_session_factory()
-    with session_factory() as db_session:
-        account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
-        if account is None:
-            account = MailAccount(
-                email=normalized_email,
-                display_name=None,
-                imap_host=settings.mail_imap_host,
-                imap_port=settings.mail_imap_port,
-                imap_ssl=settings.mail_imap_ssl,
-                smtp_host=settings.mail_smtp_host,
-                smtp_port=settings.mail_smtp_port,
-                smtp_ssl=settings.mail_smtp_ssl,
-            )
-            db_session.add(account)
-            db_session.flush()
-        folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
-        if folder_row is None:
-            folder_row = MailFolder(
-                account_id=account.id,
-                name=folder,
-                display_name=folder,
-                folder_type="custom",
-                delimiter="/",
-            )
-            db_session.add(folder_row)
-            db_session.flush()
+    try:
+        session_factory = get_session_factory()
+        with session_factory() as db_session:
+            account = db_session.scalar(select(MailAccount).where(MailAccount.email == normalized_email))
+            if account is None:
+                account = MailAccount(
+                    email=normalized_email,
+                    display_name=None,
+                    imap_host=settings.mail_imap_host,
+                    imap_port=settings.mail_imap_port,
+                    imap_ssl=settings.mail_imap_ssl,
+                    smtp_host=settings.mail_smtp_host,
+                    smtp_port=settings.mail_smtp_port,
+                    smtp_ssl=settings.mail_smtp_ssl,
+                )
+                db_session.add(account)
+                db_session.flush()
+            folder_row = db_session.scalar(select(MailFolder).where(MailFolder.account_id == account.id, MailFolder.name == folder))
+            if folder_row is None:
+                folder_row = MailFolder(
+                    account_id=account.id,
+                    name=folder,
+                    display_name=folder,
+                    folder_type="custom",
+                    delimiter="/",
+                )
+                db_session.add(folder_row)
+                db_session.flush()
 
-        uid_value = int(str(summary["uid"]))
-        message = db_session.scalar(
-            select(MailMessage).where(
-                MailMessage.account_id == account.id,
-                MailMessage.folder_id == folder_row.id,
-                MailMessage.imap_uid == uid_value,
+            uid_value = int(str(summary["uid"]))
+            message = db_session.scalar(
+                select(MailMessage).where(
+                    MailMessage.account_id == account.id,
+                    MailMessage.folder_id == folder_row.id,
+                    MailMessage.imap_uid == uid_value,
+                )
             )
-        )
-        if message is None:
-            message = MailMessage(account_id=account.id, folder_id=folder_row.id, imap_uid=uid_value)
-            db_session.add(message)
+            if message is None:
+                message = MailMessage(account_id=account.id, folder_id=folder_row.id, imap_uid=uid_value)
+                db_session.add(message)
 
-        sender = summary.get("sender") if isinstance(summary.get("sender"), dict) else {}
-        to_items = detail.get("to") if isinstance(detail.get("to"), list) else summary.get("to", [])
-        cc_items = detail.get("cc") if isinstance(detail.get("cc"), list) else summary.get("cc", [])
+            sender = summary.get("sender") if isinstance(summary.get("sender"), dict) else {}
+            to_items = detail.get("to") if isinstance(detail.get("to"), list) else summary.get("to", [])
+            cc_items = detail.get("cc") if isinstance(detail.get("cc"), list) else summary.get("cc", [])
 
-        message.message_id = str(summary.get("message_id") or "") or None
-        message.subject = str(summary.get("subject") or "")
-        message.sender_name = str(sender.get("name") or "") or None
-        message.sender_email = str(sender.get("email") or "") or None
-        message.to_emails = [str(item.get("email") or "") for item in to_items if isinstance(item, dict) and item.get("email")]
-        message.cc_emails = [str(item.get("email") or "") for item in cc_items if isinstance(item, dict) and item.get("email")]
-        message.sent_at = datetime.fromisoformat(str(summary["date"])) if summary.get("date") else None
-        message.received_at = message.sent_at
-        message.snippet = str(summary.get("snippet") or "")
-        message.has_attachments = bool(detail.get("attachments"))
-        message.is_read = bool(summary.get("read"))
-        message.cached_at = datetime.now(timezone.utc)
-        db_session.commit()
+            message.message_id = str(summary.get("message_id") or "") or None
+            message.subject = str(summary.get("subject") or "")
+            message.sender_name = str(sender.get("name") or "") or None
+            message.sender_email = str(sender.get("email") or "") or None
+            message.to_emails = [str(item.get("email") or "") for item in to_items if isinstance(item, dict) and item.get("email")]
+            message.cc_emails = [str(item.get("email") or "") for item in cc_items if isinstance(item, dict) and item.get("email")]
+            message.sent_at = datetime.fromisoformat(str(summary["date"])) if summary.get("date") else None
+            message.received_at = message.sent_at
+            message.snippet = str(summary.get("snippet") or "")
+            message.has_attachments = bool(detail.get("attachments"))
+            message.is_read = bool(summary.get("read"))
+            message.cached_at = datetime.now(timezone.utc)
+            db_session.commit()
+    except Exception:
+        pass
     detail_cache = JsonCache(redis_client.get_redis_client())
     uid_text = str(summary["uid"])
     html_body = str(detail.get("html_body") or "")
@@ -2413,6 +2409,26 @@ def _persist_message_cache(
             "attachments": detail.get("attachments") if isinstance(detail.get("attachments"), list) else [],
             "search_text": re.sub(r"\s+", " ", f"{text_body} {re.sub(r'<[^>]+>', ' ', html_body)}").strip(),
             "raw_b64": b64encode(raw_message).decode("ascii") if isinstance(raw_message, (bytes, bytearray)) else "",
+        },
+        ttl_seconds=3600,
+    )
+    detail_cache.set(
+        _message_row_cache_key(session.email, folder, uid_text),
+        {
+            "uid": uid_text,
+            "message_id": summary.get("message_id"),
+            "subject": str(summary.get("subject") or "(无主题)"),
+            "sender": summary.get("sender") if isinstance(summary.get("sender"), dict) else {"name": "", "email": ""},
+            "to": detail.get("to") if isinstance(detail.get("to"), list) else [],
+            "cc": detail.get("cc") if isinstance(detail.get("cc"), list) else [],
+            "date": detail.get("date") or summary.get("date"),
+            "read": bool(summary.get("read")),
+            "has_attachments": bool(detail.get("attachments")),
+            "attachment_types": [],
+            "snippet": str(summary.get("snippet") or ""),
+            "html_body": html_body,
+            "text_body": text_body,
+            "_search_text": re.sub(r"\s+", " ", f"{text_body} {re.sub(r'<[^>]+>', ' ', html_body)}").strip(),
         },
         ttl_seconds=3600,
     )
@@ -2526,12 +2542,13 @@ def search_messages(
         adapter.select_folder(folder)
         uids = _uid_search(adapter, "ALL")
         cached_rows = _cached_message_rows(session, folder, uids)
-        rows: list[dict[str, Any]] = [cached_rows[str(uid)] for uid in uids if str(uid) in cached_rows]
-        if not rows:
-            candidate_uids = _page_uids(uids, page, page_size)
-            for uid in candidate_uids:
+        rows: list[dict[str, Any]] = []
+        for uid in uids:
+            row = cached_rows.get(str(uid))
+            if row is None:
                 raw = _uid_fetch_message_bytes(adapter, uid)
-                rows.append(_message_summary(uid, raw))
+                row = _message_summary(uid, raw)
+            rows.append(row)
         rows = _move_blacklisted_messages(session, adapter, folder, rows)
         sync_message_summaries(session.email, folder, rows, total_count=len(rows))
         messages = [
